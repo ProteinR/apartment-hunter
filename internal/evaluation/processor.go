@@ -31,6 +31,11 @@ type Processor struct {
 	Store        HistoryStore
 	Analyzer     AnalyzerWithUsage
 	PhotoLoader  PhotoLoader
+	Geocoder     ListingGeocoder
+}
+
+type ListingGeocoder interface {
+	Resolve(ctx context.Context, query string, maxDistanceMeters int) (domain.LocationPreference, error)
 }
 
 type Result struct {
@@ -63,6 +68,9 @@ func (p Processor) ProcessMessage(ctx context.Context, source domain.ListingSour
 		record.Status = "rejected_basic"
 		return p.finish(ctx, record)
 	}
+
+	listing = p.geocodeListing(ctx, listing)
+	record.Listing = listing
 
 	if p.PhotoLoader != nil && len(message.Photos) > 0 {
 		loaded, err := p.PhotoLoader.LoadPhotos(ctx, message, listing)
@@ -122,6 +130,29 @@ func (p Processor) ProcessMessage(ctx context.Context, source domain.ListingSour
 		}
 	}
 	return p.finish(ctx, record)
+}
+
+func (p Processor) geocodeListing(ctx context.Context, listing domain.ApartmentListing) domain.ApartmentListing {
+	if p.Geocoder == nil || listing.Latitude != 0 || listing.Longitude != 0 {
+		return listing
+	}
+	query := strings.TrimSpace(listing.Description)
+	if query == "" {
+		query = listing.Title
+	}
+	if query == "" {
+		return listing
+	}
+	loc, err := p.Geocoder.Resolve(ctx, query, 0)
+	if err != nil || loc.Latitude == 0 || loc.Longitude == 0 {
+		return listing
+	}
+	listing.Latitude = loc.Latitude
+	listing.Longitude = loc.Longitude
+	if listing.District == "" {
+		listing.District = loc.Name
+	}
+	return listing
 }
 
 func listingWithHashablePhotos(listing domain.ApartmentListing) domain.ApartmentListing {

@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"time"
 
+	"apartment-hunter/internal/adapters/geocodingmock"
+	"apartment-hunter/internal/adapters/googlemaps"
 	"apartment-hunter/internal/adapters/openaivision"
 	"apartment-hunter/internal/adapters/telegram"
 	"apartment-hunter/internal/adapters/telegramuserbot"
@@ -18,6 +20,7 @@ import (
 	"apartment-hunter/internal/dedup"
 	"apartment-hunter/internal/domain"
 	"apartment-hunter/internal/evaluation"
+	"apartment-hunter/internal/geocoding"
 	"apartment-hunter/internal/interview"
 	"apartment-hunter/internal/listingparser"
 	"apartment-hunter/internal/preferences"
@@ -47,7 +50,7 @@ func (a App) Run(args []string) error {
 		if len(args) > 1 {
 			path = args[1]
 		}
-		prefs, err := interview.New(a.In, a.Out).Run()
+		prefs, err := interview.NewWithResolver(a.In, a.Out, newLocationResolver()).Run()
 		if err != nil {
 			return err
 		}
@@ -72,18 +75,25 @@ func (a App) Run(args []string) error {
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		fmt.Fprintf(a.Out, "Telegram bot started. Saving preferences to %s\n", outputDir)
-		return telegram.New(token, outputDir).Run(ctx.Done())
+		store, err := openPostgresStore(ctx)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		fmt.Fprintf(a.Out, "Telegram bot started. Saving profiles to Postgres\n")
+		return telegram.New(token, outputDir, telegram.WithLocationResolver(newLocationResolver()), telegram.WithProfileStore(store)).Run(ctx.Done())
 	case "telegram-read":
-		if len(args) != 3 {
-			return fmt.Errorf("usage: apartment-hunter telegram-read profiles.json profile_id")
+		profileID, err := profileIDArg(args, "telegram-read")
+		if err != nil {
+			return err
 		}
-		return a.telegramRead(args[1], args[2])
+		return a.telegramRead(profileID)
 	case "telegram-process":
-		if len(args) != 3 {
-			return fmt.Errorf("usage: apartment-hunter telegram-process profiles.json profile_id")
+		profileID, err := profileIDArg(args, "telegram-process")
+		if err != nil {
+			return err
 		}
-		return a.telegramProcess(args[1], args[2])
+		return a.telegramProcess(profileID)
 	case "help", "-h", "--help":
 		return a.printHelp()
 	default:
@@ -91,56 +101,62 @@ func (a App) Run(args []string) error {
 	}
 }
 
-func (a App) telegramProcess(profilesPath, profileID string) error {
-	cfg, err := profiles.Load(profilesPath)
-	if err != nil {
-		return err
-	}
-	profile, ok := cfg.Find(profileID)
-	if !ok {
-		return fmt.Errorf("profile %q not found", profileID)
-	}
-	if len(profile.Channels) == 0 {
-		return fmt.Errorf("profile %q has no telegram channels configured", profileID)
-	}
-	prefs, err := preferences.Load(profile.PreferencesPath)
-	if err != nil {
-		return err
-	}
+func (a App) telegramProcess(profileID string) error {
 	reader, err := telegramuserbot.FromEnv(a.In)
 	if err != nil {
 		return err
-	}
-	databaseURL := strings.TrimSpace(os.Getenv("DATABASE_URL"))
-	if databaseURL == "" {
-		return fmt.Errorf("DATABASE_URL is required")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	store, err := pgstore.Open(ctx, databaseURL)
+	store, err := openPostgresStore(ctx)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
+	profile, ok, err := store.GetProfile(ctx, profileID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("profile %q not found", profileID)
+	}
+	if profile.Preferences == nil {
+		return fmt.Errorf("profile %q has no preferences configured; run /start in the Telegram bot first", profileID)
+	}
+	if len(profile.Channels) == 0 {
+		return fmt.Errorf("profile %q has no telegram channels configured", profileID)
+	}
 
 	analyzer, err := openaivision.FromEnv()
 	if err != nil {
 		return err
 	}
 	processor := evaluation.Processor{
-		Prefs:        prefs,
+		Prefs:        *profile.Preferences,
 		Deduplicator: dedup.NewService(dedup.NewImageHasher(), store),
 		Store:        store,
 		Analyzer:     analyzer,
 		PhotoLoader:  reader,
+		Geocoder:     newGoogleGeocoder(),
 	}
 
 	botToken := strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN"))
 	pollInterval := envDuration("APARTMENT_HUNTER_POLL_INTERVAL", 0)
 	for {
-		processed, sent, err := a.processProfileOnce(ctx, &cfg, profilesPath, profileID, profile, reader, processor, botToken)
+		profile, ok, err = store.GetProfile(ctx, profileID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("profile %q not found", profileID)
+		}
+		if profile.Preferences == nil {
+			return fmt.Errorf("profile %q has no preferences configured; run /start in the Telegram bot first", profileID)
+		}
+		processor.Prefs = *profile.Preferences
+		processed, sent, err := a.processProfileOnce(ctx, store, profileID, profile, reader, processor, botToken)
 		if err != nil {
 			return err
 		}
@@ -156,63 +172,43 @@ func (a App) telegramProcess(profilesPath, profileID string) error {
 	}
 }
 
-func (a App) processProfileOnce(ctx context.Context, cfg *profiles.Config, profilesPath, profileID string, profile profiles.Profile, reader *telegramuserbot.Client, processor evaluation.Processor, botToken string) (int, int, error) {
+func (a App) processProfileOnce(ctx context.Context, store *pgstore.Repository, profileID string, profile profiles.Profile, reader *telegramuserbot.Client, processor evaluation.Processor, botToken string) (int, int, error) {
 	processed := 0
 	sent := 0
-	for profileIndex := range cfg.Profiles {
-		if cfg.Profiles[profileIndex].ID != profileID {
-			continue
+	for _, sub := range profile.Channels {
+		messages, cursor, err := reader.Fetch(ctx, sub.Source, sub.Cursor, sub.Limit)
+		if err != nil {
+			return processed, sent, err
 		}
-		for channelIndex := range cfg.Profiles[profileIndex].Channels {
-			sub := &cfg.Profiles[profileIndex].Channels[channelIndex]
-			messages, cursor, err := reader.Fetch(ctx, sub.Source, sub.Cursor, sub.Limit)
+		if err := store.UpdateProfileChannelCursor(ctx, profileID, sub.Source, cursor); err != nil {
+			return processed, sent, err
+		}
+		for _, message := range messages {
+			if strings.TrimSpace(message.Text) == "" && len(message.Photos) == 0 {
+				continue
+			}
+			source := domain.ListingSourceRef{
+				Source:         "telegram",
+				ProfileID:      profileID,
+				TelegramChatID: profile.TelegramChatID,
+			}
+			result, err := processor.ProcessMessage(ctx, source, message)
 			if err != nil {
 				return processed, sent, err
 			}
-			sub.Cursor = cursor
-			if err := profiles.Save(profilesPath, *cfg); err != nil {
-				return processed, sent, err
-			}
-			for _, message := range messages {
-				if strings.TrimSpace(message.Text) == "" && len(message.Photos) == 0 {
-					continue
-				}
-				source := domain.ListingSourceRef{
-					Source:         "telegram",
-					ProfileID:      profileID,
-					TelegramChatID: profile.TelegramChatID,
-				}
-				result, err := processor.ProcessMessage(ctx, source, message)
-				if err != nil {
+			processed++
+			if result.Record.Status == "passed" && botToken != "" && profile.TelegramChatID != 0 {
+				if err := telegram.SendText(ctx, botToken, profile.TelegramChatID, evaluation.NotificationText(result.Record)); err != nil {
 					return processed, sent, err
 				}
-				processed++
-				if result.Record.Status == "passed" && botToken != "" && profile.TelegramChatID != 0 {
-					if err := telegram.SendText(ctx, botToken, profile.TelegramChatID, evaluation.NotificationText(result.Record)); err != nil {
-						return processed, sent, err
-					}
-					sent++
-				}
+				sent++
 			}
 		}
-		break
 	}
 	return processed, sent, nil
 }
 
-func (a App) telegramRead(profilesPath, profileID string) error {
-	cfg, err := profiles.Load(profilesPath)
-	if err != nil {
-		return err
-	}
-	profile, ok := cfg.Find(profileID)
-	if !ok {
-		return fmt.Errorf("profile %q not found", profileID)
-	}
-	if len(profile.Channels) == 0 {
-		return fmt.Errorf("profile %q has no telegram channels configured", profileID)
-	}
-
+func (a App) telegramRead(profileID string) error {
 	reader, err := telegramuserbot.FromEnv(a.In)
 	if err != nil {
 		return err
@@ -221,42 +217,53 @@ func (a App) telegramRead(profilesPath, profileID string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	store, err := openPostgresStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	profile, ok, err := store.GetProfile(ctx, profileID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("profile %q not found", profileID)
+	}
+	if len(profile.Channels) == 0 {
+		return fmt.Errorf("profile %q has no telegram channels configured", profileID)
+	}
+
 	encoder := json.NewEncoder(a.Out)
 	encoder.SetIndent("", "  ")
-	for profileIndex := range cfg.Profiles {
-		if cfg.Profiles[profileIndex].ID != profileID {
-			continue
+	for _, sub := range profile.Channels {
+		messages, cursor, err := reader.Fetch(ctx, sub.Source, sub.Cursor, sub.Limit)
+		if err != nil {
+			return err
 		}
-		for channelIndex := range cfg.Profiles[profileIndex].Channels {
-			sub := &cfg.Profiles[profileIndex].Channels[channelIndex]
-			messages, cursor, err := reader.Fetch(ctx, sub.Source, sub.Cursor, sub.Limit)
-			if err != nil {
+		if err := store.UpdateProfileChannelCursor(ctx, profileID, sub.Source, cursor); err != nil {
+			return err
+		}
+		for _, message := range messages {
+			if strings.TrimSpace(message.Text) == "" && len(message.Photos) == 0 {
+				continue
+			}
+			output := struct {
+				ProfileID string                  `json:"profile_id"`
+				Source    string                  `json:"source"`
+				Link      string                  `json:"link,omitempty"`
+				Listing   domain.ApartmentListing `json:"listing"`
+			}{
+				ProfileID: profileID,
+				Source:    message.ChannelID,
+				Link:      message.Link,
+				Listing:   geocodeListingPreview(ctx, listingparser.FromChannelMessage(message), newGoogleGeocoder()),
+			}
+			if err := encoder.Encode(output); err != nil {
 				return err
 			}
-			sub.Cursor = cursor
-			for _, message := range messages {
-				if strings.TrimSpace(message.Text) == "" && len(message.Photos) == 0 {
-					continue
-				}
-				output := struct {
-					ProfileID string                  `json:"profile_id"`
-					Source    string                  `json:"source"`
-					Link      string                  `json:"link,omitempty"`
-					Listing   domain.ApartmentListing `json:"listing"`
-				}{
-					ProfileID: profileID,
-					Source:    message.ChannelID,
-					Link:      message.Link,
-					Listing:   listingparser.FromChannelMessage(message),
-				}
-				if err := encoder.Encode(output); err != nil {
-					return err
-				}
-			}
 		}
-		break
 	}
-	return profiles.Save(profilesPath, cfg)
+	return nil
 }
 
 func (a App) score(listingPath, prefsPath string) error {
@@ -273,6 +280,7 @@ func (a App) score(listingPath, prefsPath string) error {
 	if err != nil {
 		return err
 	}
+	listing = geocodeListingPreview(context.Background(), listing, newGoogleGeocoder())
 
 	evaluator, err := newVisionEvaluator()
 	if err != nil {
@@ -295,6 +303,50 @@ func newVisionEvaluator() (scoring.InsightsEvaluator, error) {
 	}
 }
 
+func newLocationResolver() geocoding.Resolver {
+	google := newGoogleGeocoder()
+	if google == nil {
+		return geocodingmock.New()
+	}
+	return geocoding.RequiredChain{google, geocodingmock.NewKnown()}
+}
+
+func newGoogleGeocoder() *googlemaps.Geocoder {
+	apiKey := strings.TrimSpace(os.Getenv("APARTMENT_HUNTER_GOOGLE_MAPS_API_KEY"))
+	if apiKey == "" {
+		return nil
+	}
+	region := strings.TrimSpace(os.Getenv("APARTMENT_HUNTER_GEOCODING_REGION"))
+	if region == "" {
+		region = "Batumi, Georgia"
+	}
+	geocoder := googlemaps.NewGeocoder(apiKey, region)
+	if language := strings.TrimSpace(os.Getenv("APARTMENT_HUNTER_GEOCODING_LANGUAGE")); language != "" {
+		geocoder.Language = language
+	}
+	return geocoder
+}
+
+func geocodeListingPreview(ctx context.Context, listing domain.ApartmentListing, resolver geocoding.Resolver) domain.ApartmentListing {
+	if resolver == nil || listing.Latitude != 0 || listing.Longitude != 0 {
+		return listing
+	}
+	query := strings.TrimSpace(listing.Description)
+	if query == "" {
+		query = listing.Title
+	}
+	loc, err := resolver.Resolve(ctx, query, 0)
+	if err != nil || loc.Latitude == 0 || loc.Longitude == 0 {
+		return listing
+	}
+	listing.Latitude = loc.Latitude
+	listing.Longitude = loc.Longitude
+	if listing.District == "" {
+		listing.District = loc.Name
+	}
+	return listing
+}
+
 func envDuration(name string, fallback time.Duration) time.Duration {
 	value := strings.TrimSpace(os.Getenv(name))
 	if value == "" {
@@ -307,12 +359,30 @@ func envDuration(name string, fallback time.Duration) time.Duration {
 	return duration
 }
 
+func openPostgresStore(ctx context.Context) (*pgstore.Repository, error) {
+	databaseURL := strings.TrimSpace(os.Getenv("DATABASE_URL"))
+	if databaseURL == "" {
+		return nil, fmt.Errorf("DATABASE_URL is required")
+	}
+	return pgstore.Open(ctx, databaseURL)
+}
+
+func profileIDArg(args []string, command string) (string, error) {
+	if len(args) == 2 {
+		return args[1], nil
+	}
+	if len(args) == 3 {
+		return args[2], nil
+	}
+	return "", fmt.Errorf("usage: apartment-hunter %s profile_id", command)
+}
+
 func (a App) printHelp() error {
 	_, err := fmt.Fprintln(a.Out, `Usage:
   apartment-hunter interview [preferences.yaml]
   apartment-hunter score sample_listing.json preferences.yaml
-  TELEGRAM_BOT_TOKEN=... apartment-hunter telegram [output_dir]
-  TELEGRAM_API_ID=... TELEGRAM_API_HASH=... TELEGRAM_PHONE=... apartment-hunter telegram-read profiles.json profile_id
-  DATABASE_URL=... TELEGRAM_API_ID=... TELEGRAM_API_HASH=... TELEGRAM_PHONE=... apartment-hunter telegram-process profiles.json profile_id`)
+  DATABASE_URL=... TELEGRAM_BOT_TOKEN=... apartment-hunter telegram
+  DATABASE_URL=... TELEGRAM_API_ID=... TELEGRAM_API_HASH=... TELEGRAM_PHONE=... apartment-hunter telegram-read profile_id
+  DATABASE_URL=... TELEGRAM_API_ID=... TELEGRAM_API_HASH=... TELEGRAM_PHONE=... apartment-hunter telegram-process profile_id`)
 	return err
 }

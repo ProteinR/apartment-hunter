@@ -17,20 +17,20 @@ services:
 
   bot:
     build: .
-    command: ["telegram", "/app/preferences"]
+    command: ["telegram"]
     depends_on:
       postgres:
         condition: service_healthy
     env_file:
       - .env
-    volumes:
-      - app-preferences:/app/preferences
+    environment:
+      DATABASE_URL: postgres://apartment_hunter:apartment_hunter@postgres:5432/apartment_hunter?sslmode=disable
 
   worker:
     build: .
     profiles:
       - worker
-    command: ["telegram-process", "/app/preferences/profiles.json", "${APARTMENT_HUNTER_PROFILE_ID:-telegram_0}"]
+    command: ["telegram-process", "${APARTMENT_HUNTER_PROFILE_ID:-telegram_0}"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -41,10 +41,8 @@ services:
       TELEGRAM_SESSION_FILE: /app/.telegram/userbot.session
       TELEGRAM_MEDIA_DIR: /app/.telegram/media
     volumes:
-      - app-preferences:/app/preferences
       - telegram-session:/app/.telegram
 
 volumes:
   postgres-data:
-  app-preferences:
   telegram-session:

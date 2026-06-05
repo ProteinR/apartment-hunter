@@ -7,19 +7,25 @@ import (
 	"strings"
 
 	"apartment-hunter/internal/domain"
+	"apartment-hunter/internal/geocoding"
 )
 
 type Interview struct {
-	in  *bufio.Reader
-	out io.Writer
+	in       *bufio.Reader
+	out      io.Writer
+	resolver geocoding.Resolver
 }
 
 func New(in io.Reader, out io.Writer) Interview {
-	return Interview{in: bufio.NewReader(in), out: out}
+	return NewWithResolver(in, out, nil)
+}
+
+func NewWithResolver(in io.Reader, out io.Writer, resolver geocoding.Resolver) Interview {
+	return Interview{in: bufio.NewReader(in), out: out, resolver: resolver}
 }
 
 func (i Interview) Run() (domain.UserPreferences, error) {
-	session := NewSession()
+	session := NewSessionWithResolver(i.resolver)
 	for {
 		question, ok := session.CurrentQuestion()
 		if !ok {

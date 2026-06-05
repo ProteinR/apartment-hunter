@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"apartment-hunter/internal/domain"
+	"apartment-hunter/internal/geocoding"
 	"apartment-hunter/internal/sources"
 )
 
@@ -31,7 +32,7 @@ func FromChannelMessage(message sources.ChannelMessage) domain.ApartmentListing 
 		})
 	}
 
-	return domain.ApartmentListing{
+	listing := domain.ApartmentListing{
 		ID:          listingID(message),
 		Title:       title,
 		Description: text,
@@ -39,6 +40,11 @@ func FromChannelMessage(message sources.ChannelMessage) domain.ApartmentListing 
 		AreaM2:      parseArea(text),
 		Photos:      photos,
 	}
+	if lat, lng, ok := geocoding.FindCoordinates(text); ok {
+		listing.Latitude = lat
+		listing.Longitude = lng
+	}
+	return listing
 }
 
 func listingID(message sources.ChannelMessage) string {

@@ -46,6 +46,29 @@ create index if not exists listing_evaluations_message_idx
 alter table listing_evaluations
 	add column if not exists report text;
 
+create table if not exists profiles (
+	id text primary key,
+	telegram_chat_id bigint unique,
+	preferences jsonb,
+	created_at timestamptz not null default now(),
+	updated_at timestamptz not null default now()
+);
+
+create table if not exists profile_channels (
+	profile_id text not null references profiles(id) on delete cascade,
+	channel_id text not null,
+	username text,
+	title text,
+	cursor jsonb not null default '{}'::jsonb,
+	limit_count integer not null default 50,
+	created_at timestamptz not null default now(),
+	updated_at timestamptz not null default now(),
+	primary key (profile_id, channel_id)
+);
+
+create index if not exists profile_channels_username_idx
+	on profile_channels (username);
+
 create table if not exists listing_images (
 	id bigserial primary key,
 	listing_id text not null,

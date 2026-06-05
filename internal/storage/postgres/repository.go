@@ -5,10 +5,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"apartment-hunter/internal/dedup"
 	"apartment-hunter/internal/domain"
+	"apartment-hunter/internal/profiles"
+	"apartment-hunter/internal/sources"
 
 	_ "github.com/lib/pq"
 )
@@ -44,6 +47,148 @@ func (r *Repository) Close() error {
 func (r *Repository) Migrate(ctx context.Context) error {
 	_, err := r.db.ExecContext(ctx, schemaSQL)
 	return err
+}
+
+func (r *Repository) UpsertProfile(ctx context.Context, profile profiles.Profile) error {
+	var preferencesJSON any
+	if profile.Preferences != nil {
+		data, err := json.Marshal(profile.Preferences)
+		if err != nil {
+			return err
+		}
+		preferencesJSON = data
+	}
+	_, err := r.db.ExecContext(ctx, `
+		insert into profiles (id, telegram_chat_id, preferences)
+		values ($1, $2, $3)
+		on conflict (id) do update set
+			telegram_chat_id = coalesce(excluded.telegram_chat_id, profiles.telegram_chat_id),
+			preferences = coalesce(excluded.preferences, profiles.preferences),
+			updated_at = now()
+	`, profile.ID, nullInt64(profile.TelegramChatID), preferencesJSON)
+	return err
+}
+
+func (r *Repository) GetProfile(ctx context.Context, id string) (profiles.Profile, bool, error) {
+	var profile profiles.Profile
+	var preferencesJSON []byte
+	err := r.db.QueryRowContext(ctx, `
+		select id, coalesce(telegram_chat_id, 0), preferences
+		from profiles
+		where id = $1
+	`, id).Scan(&profile.ID, &profile.TelegramChatID, &preferencesJSON)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return profiles.Profile{}, false, nil
+		}
+		return profiles.Profile{}, false, err
+	}
+	if len(preferencesJSON) > 0 {
+		var prefs domain.UserPreferences
+		if err := json.Unmarshal(preferencesJSON, &prefs); err != nil {
+			return profiles.Profile{}, false, err
+		}
+		profile.Preferences = &prefs
+	}
+	channels, err := r.listProfileChannels(ctx, id)
+	if err != nil {
+		return profiles.Profile{}, false, err
+	}
+	profile.Channels = channels
+	return profile, true, nil
+}
+
+func (r *Repository) UpsertProfileChannel(ctx context.Context, profileID string, sub profiles.ChannelSubscription) (bool, error) {
+	sub = normalizeSubscription(sub)
+	exists, err := r.profileChannelExists(ctx, profileID, sub.Source)
+	if err != nil {
+		return false, err
+	}
+	if err := r.UpsertProfile(ctx, profiles.Profile{ID: profileID}); err != nil {
+		return false, err
+	}
+	cursorJSON, err := json.Marshal(sub.Cursor)
+	if err != nil {
+		return false, err
+	}
+	_, err = r.db.ExecContext(ctx, `
+		insert into profile_channels (profile_id, channel_id, username, title, cursor, limit_count)
+		values ($1, $2, $3, $4, $5, $6)
+		on conflict (profile_id, channel_id) do update set
+			username = excluded.username,
+			title = excluded.title,
+			limit_count = excluded.limit_count,
+			updated_at = now()
+	`, profileID, sub.Source.ID, nullString(sub.Source.Username), nullString(sub.Source.Title), cursorJSON, sub.Limit)
+	return !exists, err
+}
+
+func (r *Repository) RemoveProfileChannel(ctx context.Context, profileID, channel string) (bool, error) {
+	channel = strings.TrimPrefix(strings.TrimSpace(channel), "@")
+	result, err := r.db.ExecContext(ctx, `
+		delete from profile_channels
+		where profile_id = $1 and (lower(channel_id) = lower($2) or lower(coalesce(username, '')) = lower($2))
+	`, profileID, channel)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	return affected > 0, err
+}
+
+func (r *Repository) UpdateProfileChannelCursor(ctx context.Context, profileID string, source sources.ChannelRef, cursor sources.Cursor) error {
+	source = normalizeChannel(source)
+	cursorJSON, err := json.Marshal(cursor)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.ExecContext(ctx, `
+		update profile_channels
+		set cursor = $3, updated_at = now()
+		where profile_id = $1 and channel_id = $2
+	`, profileID, source.ID, cursorJSON)
+	return err
+}
+
+func (r *Repository) listProfileChannels(ctx context.Context, profileID string) ([]profiles.ChannelSubscription, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		select channel_id, coalesce(username, ''), coalesce(title, ''), cursor, limit_count
+		from profile_channels
+		where profile_id = $1
+		order by created_at asc
+	`, profileID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var channels []profiles.ChannelSubscription
+	for rows.Next() {
+		var sub profiles.ChannelSubscription
+		var cursorJSON []byte
+		if err := rows.Scan(&sub.Source.ID, &sub.Source.Username, &sub.Source.Title, &cursorJSON, &sub.Limit); err != nil {
+			return nil, err
+		}
+		if len(cursorJSON) > 0 {
+			if err := json.Unmarshal(cursorJSON, &sub.Cursor); err != nil {
+				return nil, err
+			}
+		}
+		channels = append(channels, sub)
+	}
+	return channels, rows.Err()
+}
+
+func (r *Repository) profileChannelExists(ctx context.Context, profileID string, source sources.ChannelRef) (bool, error) {
+	source = normalizeChannel(source)
+	var exists bool
+	err := r.db.QueryRowContext(ctx, `
+		select exists (
+			select 1 from profile_channels
+			where profile_id = $1 and channel_id = $2
+		)
+	`, profileID, source.ID).Scan(&exists)
+	return exists, err
 }
 
 func (r *Repository) SaveEvaluation(ctx context.Context, record domain.ListingEvaluationRecord) error {
@@ -249,6 +394,33 @@ func nullInt64(value int64) any {
 		return nil
 	}
 	return value
+}
+
+func nullString(value string) any {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return value
+}
+
+func normalizeSubscription(sub profiles.ChannelSubscription) profiles.ChannelSubscription {
+	if sub.Limit <= 0 {
+		sub.Limit = 50
+	}
+	sub.Source = normalizeChannel(sub.Source)
+	return sub
+}
+
+func normalizeChannel(source sources.ChannelRef) sources.ChannelRef {
+	source.Username = strings.TrimPrefix(strings.TrimSpace(source.Username), "@")
+	source.ID = strings.TrimPrefix(strings.TrimSpace(source.ID), "@")
+	if source.ID == "" {
+		source.ID = source.Username
+	}
+	if source.Username == "" {
+		source.Username = source.ID
+	}
+	return source
 }
 
 func usageField(usage *domain.AIUsage, getter func(domain.AIUsage) string) any {

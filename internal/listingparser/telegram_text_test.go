@@ -46,3 +46,13 @@ func TestFromChannelMessageDoesNotTreatAreaAsPrice(t *testing.T) {
 		t.Fatalf("expected area 45, got %.1f", listing.AreaM2)
 	}
 }
+
+func TestFromChannelMessageParsesCoordinates(t *testing.T) {
+	listing := FromChannelMessage(sources.ChannelMessage{
+		Text: "Flat near park\nhttps://maps.google.com/?q=41.6466,41.6266\n50 m2\n$600",
+	})
+
+	if listing.Latitude != 41.6466 || listing.Longitude != 41.6266 {
+		t.Fatalf("unexpected coordinates %.6f %.6f", listing.Latitude, listing.Longitude)
+	}
+}

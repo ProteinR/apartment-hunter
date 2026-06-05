@@ -15,13 +15,13 @@ MVP сервиса для оценки квартир в аренду в Бат�
 - `internal/adapters/cli` - CLI adapter.
 - `internal/adapters/telegram` - Telegram adapter через `github.com/go-telegram/bot` long polling.
 - `internal/adapters/telegramuserbot` - Telegram Userbot/MTProto adapter через `github.com/gotd/td` для чтения каналов.
-- `internal/profiles` - per-user profiles: preferences path, Telegram chat id, channel subscriptions and cursors.
+- `internal/profiles` - per-user profiles: Telegram chat id, preferences, channel subscriptions and cursors.
 - `internal/sources` - общий контракт источника сообщений каналов.
 - `internal/adapters/visionmock` - mock evaluator фотографий и описания.
 - `internal/adapters/openaivision` - real evaluator через OpenAI Responses API с Vision input и structured JSON output.
 - `internal/adapters/geocodingmock` - mock координат районов.
 - `internal/evaluation` - end-to-end обработка объявления: базовые фильтры, dedup, AI анализ, scoring, запись истории.
-- `internal/storage/postgres` - Postgres repository для истории проверок, image hashes и duplicate records.
+- `internal/storage/postgres` - Postgres repository для профилей, preferences, истории проверок, image hashes и duplicate records.
 - `configs` - пример предпочтений.
 - `examples` - sample listings.
 
@@ -77,41 +77,24 @@ OpenAI adapter берет текст объявления (`title`, `description
 Запустить Telegram adapter:
 
 ```bash
-go run ./cmd/apartment-hunter telegram preferences
+DATABASE_URL='postgres://apartment_hunter:apartment_hunter@localhost:5432/apartment_hunter?sslmode=disable' \
+TELEGRAM_BOT_TOKEN=123:abc \
+  go run ./cmd/apartment-hunter telegram
 ```
 
-В боте отправьте `/start`. Adapter использует тот же пошаговый `internal/interview` engine, что и CLI. После завершения опроса он сохраняет оба файла:
+В боте отправьте `/start`. Adapter использует тот же пошаговый `internal/interview` engine, что и CLI. После завершения опроса он сохраняет профиль `telegram_<chat_id>` и preferences в Postgres.
 
-- `preferences/preferences_<chat_id>.yaml`
-- `preferences/preferences_<chat_id>.json`
-- `preferences/profiles.json`
+Локации можно указывать словами или координатами. Если задан `APARTMENT_HUNTER_GOOGLE_MAPS_API_KEY`, бот геокодит названия через Google Maps Geocoding API. По умолчанию короткие названия ищутся с регионом `Batumi, Georgia`, чтобы `Europe Square` не резолвился в другой город. Несколько кастомных мест разделяйте `;`, потому что запятая используется в координатах и адресах:
 
-`profiles.json` позволяет одному боту обслуживать разных людей без хардкода критериев. Каждый профиль привязан к `telegram_<chat_id>`, хранит свой `preferences_path`, список каналов и cursor чтения по каждому каналу. Каналы можно добавить вручную:
-
-```json
-{
-  "profiles": [
-    {
-      "id": "telegram_42",
-      "telegram_chat_id": 42,
-      "preferences_path": "preferences/preferences_42.yaml",
-      "channels": [
-        {
-          "source": {
-            "id": "batumi_rentals",
-            "title": "Batumi rentals",
-            "username": "example_channel"
-          },
-          "cursor": {
-            "last_message_id": 0
-          },
-          "limit": 50
-        }
-      ]
-    }
-  ]
-}
+```text
+Europe Square
+41.6466, 41.6266
+Europe Square; Old Boulevard; 41.6466, 41.6266
 ```
+
+Дистанция до квартиры считается по координатам через haversine. Worker сначала пытается взять координаты из текста объявления или Google Maps ссылки, например `?q=41.6466,41.6266`; если координат нет и задан Google Maps API key, он пробует геокодить текст объявления.
+
+Postgres-профили позволяют одному боту обслуживать разных людей без хардкода критериев. Каждый профиль привязан к `telegram_<chat_id>` и хранит preferences, список каналов и cursor чтения по каждому каналу.
 
 Каналами также можно управлять прямо из Telegram-бота:
 
@@ -129,10 +112,11 @@ TELEGRAM_API_HASH=abc123 \
 TELEGRAM_PHONE=+995555000000 \
 TELEGRAM_SESSION_FILE=.telegram/userbot.session \
 TELEGRAM_MEDIA_DIR=.telegram/media \
-  go run ./cmd/apartment-hunter telegram-read preferences/profiles.json telegram_42
+DATABASE_URL='postgres://apartment_hunter:apartment_hunter@localhost:5432/apartment_hunter?sslmode=disable' \
+  go run ./cmd/apartment-hunter telegram-read telegram_42
 ```
 
-При первом запуске `gotd/td` запросит одноразовый Telegram code в терминале и сохранит user session в `TELEGRAM_SESSION_FILE`. Если на аккаунте включен 2FA password, задайте `TELEGRAM_PASSWORD`. Команда не скачивает фото, а выводит JSON records с текстом, ссылкой, download-token для фото и распарсенным `ApartmentListing`; затем обновляет `cursor.last_message_id` в `profiles.json`.
+При первом запуске `gotd/td` запросит одноразовый Telegram code в терминале и сохранит user session в `TELEGRAM_SESSION_FILE`. Если на аккаунте включен 2FA password, задайте `TELEGRAM_PASSWORD`. Команда не скачивает фото, а выводит JSON records с текстом, ссылкой, download-token для фото и распарсенным `ApartmentListing`; затем обновляет `cursor.last_message_id` в Postgres.
 
 Прочитать новые сообщения, сохранить историю проверки в Postgres и отправить подходящие объявления в Telegram:
 
@@ -145,7 +129,7 @@ TELEGRAM_PHONE=+995555000000 \
 TELEGRAM_SESSION_FILE=.telegram/userbot.session \
 TELEGRAM_MEDIA_DIR=.telegram/media \
 OPENAI_API_KEY=sk-... \
-  go run ./cmd/apartment-hunter telegram-process preferences/profiles.json telegram_42
+  go run ./cmd/apartment-hunter telegram-process telegram_42
 ```
 
 `telegram-process` делает один проход по новым сообщениям. Для постоянного polling задайте интервал:
@@ -179,9 +163,9 @@ docker compose up --build
 ```
 
 Эта команда запускает Postgres и Telegram preferences bot. Worker не стартует
-по умолчанию, потому что на чистом volume еще нет `/app/preferences/profiles.json`
-и профиля пользователя. Сначала откройте бота в Telegram, отправьте `/start`,
-пройдите интервью и добавьте каналы:
+по умолчанию, потому что на чистой БД еще нет профиля пользователя. Сначала
+откройте бота в Telegram, отправьте `/start`, пройдите интервью и добавьте
+каналы:
 
 ```text
 /subscribe @example_channel Batumi rentals
@@ -204,14 +188,16 @@ TELEGRAM_PHONE=+995555000000
 TELEGRAM_SESSION_STRING=
 OPENAI_API_KEY=sk-...
 APARTMENT_HUNTER_PROFILE_ID=telegram_42
+APARTMENT_HUNTER_GOOGLE_MAPS_API_KEY=...
+APARTMENT_HUNTER_GEOCODING_REGION=Batumi, Georgia
 ```
 
-Postgres доступен в compose как отдельный сервис `postgres`, данные хранятся в volume `postgres-data`. Preferences/profiles живут в volume `app-preferences`, Telegram userbot session и временно скачанные media files - в `telegram-session`.
+Postgres доступен в compose как отдельный сервис `postgres`, данные хранятся в volume `postgres-data`. Profiles, preferences, channel subscriptions и cursor'ы хранятся в Postgres. Telegram userbot session и временно скачанные media files живут в volume `telegram-session`.
 
 Для первого userbot login удобнее запустить worker интерактивно, чтобы ввести одноразовый Telegram code:
 
 ```bash
-docker compose run --rm worker telegram-process /app/preferences/profiles.json telegram_42
+docker compose run --rm worker telegram-process telegram_42
 ```
 
 Если уже есть Telethon session string, например из `telegram-mcp-app/session_string_generator.py`, можно задать его в `.env`:

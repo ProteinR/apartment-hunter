@@ -4,15 +4,13 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"apartment-hunter/internal/domain"
+	"apartment-hunter/internal/geocoding"
 	"apartment-hunter/internal/interview"
-	"apartment-hunter/internal/preferences"
 	"apartment-hunter/internal/profiles"
 	"apartment-hunter/internal/sources"
 
@@ -21,12 +19,19 @@ import (
 )
 
 type Bot struct {
-	token        string
-	outputDir    string
-	profilesPath string
-	client       *http.Client
-	sessions     map[int64]*interview.Session
-	mu           sync.Mutex
+	token    string
+	client   *http.Client
+	sessions map[int64]*interview.Session
+	resolver geocoding.Resolver
+	store    ProfileStore
+	mu       sync.Mutex
+}
+
+type ProfileStore interface {
+	UpsertProfile(ctx context.Context, profile profiles.Profile) error
+	GetProfile(ctx context.Context, id string) (profiles.Profile, bool, error)
+	UpsertProfileChannel(ctx context.Context, profileID string, sub profiles.ChannelSubscription) (bool, error)
+	RemoveProfileChannel(ctx context.Context, profileID, channel string) (bool, error)
 }
 
 type Option func(*Bot)
@@ -37,22 +42,23 @@ func WithHTTPClient(client *http.Client) Option {
 	}
 }
 
-func WithProfilesPath(path string) Option {
+func WithLocationResolver(resolver geocoding.Resolver) Option {
 	return func(bot *Bot) {
-		bot.profilesPath = path
+		bot.resolver = resolver
+	}
+}
+
+func WithProfileStore(store ProfileStore) Option {
+	return func(bot *Bot) {
+		bot.store = store
 	}
 }
 
 func New(token, outputDir string, opts ...Option) *Bot {
-	if outputDir == "" {
-		outputDir = "preferences"
-	}
 	bot := &Bot{
-		token:        token,
-		outputDir:    outputDir,
-		profilesPath: filepath.Join(outputDir, "profiles.json"),
-		client:       &http.Client{Timeout: 20 * time.Second},
-		sessions:     map[int64]*interview.Session{},
+		token:    token,
+		client:   &http.Client{Timeout: 20 * time.Second},
+		sessions: map[int64]*interview.Session{},
 	}
 	for _, opt := range opts {
 		opt(bot)
@@ -111,26 +117,29 @@ func (b *Bot) handleMessage(ctx context.Context, api *telegrambot.Bot, chatID in
 }
 
 func (b *Bot) handleText(chatID int64, text string) (string, error) {
+	if b.store == nil {
+		return "", fmt.Errorf("profile store is required")
+	}
 	text = strings.TrimSpace(text)
 	if strings.HasPrefix(text, "/channels") {
-		return b.listChannels(chatID)
+		return b.listChannels(context.Background(), chatID)
 	}
 	if strings.HasPrefix(text, "/subscribe") {
-		return b.subscribeChannel(chatID, text)
+		return b.subscribeChannel(context.Background(), chatID, text)
 	}
 	if strings.HasPrefix(text, "/unsubscribe") {
-		return b.unsubscribeChannel(chatID, text)
+		return b.unsubscribeChannel(context.Background(), chatID, text)
 	}
 	if text == "/start" || text == "/preferences" || text == "/restart" {
-		session := interview.NewSession()
+		session := interview.NewSessionWithResolver(b.resolver)
 		b.setSession(chatID, session)
 		question, _ := session.CurrentQuestion()
-		return "Starting preferences interview.\n" + question.Prompt, nil
+		return "Настроим поиск квартиры. Отвечайте коротко, можно на русском.\n\n" + question.Prompt, nil
 	}
 
 	session := b.getSession(chatID)
 	if session == nil {
-		return "Send /start to begin preferences interview.", nil
+		return "Отправьте /start, чтобы настроить поиск квартиры.", nil
 	}
 
 	next, done, err := session.Answer(text)
@@ -144,28 +153,17 @@ func (b *Bot) handleText(chatID int64, text string) (string, error) {
 
 	prefs := session.Preferences()
 	b.deleteSession(chatID)
-	if err := os.MkdirAll(b.outputDir, 0755); err != nil {
+	if err := b.saveProfile(context.Background(), chatID, prefs); err != nil {
 		return "", err
 	}
-	base := filepath.Join(b.outputDir, "preferences_"+strconv.FormatInt(chatID, 10))
-	if err := preferences.Save(base+".yaml", prefs); err != nil {
-		return "", err
-	}
-	if err := preferences.SaveJSON(base+".json", prefs); err != nil {
-		return "", err
-	}
-	if err := b.saveProfile(chatID, base+".yaml"); err != nil {
-		return "", err
-	}
-	return "Preferences saved:\n" + base + ".yaml\n" + base + ".json", nil
+	return "Готово, предпочтения сохранены.", nil
 }
 
-func (b *Bot) listChannels(chatID int64) (string, error) {
-	cfg, err := profiles.Load(b.profilesPath)
+func (b *Bot) listChannels(ctx context.Context, chatID int64) (string, error) {
+	profile, ok, err := b.store.GetProfile(ctx, profiles.IDForTelegramChat(chatID))
 	if err != nil {
 		return "", err
 	}
-	profile, ok := cfg.Find(profiles.IDForTelegramChat(chatID))
 	if !ok {
 		return "Send /start first to create your profile.", nil
 	}
@@ -187,7 +185,7 @@ func (b *Bot) listChannels(chatID int64) (string, error) {
 	return strings.Join(lines, "\n"), nil
 }
 
-func (b *Bot) subscribeChannel(chatID int64, text string) (string, error) {
+func (b *Bot) subscribeChannel(ctx context.Context, chatID int64, text string) (string, error) {
 	parts := strings.Fields(text)
 	if len(parts) < 2 {
 		return "Usage: /subscribe @channel_username optional title", nil
@@ -197,17 +195,11 @@ func (b *Bot) subscribeChannel(chatID int64, text string) (string, error) {
 		return "Usage: /subscribe @channel_username optional title", nil
 	}
 	title := strings.TrimSpace(strings.TrimPrefix(text, parts[0]+" "+parts[1]))
-	cfg, err := profiles.Load(b.profilesPath)
-	if err != nil {
+	profileID := profiles.IDForTelegramChat(chatID)
+	if err := b.store.UpsertProfile(ctx, profiles.Profile{ID: profileID, TelegramChatID: chatID}); err != nil {
 		return "", err
 	}
-	profileID := profiles.IDForTelegramChat(chatID)
-	profile, ok := cfg.Find(profileID)
-	if !ok {
-		profile = profiles.Profile{ID: profileID, TelegramChatID: chatID}
-		cfg.Upsert(profile)
-	}
-	added := cfg.UpsertChannel(profileID, profiles.ChannelSubscription{
+	added, err := b.store.UpsertProfileChannel(ctx, profileID, profiles.ChannelSubscription{
 		Source: sources.ChannelRef{
 			ID:       username,
 			Title:    title,
@@ -215,7 +207,7 @@ func (b *Bot) subscribeChannel(chatID int64, text string) (string, error) {
 		},
 		Limit: 50,
 	})
-	if err := profiles.Save(b.profilesPath, cfg); err != nil {
+	if err != nil {
 		return "", err
 	}
 	if added {
@@ -224,36 +216,28 @@ func (b *Bot) subscribeChannel(chatID int64, text string) (string, error) {
 	return "Updated subscription @" + username, nil
 }
 
-func (b *Bot) unsubscribeChannel(chatID int64, text string) (string, error) {
+func (b *Bot) unsubscribeChannel(ctx context.Context, chatID int64, text string) (string, error) {
 	parts := strings.Fields(text)
 	if len(parts) != 2 {
 		return "Usage: /unsubscribe @channel_username", nil
 	}
 	username := strings.TrimPrefix(strings.TrimSpace(parts[1]), "@")
-	cfg, err := profiles.Load(b.profilesPath)
+	removed, err := b.store.RemoveProfileChannel(ctx, profiles.IDForTelegramChat(chatID), username)
 	if err != nil {
 		return "", err
 	}
-	if !cfg.RemoveChannel(profiles.IDForTelegramChat(chatID), username) {
+	if !removed {
 		return "No subscription found for @" + username, nil
-	}
-	if err := profiles.Save(b.profilesPath, cfg); err != nil {
-		return "", err
 	}
 	return "Unsubscribed from @" + username, nil
 }
 
-func (b *Bot) saveProfile(chatID int64, preferencesPath string) error {
-	cfg, err := profiles.Load(b.profilesPath)
-	if err != nil {
-		return err
-	}
-	cfg.Upsert(profiles.Profile{
-		ID:              profiles.IDForTelegramChat(chatID),
-		TelegramChatID:  chatID,
-		PreferencesPath: preferencesPath,
+func (b *Bot) saveProfile(ctx context.Context, chatID int64, prefs domain.UserPreferences) error {
+	return b.store.UpsertProfile(ctx, profiles.Profile{
+		ID:             profiles.IDForTelegramChat(chatID),
+		TelegramChatID: chatID,
+		Preferences:    &prefs,
 	})
-	return profiles.Save(b.profilesPath, cfg)
 }
 
 func (b *Bot) getSession(chatID int64) *interview.Session {

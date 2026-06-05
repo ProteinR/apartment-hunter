@@ -2,6 +2,7 @@
 .gomodcache/
 .cache/
 .telegram/
+preferences/
 .env
 .env.*
 !.env.example

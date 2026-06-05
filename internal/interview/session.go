@@ -1,12 +1,14 @@
 package interview
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
 
 	"apartment-hunter/internal/adapters/geocodingmock"
 	"apartment-hunter/internal/domain"
+	"apartment-hunter/internal/geocoding"
 )
 
 type QuestionKind string
@@ -30,33 +32,41 @@ type Session struct {
 	step     int
 	distance int
 	done     bool
+	resolver geocoding.Resolver
 }
 
 func NewSession() *Session {
-	return &Session{}
+	return NewSessionWithResolver(geocodingmock.New())
+}
+
+func NewSessionWithResolver(resolver geocoding.Resolver) *Session {
+	if resolver == nil {
+		resolver = geocodingmock.New()
+	}
+	return &Session{resolver: resolver}
 }
 
 func Questions() []Question {
 	return []Question{
-		{ID: "min_budget", Prompt: "Minimum monthly budget (0 if none)", Kind: QuestionInt},
-		{ID: "max_budget", Prompt: "Maximum monthly budget", Kind: QuestionInt},
-		{ID: "min_area_m2", Prompt: "Minimum area, m2", Kind: QuestionFloat},
-		{ID: "require_dishwasher", Prompt: "Dishwasher required (y/n)", Kind: QuestionBool},
-		{ID: "require_oven", Prompt: "Oven required (y/n)", Kind: QuestionBool},
-		{ID: "max_distance_meters", Prompt: "Allowed distance from selected districts, meters", Kind: QuestionInt},
-		{ID: "add_6_may_park", Prompt: "Add 6 May Park (y/n)", Kind: QuestionBool},
-		{ID: "add_new_boulevard", Prompt: "Add New Boulevard (y/n)", Kind: QuestionBool},
-		{ID: "custom_locations", Prompt: "Custom districts or places, comma-separated (empty to skip)", Kind: QuestionString},
-		{ID: "desired_style", Prompt: "Desired renovation style", Kind: QuestionString},
-		{ID: "reject_glossy_ceilings", Prompt: "Reject glossy ceilings (y/n)", Kind: QuestionBool},
-		{ID: "reject_dark_walls", Prompt: "Reject dark walls (y/n)", Kind: QuestionBool},
-		{ID: "reject_old_renovation", Prompt: "Reject old renovation (y/n)", Kind: QuestionBool},
-		{ID: "reject_windows_facing_house", Prompt: "Reject windows facing neighboring house (y/n)", Kind: QuestionBool},
-		{ID: "importance_location", Prompt: "Importance of location from 0 to 5", Kind: QuestionImportance},
-		{ID: "importance_interior", Prompt: "Importance of interior from 0 to 5", Kind: QuestionImportance},
-		{ID: "importance_view", Prompt: "Importance of view from 0 to 5", Kind: QuestionImportance},
-		{ID: "importance_price", Prompt: "Importance of price from 0 to 5", Kind: QuestionImportance},
-		{ID: "importance_appliances", Prompt: "Importance of appliances from 0 to 5", Kind: QuestionImportance},
+		{ID: "min_budget", Prompt: "Минимальный бюджет в месяц? Напишите 0, если минимума нет", Kind: QuestionInt},
+		{ID: "max_budget", Prompt: "Максимальный бюджет в месяц?", Kind: QuestionInt},
+		{ID: "min_area_m2", Prompt: "Минимальная площадь, м2?", Kind: QuestionFloat},
+		{ID: "require_dishwasher", Prompt: "Посудомойка обязательна? да/нет", Kind: QuestionBool},
+		{ID: "require_oven", Prompt: "Духовка обязательна? да/нет", Kind: QuestionBool},
+		{ID: "max_distance_meters", Prompt: "Допустимое расстояние от выбранных мест, метров?", Kind: QuestionInt},
+		{ID: "add_6_may_park", Prompt: "Искать рядом с 6 May Park? да/нет", Kind: QuestionBool},
+		{ID: "add_new_boulevard", Prompt: "Искать рядом с New Boulevard? да/нет", Kind: QuestionBool},
+		{ID: "custom_locations", Prompt: "Другие районы, места или координаты? Несколько - через ;. Пусто или . чтобы пропустить", Kind: QuestionString},
+		{ID: "desired_style", Prompt: "Какой ремонт нравится? Можно обычным текстом", Kind: QuestionString},
+		{ID: "reject_glossy_ceilings", Prompt: "Отсеивать глянцевые потолки? да/нет", Kind: QuestionBool},
+		{ID: "reject_dark_walls", Prompt: "Отсеивать темные стены? да/нет", Kind: QuestionBool},
+		{ID: "reject_old_renovation", Prompt: "Отсеивать старый ремонт? да/нет", Kind: QuestionBool},
+		{ID: "reject_windows_facing_house", Prompt: "Отсеивать окна прямо в соседний дом? да/нет", Kind: QuestionBool},
+		{ID: "importance_location", Prompt: "Важность локации от 0 до 5?", Kind: QuestionImportance},
+		{ID: "importance_interior", Prompt: "Важность интерьера от 0 до 5?", Kind: QuestionImportance},
+		{ID: "importance_view", Prompt: "Важность вида из окна от 0 до 5?", Kind: QuestionImportance},
+		{ID: "importance_price", Prompt: "Важность цены от 0 до 5?", Kind: QuestionImportance},
+		{ID: "importance_appliances", Prompt: "Важность техники от 0 до 5?", Kind: QuestionImportance},
 	}
 }
 
@@ -101,13 +111,13 @@ func (s *Session) applyAnswer(question Question, input string) error {
 	case QuestionInt:
 		value, err := strconv.Atoi(input)
 		if err != nil {
-			return fmt.Errorf("enter an integer")
+			return fmt.Errorf("введите целое число")
 		}
 		s.setInt(question.ID, value)
 	case QuestionFloat:
 		value, err := strconv.ParseFloat(input, 64)
 		if err != nil {
-			return fmt.Errorf("enter a number")
+			return fmt.Errorf("введите число")
 		}
 		s.setFloat(question.ID, value)
 	case QuestionBool:
@@ -115,15 +125,19 @@ func (s *Session) applyAnswer(question Question, input string) error {
 		if err != nil {
 			return err
 		}
-		s.setBool(question.ID, value)
+		if err := s.setBool(question.ID, value); err != nil {
+			return err
+		}
 	case QuestionImportance:
 		value, err := strconv.Atoi(input)
 		if err != nil || value < 0 || value > 5 {
-			return fmt.Errorf("use a value from 0 to 5")
+			return fmt.Errorf("введите число от 0 до 5")
 		}
 		s.setImportance(question.ID, value)
 	case QuestionString:
-		s.setString(question.ID, input)
+		if err := s.setString(question.ID, input); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -145,7 +159,7 @@ func (s *Session) setFloat(id string, value float64) {
 	}
 }
 
-func (s *Session) setBool(id string, value bool) {
+func (s *Session) setBool(id string, value bool) error {
 	switch id {
 	case "require_dishwasher":
 		s.prefs.RequireDishwasher = value
@@ -153,11 +167,19 @@ func (s *Session) setBool(id string, value bool) {
 		s.prefs.RequireOven = value
 	case "add_6_may_park":
 		if value {
-			s.prefs.Locations = append(s.prefs.Locations, geocodingmock.Resolve("6 May Park", s.distance))
+			loc, err := s.resolveLocation("6 May Park")
+			if err != nil {
+				return err
+			}
+			s.prefs.Locations = append(s.prefs.Locations, loc)
 		}
 	case "add_new_boulevard":
 		if value {
-			s.prefs.Locations = append(s.prefs.Locations, geocodingmock.Resolve("New Boulevard", s.distance))
+			loc, err := s.resolveLocation("New Boulevard")
+			if err != nil {
+				return err
+			}
+			s.prefs.Locations = append(s.prefs.Locations, loc)
 		}
 	case "reject_glossy_ceilings":
 		s.prefs.Reject.GlossyCeilings = value
@@ -168,20 +190,29 @@ func (s *Session) setBool(id string, value bool) {
 	case "reject_windows_facing_house":
 		s.prefs.Reject.WindowsFacingHouse = value
 	}
+	return nil
 }
 
-func (s *Session) setString(id, value string) {
+func (s *Session) setString(id, value string) error {
 	switch id {
 	case "custom_locations":
-		for _, name := range strings.Split(value, ",") {
+		if value == "." {
+			return nil
+		}
+		for _, name := range strings.Split(value, ";") {
 			name = strings.TrimSpace(name)
-			if name != "" {
-				s.prefs.Locations = append(s.prefs.Locations, geocodingmock.Resolve(name, s.distance))
+			if name != "" && name != "." {
+				loc, err := s.resolveLocation(name)
+				if err != nil {
+					return err
+				}
+				s.prefs.Locations = append(s.prefs.Locations, loc)
 			}
 		}
 	case "desired_style":
 		s.prefs.DesiredStyle = value
 	}
+	return nil
 }
 
 func (s *Session) setImportance(id string, value int) {
@@ -201,11 +232,25 @@ func (s *Session) setImportance(id string, value int) {
 
 func parseBoolInput(input string) (bool, error) {
 	switch strings.ToLower(strings.TrimSpace(input)) {
-	case "y", "yes", "да", "true", "1":
+	case "y", "yes", "да", "д", "+", "true", "1":
 		return true, nil
-	case "n", "no", "нет", "false", "0":
+	case "n", "no", "нет", "н", "-", "false", "0":
 		return false, nil
 	default:
-		return false, fmt.Errorf("enter y or n")
+		return false, fmt.Errorf("ответьте да или нет")
 	}
+}
+
+func (s *Session) resolveLocation(name string) (domain.LocationPreference, error) {
+	loc, err := s.resolver.Resolve(context.Background(), name, s.distance)
+	if err != nil {
+		return domain.LocationPreference{}, fmt.Errorf("не удалось найти локацию %q: %w", name, err)
+	}
+	if strings.TrimSpace(loc.Name) == "" {
+		return domain.LocationPreference{}, fmt.Errorf("не удалось найти локацию %q", name)
+	}
+	if loc.Latitude == 0 || loc.Longitude == 0 {
+		return loc, nil
+	}
+	return loc, nil
 }

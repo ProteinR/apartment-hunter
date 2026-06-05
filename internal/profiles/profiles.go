@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"apartment-hunter/internal/domain"
 	"apartment-hunter/internal/sources"
 )
 
@@ -16,10 +17,11 @@ type Config struct {
 }
 
 type Profile struct {
-	ID              string                `json:"id"`
-	TelegramChatID  int64                 `json:"telegram_chat_id,omitempty"`
-	PreferencesPath string                `json:"preferences_path"`
-	Channels        []ChannelSubscription `json:"channels"`
+	ID              string                  `json:"id"`
+	TelegramChatID  int64                   `json:"telegram_chat_id,omitempty"`
+	PreferencesPath string                  `json:"preferences_path"`
+	Preferences     *domain.UserPreferences `json:"preferences,omitempty"`
+	Channels        []ChannelSubscription   `json:"channels"`
 }
 
 type ChannelSubscription struct {
@@ -66,6 +68,9 @@ func (c *Config) Upsert(profile Profile) {
 			}
 			if profile.PreferencesPath != "" {
 				c.Profiles[i].PreferencesPath = profile.PreferencesPath
+			}
+			if profile.Preferences != nil {
+				c.Profiles[i].Preferences = profile.Preferences
 			}
 			if profile.Channels != nil {
 				c.Profiles[i].Channels = profile.Channels
