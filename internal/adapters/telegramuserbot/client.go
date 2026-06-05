@@ -24,13 +24,14 @@ import (
 )
 
 type Config struct {
-	AppID       int
-	AppHash     string
-	Phone       string
-	Password    string
-	SessionPath string
-	MediaDir    string
-	CodeReader  io.Reader
+	AppID         int
+	AppHash       string
+	Phone         string
+	Password      string
+	SessionPath   string
+	SessionString string
+	MediaDir      string
+	CodeReader    io.Reader
 }
 
 type Client struct {
@@ -43,18 +44,19 @@ func FromEnv(codeReader io.Reader) (*Client, error) {
 		return nil, fmt.Errorf("TELEGRAM_API_ID is required")
 	}
 	cfg := Config{
-		AppID:       appID,
-		AppHash:     strings.TrimSpace(os.Getenv("TELEGRAM_API_HASH")),
-		Phone:       strings.TrimSpace(os.Getenv("TELEGRAM_PHONE")),
-		Password:    os.Getenv("TELEGRAM_PASSWORD"),
-		SessionPath: strings.TrimSpace(os.Getenv("TELEGRAM_SESSION_FILE")),
-		MediaDir:    strings.TrimSpace(os.Getenv("TELEGRAM_MEDIA_DIR")),
-		CodeReader:  codeReader,
+		AppID:         appID,
+		AppHash:       strings.TrimSpace(os.Getenv("TELEGRAM_API_HASH")),
+		Phone:         strings.TrimSpace(os.Getenv("TELEGRAM_PHONE")),
+		Password:      os.Getenv("TELEGRAM_PASSWORD"),
+		SessionPath:   strings.TrimSpace(os.Getenv("TELEGRAM_SESSION_FILE")),
+		SessionString: strings.TrimSpace(os.Getenv("TELEGRAM_SESSION_STRING")),
+		MediaDir:      strings.TrimSpace(os.Getenv("TELEGRAM_MEDIA_DIR")),
+		CodeReader:    codeReader,
 	}
 	if cfg.AppHash == "" {
 		return nil, fmt.Errorf("TELEGRAM_API_HASH is required")
 	}
-	if cfg.Phone == "" {
+	if cfg.Phone == "" && cfg.SessionString == "" {
 		return nil, fmt.Errorf("TELEGRAM_PHONE is required")
 	}
 	if cfg.SessionPath == "" {
@@ -77,11 +79,11 @@ func (c *Client) Fetch(ctx context.Context, channel sources.ChannelRef, cursor s
 	if limit <= 0 {
 		limit = 50
 	}
-	if err := os.MkdirAll(filepath.Dir(c.cfg.SessionPath), 0755); err != nil {
+	storage, err := c.sessionStorage(ctx)
+	if err != nil {
 		return nil, cursor, err
 	}
 
-	storage := &session.FileStorage{Path: c.cfg.SessionPath}
 	client := telegram.NewClient(c.cfg.AppID, c.cfg.AppHash, telegram.Options{
 		SessionStorage: storage,
 		NoUpdates:      true,
@@ -89,7 +91,7 @@ func (c *Client) Fetch(ctx context.Context, channel sources.ChannelRef, cursor s
 
 	var messages []sources.ChannelMessage
 	next := cursor
-	err := client.Run(ctx, func(ctx context.Context) error {
+	err = client.Run(ctx, func(ctx context.Context) error {
 		if err := c.authIfNeeded(ctx, client); err != nil {
 			return err
 		}
@@ -128,6 +130,24 @@ func (c *Client) Fetch(ctx context.Context, channel sources.ChannelRef, cursor s
 		return nil, cursor, err
 	}
 	return messages, next, nil
+}
+
+func (c *Client) sessionStorage(ctx context.Context) (session.Storage, error) {
+	if sessionString := strings.TrimSpace(c.cfg.SessionString); sessionString != "" {
+		data, err := session.TelethonSession(sessionString)
+		if err != nil {
+			return nil, fmt.Errorf("decode TELEGRAM_SESSION_STRING: %w", err)
+		}
+		storage := &session.StorageMemory{}
+		if err := (&session.Loader{Storage: storage}).Save(ctx, data); err != nil {
+			return nil, err
+		}
+		return storage, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(c.cfg.SessionPath), 0755); err != nil {
+		return nil, err
+	}
+	return &session.FileStorage{Path: c.cfg.SessionPath}, nil
 }
 
 func (c *Client) authIfNeeded(ctx context.Context, client *telegram.Client) error {
@@ -262,14 +282,17 @@ func (c *Client) DownloadPhotos(ctx context.Context, message sources.ChannelMess
 		return nil, nil
 	}
 
-	storage := &session.FileStorage{Path: c.cfg.SessionPath}
+	storage, err := c.sessionStorage(ctx)
+	if err != nil {
+		return nil, err
+	}
 	client := telegram.NewClient(c.cfg.AppID, c.cfg.AppHash, telegram.Options{
 		SessionStorage: storage,
 		NoUpdates:      true,
 	})
 
 	var downloaded []sources.ChannelPhoto
-	err := client.Run(ctx, func(ctx context.Context) error {
+	err = client.Run(ctx, func(ctx context.Context) error {
 		if err := c.authIfNeeded(ctx, client); err != nil {
 			return err
 		}

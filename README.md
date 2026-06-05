@@ -29,6 +29,15 @@ MVP сервиса для оценки квартир в аренду в Бат�
 
 Требуется Go 1.25+.
 
+Локальные секреты храните в `.env`:
+
+```bash
+cp .env.example .env
+set -a
+source .env
+set +a
+```
+
 ```bash
 go run ./cmd/apartment-hunter interview preferences.yaml
 ```
@@ -68,7 +77,7 @@ OpenAI adapter берет текст объявления (`title`, `description
 Запустить Telegram adapter:
 
 ```bash
-TELEGRAM_BOT_TOKEN=123:abc go run ./cmd/apartment-hunter telegram preferences
+go run ./cmd/apartment-hunter telegram preferences
 ```
 
 В боте отправьте `/start`. Adapter использует тот же пошаговый `internal/interview` engine, что и CLI. После завершения опроса он сохраняет оба файла:
@@ -159,10 +168,30 @@ OPENAI_VISION_OUTPUT_PRICE_PER_MILLION_USD=1.60
 
 ## Docker
 
-Поднять Postgres, Telegram bot и worker:
+Docker Compose автоматически читает `.env` из директории проекта. Создайте файл и заполните значения:
+
+```bash
+cp .env.example .env
+```
 
 ```bash
 docker compose up --build
+```
+
+Эта команда запускает Postgres и Telegram preferences bot. Worker не стартует
+по умолчанию, потому что на чистом volume еще нет `/app/preferences/profiles.json`
+и профиля пользователя. Сначала откройте бота в Telegram, отправьте `/start`,
+пройдите интервью и добавьте каналы:
+
+```text
+/subscribe @example_channel Batumi rentals
+```
+
+После этого укажите созданный profile id в `.env` и запустите worker:
+
+```bash
+APARTMENT_HUNTER_PROFILE_ID=telegram_42
+docker compose --profile worker up --build
 ```
 
 Минимальные env переменные:
@@ -172,6 +201,7 @@ TELEGRAM_BOT_TOKEN=123:abc
 TELEGRAM_API_ID=12345
 TELEGRAM_API_HASH=abc123
 TELEGRAM_PHONE=+995555000000
+TELEGRAM_SESSION_STRING=
 OPENAI_API_KEY=sk-...
 APARTMENT_HUNTER_PROFILE_ID=telegram_42
 ```
@@ -182,6 +212,25 @@ Postgres доступен в compose как отдельный сервис `pos
 
 ```bash
 docker compose run --rm worker telegram-process /app/preferences/profiles.json telegram_42
+```
+
+Если уже есть Telethon session string, например из `telegram-mcp-app/session_string_generator.py`, можно задать его в `.env`:
+
+```bash
+TELEGRAM_SESSION_STRING=1...
+```
+
+`TELEGRAM_SESSION_STRING` имеет приоритет над `TELEGRAM_SESSION_FILE`, поэтому интерактивный login и volume `telegram-session` для userbot session в этом режиме не нужны. Строка должна быть создана с теми же `TELEGRAM_API_ID` и `TELEGRAM_API_HASH`, которые указаны для `apartment-hunter`.
+
+При использовании `TELEGRAM_SESSION_STRING` переменные `TELEGRAM_PHONE` и `TELEGRAM_PASSWORD` можно оставить пустыми. Они нужны только для интерактивного логина с кодом Telegram, когда session string не задан.
+
+Сгенерировать session string можно прямо из этого репозитория:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r scripts/requirements-session.txt
+python scripts/session_string_generator.py --qr
 ```
 
 ## Postgres history
