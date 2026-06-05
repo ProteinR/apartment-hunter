@@ -1,0 +1,26 @@
+min_budget: 0
+max_budget: 1200
+min_area_m2: 45.0
+require_dishwasher: true
+require_oven: true
+desired_style: minimalist
+locations:
+  - name: 6 May Park
+    max_distance_meters: 1200
+    latitude: 41.646600
+    longitude: 41.626600
+  - name: New Boulevard
+    max_distance_meters: 1200
+    latitude: 41.633900
+    longitude: 41.607700
+reject:
+  glossy_ceilings: true
+  dark_walls: true
+  old_renovation: true
+  windows_facing_house: true
+importance:
+  location: 5
+  interior: 5
+  view: 3
+  price: 4
+  appliances: 4

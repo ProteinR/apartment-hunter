@@ -1,0 +1,24 @@
+{
+  "id": "batumi-001",
+  "title": "Modern apartment near 6 May Park",
+  "description": "Fresh minimalist renovation, sea view, dishwasher and oven included. Bright walls and panoramic windows.",
+  "price": 950,
+  "area_m2": 52,
+  "latitude": 41.6467,
+  "longitude": 41.6267,
+  "district": "6 May Park",
+  "has_dishwasher": true,
+  "has_oven": true,
+  "photos": [
+    {
+      "url": "mock://living-room-modern-sea-view",
+      "room": "living room",
+      "caption": "modern bright interior with sea view"
+    },
+    {
+      "url": "mock://kitchen-dishwasher-oven",
+      "room": "kitchen",
+      "caption": "kitchen with dishwasher and oven"
+    }
+  ]
+}

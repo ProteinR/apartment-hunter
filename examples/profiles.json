@@ -1,0 +1,22 @@
+{
+  "profiles": [
+    {
+      "id": "telegram_42",
+      "telegram_chat_id": 42,
+      "preferences_path": "preferences/preferences_42.yaml",
+      "channels": [
+        {
+          "source": {
+            "id": "batumi_rentals",
+            "title": "Batumi rentals",
+            "username": "example_channel"
+          },
+          "cursor": {
+            "last_message_id": 0
+          },
+          "limit": 50
+        }
+      ]
+    }
+  ]
+}

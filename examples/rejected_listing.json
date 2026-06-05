@@ -1,0 +1,19 @@
+{
+  "id": "batumi-002",
+  "title": "Older apartment in Batumi",
+  "description": "Old renovation, dark walls, glossy ceiling. Windows facing house.",
+  "price": 1400,
+  "area_m2": 38,
+  "latitude": 41.6200,
+  "longitude": 41.5900,
+  "district": "Unknown",
+  "has_dishwasher": false,
+  "has_oven": true,
+  "photos": [
+    {
+      "url": "mock://dark-old-glossy-ceiling",
+      "room": "bedroom",
+      "caption": "dark walls and glossy ceiling"
+    }
+  ]
+}
