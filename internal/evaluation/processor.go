@@ -21,6 +21,10 @@ type HistoryStore interface {
 	SaveEvaluation(ctx context.Context, record domain.ListingEvaluationRecord) error
 }
 
+type LocationMatcher interface {
+	MatchesListingLocation(ctx context.Context, profileID string, listing domain.ApartmentListing) (bool, string, error)
+}
+
 type PhotoLoader interface {
 	LoadPhotos(ctx context.Context, message sources.ChannelMessage, listing domain.ApartmentListing) (domain.ApartmentListing, error)
 }
@@ -32,6 +36,7 @@ type Processor struct {
 	Analyzer     AnalyzerWithUsage
 	PhotoLoader  PhotoLoader
 	Geocoder     ListingGeocoder
+	Location     LocationMatcher
 }
 
 type ListingGeocoder interface {
@@ -71,6 +76,29 @@ func (p Processor) ProcessMessage(ctx context.Context, source domain.ListingSour
 
 	listing = p.geocodeListing(ctx, listing)
 	record.Listing = listing
+
+	if p.Location != nil {
+		ok, reason, err := p.Location.MatchesListingLocation(ctx, source.ProfileID, listing)
+		if err != nil {
+			record.Status = "failed"
+			record.FailureReason = err.Error()
+			return p.finish(ctx, record)
+		}
+		if !ok {
+			if strings.TrimSpace(reason) == "" {
+				reason = "listing location is outside preferred search area"
+			}
+			record.Score = &domain.ListingScore{
+				PassedHardFilters: false,
+				RejectionReasons:  []string{reason},
+				ScoreTotal:        0,
+				ScoreBreakdown:    scoring.BasicScoreBreakdown(listing, p.Prefs),
+				ShortSummary:      listing.Title + " rejected: " + reason + ".",
+			}
+			record.Status = "rejected_location"
+			return p.finish(ctx, record)
+		}
+	}
 
 	if p.PhotoLoader != nil && len(message.Photos) > 0 {
 		loaded, err := p.PhotoLoader.LoadPhotos(ctx, message, listing)

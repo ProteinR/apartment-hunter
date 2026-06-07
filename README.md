@@ -94,7 +94,7 @@ Europe Square; Old Boulevard; 41.6466, 41.6266
 
 Дистанция до квартиры считается по координатам через haversine. Worker сначала пытается взять координаты из текста объявления или Google Maps ссылки, например `?q=41.6466,41.6266`; если координат нет и задан Google Maps API key, он пробует геокодить текст объявления.
 
-Postgres-профили позволяют одному боту обслуживать разных людей без хардкода критериев. Каждый профиль привязан к `telegram_<chat_id>` и хранит preferences, список каналов и cursor чтения по каждому каналу.
+Postgres-профили позволяют одному боту обслуживать разных людей без хардкода критериев. Каждый профиль привязан к `telegram_<chat_id>` и хранит preferences и список каналов.
 
 Каналами также можно управлять прямо из Telegram-бота:
 
@@ -104,7 +104,7 @@ Postgres-профили позволяют одному боту обслужи�
 /unsubscribe @example_channel
 ```
 
-Прочитать новые сообщения каналов через Telegram Userbot API:
+Вручную прочитать историю каналов через Telegram Userbot API:
 
 ```bash
 TELEGRAM_API_ID=12345 \
@@ -116,9 +116,9 @@ DATABASE_URL='postgres://apartment_hunter:apartment_hunter@localhost:5432/apartm
   go run ./cmd/apartment-hunter telegram-read telegram_42
 ```
 
-При первом запуске `gotd/td` запросит одноразовый Telegram code в терминале и сохранит user session в `TELEGRAM_SESSION_FILE`. Если на аккаунте включен 2FA password, задайте `TELEGRAM_PASSWORD`. Команда не скачивает фото, а выводит JSON records с текстом, ссылкой, download-token для фото и распарсенным `ApartmentListing`; затем обновляет `cursor.last_message_id` в Postgres.
+При первом запуске `gotd/td` запросит одноразовый Telegram code в терминале и сохранит user session в `TELEGRAM_SESSION_FILE`. Если на аккаунте включен 2FA password, задайте `TELEGRAM_PASSWORD`. Команда не скачивает фото, а выводит JSON records с текстом, ссылкой, download-token для фото и распарсенным `ApartmentListing`.
 
-Прочитать новые сообщения, сохранить историю проверки в Postgres и отправить подходящие объявления в Telegram:
+Слушать только новые сообщения, сохранять историю проверки в Postgres и отправлять подходящие объявления в Telegram:
 
 ```bash
 DATABASE_URL='postgres://apartment_hunter:apartment_hunter@localhost:5432/apartment_hunter?sslmode=disable' \
@@ -132,11 +132,7 @@ OPENAI_API_KEY=sk-... \
   go run ./cmd/apartment-hunter telegram-process telegram_42
 ```
 
-`telegram-process` делает один проход по новым сообщениям. Для постоянного polling задайте интервал:
-
-```bash
-APARTMENT_HUNTER_POLL_INTERVAL=5m
-```
+`telegram-process` не читает историю канала. Он держит Telegram userbot session открытой, получает `UpdateNewMessage` / `UpdateNewChannelMessage`, фильтрует события по подпискам профиля и анализирует только новые сообщения.
 
 Базовые отказы по цене, метражу и обязательной технике сохраняются в историю без скачивания фото и без вызова OpenAI. Если базовые фильтры прошли, userbot скачивает фото во временный local media cache, processor проверяет dedup, вызывает OpenAI Vision, считает итоговый score и сохраняет `ai_usage` с токенами и стоимостью.
 
@@ -192,7 +188,7 @@ APARTMENT_HUNTER_GOOGLE_MAPS_API_KEY=...
 APARTMENT_HUNTER_GEOCODING_REGION=Batumi, Georgia
 ```
 
-Postgres доступен в compose как отдельный сервис `postgres`, данные хранятся в volume `postgres-data`. Profiles, preferences, channel subscriptions и cursor'ы хранятся в Postgres. Telegram userbot session и временно скачанные media files живут в volume `telegram-session`.
+Postgres доступен в compose как отдельный сервис `postgres`, данные хранятся в volume `postgres-data`. Profiles, preferences и channel subscriptions хранятся в Postgres. Telegram userbot session и временно скачанные media files живут в volume `telegram-session`.
 
 Для первого userbot login удобнее запустить worker интерактивно, чтобы ввести одноразовый Telegram code:
 

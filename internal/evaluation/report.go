@@ -87,6 +87,8 @@ func statusLabel(status string) string {
 		return "прошло"
 	case "rejected_basic":
 		return "не прошло базовые фильтры"
+	case "rejected_location":
+		return "не прошло гео-фильтр"
 	case "rejected_ai":
 		return "не прошло AI-фильтры"
 	case "duplicate":

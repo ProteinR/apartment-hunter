@@ -9,7 +9,6 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	"time"
 
 	"apartment-hunter/internal/adapters/geocodingmock"
 	"apartment-hunter/internal/adapters/googlemaps"
@@ -28,6 +27,7 @@ import (
 	"apartment-hunter/internal/preferences"
 	"apartment-hunter/internal/profiles"
 	"apartment-hunter/internal/scoring"
+	"apartment-hunter/internal/sources"
 	pgstore "apartment-hunter/internal/storage/postgres"
 )
 
@@ -151,12 +151,13 @@ func (a App) telegramProcess(profileID string) error {
 		Analyzer:     analyzer,
 		PhotoLoader:  reader,
 		Geocoder:     newGoogleGeocoder(),
+		Location:     store,
 	}
 
 	botToken := strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN"))
-	pollInterval := envDuration("APARTMENT_HUNTER_POLL_INTERVAL", 0)
-	for {
-		profile, ok, err = store.GetProfile(ctx, profileID)
+	fmt.Fprintf(a.Out, "Listening for new Telegram messages for %s\n", profileID)
+	return reader.Listen(ctx, func(ctx context.Context, message sources.ChannelMessage) error {
+		profile, ok, err := store.GetProfile(ctx, profileID)
 		if err != nil {
 			return err
 		}
@@ -166,57 +167,57 @@ func (a App) telegramProcess(profileID string) error {
 		if profile.Preferences == nil {
 			return fmt.Errorf("profile %q has no preferences configured; run /start in the Telegram bot first", profileID)
 		}
+		if !profileSubscribedToMessage(profile, message) {
+			return nil
+		}
+		if strings.TrimSpace(message.Text) == "" && len(message.Photos) == 0 {
+			return nil
+		}
 		processor.Prefs = *profile.Preferences
-		processed, sent, err := a.processProfileOnce(ctx, store, profileID, profile, reader, processor, botToken)
+		source := domain.ListingSourceRef{
+			Source:         "telegram",
+			ProfileID:      profileID,
+			TelegramChatID: profile.TelegramChatID,
+		}
+		result, err := processor.ProcessMessage(ctx, source, message)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(a.Out, "Processed %d messages, sent %d matches\n", processed, sent)
-		if pollInterval <= 0 {
-			return nil
+		fmt.Fprintf(a.Out, "Processed %s/%d: %s\n", message.ChannelID, message.MessageID, result.Record.Status)
+		if result.Record.Status == "passed" && botToken != "" && profile.TelegramChatID != 0 {
+			if err := telegram.SendText(ctx, botToken, profile.TelegramChatID, evaluation.NotificationText(result.Record)); err != nil {
+				return err
+			}
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(pollInterval):
-		}
-	}
+		return nil
+	})
 }
 
-func (a App) processProfileOnce(ctx context.Context, store *pgstore.Repository, profileID string, profile profiles.Profile, reader *telegramuserbot.Client, processor evaluation.Processor, botToken string) (int, int, error) {
-	processed := 0
-	sent := 0
+func profileSubscribedToMessage(profile profiles.Profile, message sources.ChannelMessage) bool {
 	for _, sub := range profile.Channels {
-		messages, cursor, err := reader.Fetch(ctx, sub.Source, sub.Cursor, sub.Limit)
-		if err != nil {
-			return processed, sent, err
-		}
-		if err := store.UpdateProfileChannelCursor(ctx, profileID, sub.Source, cursor); err != nil {
-			return processed, sent, err
-		}
-		for _, message := range messages {
-			if strings.TrimSpace(message.Text) == "" && len(message.Photos) == 0 {
-				continue
-			}
-			source := domain.ListingSourceRef{
-				Source:         "telegram",
-				ProfileID:      profileID,
-				TelegramChatID: profile.TelegramChatID,
-			}
-			result, err := processor.ProcessMessage(ctx, source, message)
-			if err != nil {
-				return processed, sent, err
-			}
-			processed++
-			if result.Record.Status == "passed" && botToken != "" && profile.TelegramChatID != 0 {
-				if err := telegram.SendText(ctx, botToken, profile.TelegramChatID, evaluation.NotificationText(result.Record)); err != nil {
-					return processed, sent, err
-				}
-				sent++
-			}
+		if channelRefMatchesMessage(sub.Source, message) {
+			return true
 		}
 	}
-	return processed, sent, nil
+	return false
+}
+
+func channelRefMatchesMessage(ref sources.ChannelRef, message sources.ChannelMessage) bool {
+	refID := normalizeTelegramChannelKey(ref.ID)
+	refUsername := normalizeTelegramChannelKey(ref.Username)
+	messageID := normalizeTelegramChannelKey(message.ChannelID)
+	messageUsername := normalizeTelegramChannelKey(message.ChannelUsername)
+	if refID != "" && (refID == messageID || refID == messageUsername) {
+		return true
+	}
+	if refUsername != "" && (refUsername == messageID || refUsername == messageUsername) {
+		return true
+	}
+	return false
+}
+
+func normalizeTelegramChannelKey(value string) string {
+	return strings.ToLower(strings.TrimPrefix(strings.TrimSpace(value), "@"))
 }
 
 func (a App) telegramRead(profileID string) error {
@@ -356,18 +357,6 @@ func geocodeListingPreview(ctx context.Context, listing domain.ApartmentListing,
 		listing.District = loc.Name
 	}
 	return listing
-}
-
-func envDuration(name string, fallback time.Duration) time.Duration {
-	value := strings.TrimSpace(os.Getenv(name))
-	if value == "" {
-		return fallback
-	}
-	duration, err := time.ParseDuration(value)
-	if err != nil {
-		return fallback
-	}
-	return duration
 }
 
 func openPostgresStore(ctx context.Context) (*pgstore.Repository, error) {

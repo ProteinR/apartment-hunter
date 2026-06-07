@@ -38,6 +38,8 @@ type Client struct {
 	cfg Config
 }
 
+type MessageHandler func(ctx context.Context, message sources.ChannelMessage) error
+
 func FromEnv(codeReader io.Reader) (*Client, error) {
 	appID, err := strconv.Atoi(strings.TrimSpace(os.Getenv("TELEGRAM_API_ID")))
 	if err != nil || appID == 0 {
@@ -73,6 +75,48 @@ func New(cfg Config) *Client {
 		cfg.CodeReader = os.Stdin
 	}
 	return &Client{cfg: cfg}
+}
+
+func (c *Client) Listen(ctx context.Context, handler MessageHandler) error {
+	if handler == nil {
+		return fmt.Errorf("telegram message handler is required")
+	}
+	storage, err := c.sessionStorage(ctx)
+	if err != nil {
+		return err
+	}
+
+	dispatcher := tg.NewUpdateDispatcher()
+	client := telegram.NewClient(c.cfg.AppID, c.cfg.AppHash, telegram.Options{
+		SessionStorage: storage,
+		UpdateHandler:  dispatcher,
+	})
+
+	handleMessage := func(ctx context.Context, entities tg.Entities, raw tg.MessageClass) error {
+		message, ok := raw.(*tg.Message)
+		if !ok || message.Out {
+			return nil
+		}
+		mapped := mapUpdateMessage(entities, message)
+		if mapped.ChannelID == "" && mapped.ChannelUsername == "" {
+			return nil
+		}
+		return handler(ctx, mapped)
+	}
+	dispatcher.OnNewMessage(func(ctx context.Context, entities tg.Entities, update *tg.UpdateNewMessage) error {
+		return handleMessage(ctx, entities, update.Message)
+	})
+	dispatcher.OnNewChannelMessage(func(ctx context.Context, entities tg.Entities, update *tg.UpdateNewChannelMessage) error {
+		return handleMessage(ctx, entities, update.Message)
+	})
+
+	return client.Run(ctx, func(ctx context.Context) error {
+		if err := c.authIfNeeded(ctx, client); err != nil {
+			return err
+		}
+		<-ctx.Done()
+		return nil
+	})
 }
 
 func (c *Client) Fetch(ctx context.Context, channel sources.ChannelRef, cursor sources.Cursor, limit int) ([]sources.ChannelMessage, sources.Cursor, error) {
@@ -217,14 +261,53 @@ func mapMessage(ref sources.ChannelRef, resolved resolvedChannel, message *tg.Me
 
 	groupedID, _ := message.GetGroupedID()
 	return sources.ChannelMessage{
-		ChannelID:   channelID,
-		ChannelName: channelName,
-		MessageID:   message.ID,
-		Date:        time.Unix(int64(message.Date), 0),
-		Text:        message.Message,
-		GroupedID:   groupedID,
-		Photos:      messagePhotos(message),
-		Link:        messageLink(resolved.Username, message.ID),
+		ChannelID:       channelID,
+		ChannelName:     channelName,
+		ChannelUsername: resolved.Username,
+		MessageID:       message.ID,
+		Date:            time.Unix(int64(message.Date), 0),
+		Text:            message.Message,
+		GroupedID:       groupedID,
+		Photos:          messagePhotos(message),
+		Link:            messageLink(resolved.Username, message.ID),
+	}
+}
+
+func mapUpdateMessage(entities tg.Entities, message *tg.Message) sources.ChannelMessage {
+	channelID, channelName, username := peerMetadata(entities, message.GetPeerID())
+	groupedID, _ := message.GetGroupedID()
+	return sources.ChannelMessage{
+		ChannelID:       channelID,
+		ChannelName:     channelName,
+		ChannelUsername: username,
+		MessageID:       message.ID,
+		Date:            time.Unix(int64(message.Date), 0),
+		Text:            message.Message,
+		GroupedID:       groupedID,
+		Photos:          messagePhotos(message),
+		Link:            messageLink(username, message.ID),
+	}
+}
+
+func peerMetadata(entities tg.Entities, peer tg.PeerClass) (string, string, string) {
+	switch p := peer.(type) {
+	case *tg.PeerChannel:
+		id := strconv.FormatInt(p.ChannelID, 10)
+		channel := entities.Channels[p.ChannelID]
+		if channel == nil {
+			return id, "", ""
+		}
+		username, _ := channel.GetUsername()
+		return id, channel.Title, username
+	case *tg.PeerChat:
+		id := strconv.FormatInt(p.ChatID, 10)
+		chat := entities.Chats[p.ChatID]
+		if chat == nil {
+			return id, "", ""
+		}
+		return id, chat.Title, ""
+	default:
+		return "", "", ""
 	}
 }
 

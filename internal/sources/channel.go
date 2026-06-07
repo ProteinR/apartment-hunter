@@ -6,14 +6,15 @@ import (
 )
 
 type ChannelMessage struct {
-	ChannelID   string
-	ChannelName string
-	MessageID   int
-	Date        time.Time
-	Text        string
-	GroupedID   int64
-	Photos      []ChannelPhoto
-	Link        string
+	ChannelID       string
+	ChannelName     string
+	ChannelUsername string
+	MessageID       int
+	Date            time.Time
+	Text            string
+	GroupedID       int64
+	Photos          []ChannelPhoto
+	Link            string
 }
 
 type ChannelPhoto struct {

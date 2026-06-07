@@ -114,6 +114,54 @@ func (r *Repository) SaveSearchProfile(ctx context.Context, profile domain.UserS
 	return err
 }
 
+func (r *Repository) MatchesListingLocation(ctx context.Context, profileID string, listing domain.ApartmentListing) (bool, string, error) {
+	profileID = strings.TrimSpace(profileID)
+	if profileID == "" {
+		return true, "", nil
+	}
+
+	var hasArea bool
+	err := r.db.QueryRowContext(ctx, `
+		select exists (
+			select 1
+			from user_search_profiles
+			where user_id = $1 and search_area is not null
+		)
+	`, profileID).Scan(&hasArea)
+	if err != nil {
+		return false, "", err
+	}
+	if !hasArea {
+		return true, "", nil
+	}
+	if listing.Latitude == 0 && listing.Longitude == 0 {
+		return false, "listing location is unresolved", nil
+	}
+
+	var matches bool
+	err = r.db.QueryRowContext(ctx, `
+		with latest as (
+			select search_area
+			from user_search_profiles
+			where user_id = $1 and search_area is not null
+			order by created_at desc, id desc
+			limit 1
+		)
+		select ST_Covers(
+			search_area,
+			ST_SetSRID(ST_MakePoint($2, $3), 4326)
+		)
+		from latest
+	`, profileID, listing.Longitude, listing.Latitude).Scan(&matches)
+	if err != nil {
+		return false, "", err
+	}
+	if !matches {
+		return false, "listing location is outside preferred search area", nil
+	}
+	return true, "", nil
+}
+
 func (r *Repository) UpsertProfileChannel(ctx context.Context, profileID string, sub profiles.ChannelSubscription) (bool, error) {
 	sub = normalizeSubscription(sub)
 	exists, err := r.profileChannelExists(ctx, profileID, sub.Source)
