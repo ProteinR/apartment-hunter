@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"apartment-hunter/internal/sources"
+
+	"github.com/gotd/td/tg"
 )
 
 func TestCoalesceGroupedMessagesUsesCaptionMessageAsCanonical(t *testing.T) {
@@ -127,5 +129,15 @@ func TestGroupedMessageHandlerPassesStandaloneImmediately(t *testing.T) {
 	}
 	if len(handled) != 1 || handled[0].MessageID != 7 {
 		t.Fatalf("expected standalone message to be handled immediately, got %+v", handled)
+	}
+}
+
+func TestProcessableUpdateMessageIncludesOutgoingMessages(t *testing.T) {
+	message, ok := processableUpdateMessage(&tg.Message{Out: true, Message: "manual test listing"})
+	if !ok {
+		t.Fatal("expected outgoing Telegram message to be processable")
+	}
+	if message.Message != "manual test listing" {
+		t.Fatalf("unexpected message %q", message.Message)
 	}
 }

@@ -68,6 +68,105 @@ func TestScoreUsesInsightAppliances(t *testing.T) {
 	}
 }
 
+func TestScoreUsesStructuredRequiredAmenities(t *testing.T) {
+	scorer := New(fakeEvaluator{insights: domain.ListingInsights{
+		HasDishwasher:   true,
+		HasOven:         true,
+		InteriorQuality: 0.7,
+		ViewQuality:     0.6,
+	}})
+	result := scorer.Score(domain.ApartmentListing{
+		Title:  "New schema amenities",
+		Price:  650,
+		AreaM2: 55,
+	}, domain.UserPreferences{
+		MaxBudget:         800,
+		MinAreaM2:         50,
+		RequiredAmenities: []string{"dishwasher", "oven"},
+		Weights:           domain.PreferenceWeights{Price: 1, Amenities: 1},
+	})
+
+	if !result.PassedHardFilters {
+		t.Fatalf("expected listing to pass with required amenities confirmed by insights, got %v", result.RejectionReasons)
+	}
+	if result.ScoreBreakdown["appliances"] != 1 {
+		t.Fatalf("expected full appliance score, got %v", result.ScoreBreakdown["appliances"])
+	}
+	if result.ScoreTotal <= 0 {
+		t.Fatalf("expected new schema weights to produce a positive total, got %v", result.ScoreTotal)
+	}
+}
+
+func TestScoreUsesStructuredRejectRules(t *testing.T) {
+	scorer := New(fakeEvaluator{insights: domain.ListingInsights{
+		HasDishwasher:      true,
+		HasOven:            true,
+		HasGlossyCeilings:  true,
+		WindowsFacingHouse: true,
+		InteriorQuality:    0.9,
+		ViewQuality:        0.8,
+	}})
+	result := scorer.Score(domain.ApartmentListing{
+		Title:  "Rejected by new schema rules",
+		Price:  600,
+		AreaM2: 55,
+	}, domain.UserPreferences{
+		MaxBudget:         800,
+		MinAreaM2:         50,
+		RequiredAmenities: []string{"dishwasher", "oven"},
+		InteriorPreferences: domain.InteriorPreferences{
+			Reject: []string{"glossy_ceiling"},
+		},
+		RejectRules: []string{"windows_facing_neighbor_building"},
+		Weights:     domain.PreferenceWeights{Price: 1, Amenities: 1},
+	})
+
+	if result.PassedHardFilters {
+		t.Fatal("expected new schema reject rules to fail hard filters")
+	}
+	expected := map[string]bool{
+		"glossy ceilings detected":                  false,
+		"windows facing neighboring house detected": false,
+	}
+	for _, reason := range result.RejectionReasons {
+		if _, ok := expected[reason]; ok {
+			expected[reason] = true
+		}
+	}
+	for reason, seen := range expected {
+		if !seen {
+			t.Fatalf("expected rejection reason %q, got %v", reason, result.RejectionReasons)
+		}
+	}
+}
+
+func TestScoreDefaultsWeightsWhenMissing(t *testing.T) {
+	scorer := New(fakeEvaluator{insights: domain.ListingInsights{
+		HasDishwasher:   true,
+		HasOven:         true,
+		InteriorQuality: 0.8,
+		ViewQuality:     0.7,
+	}})
+	result := scorer.Score(domain.ApartmentListing{
+		Title:         "No explicit weights",
+		Price:         600,
+		AreaM2:        55,
+		HasDishwasher: true,
+		HasOven:       true,
+	}, domain.UserPreferences{
+		MaxBudget:   800,
+		MinAreaM2:   50,
+		RequireOven: true,
+	})
+
+	if !result.PassedHardFilters {
+		t.Fatalf("expected listing to pass, got %v", result.RejectionReasons)
+	}
+	if result.ScoreTotal <= 0 {
+		t.Fatalf("expected default weights to produce a positive total, got %v", result.ScoreTotal)
+	}
+}
+
 func TestBasicFilterDoesNotRejectUnknownArea(t *testing.T) {
 	reasons := BasicFilterReasons(domain.ApartmentListing{
 		Title:  "Photo-only album item",

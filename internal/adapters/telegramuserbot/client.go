@@ -97,8 +97,8 @@ func (c *Client) Listen(ctx context.Context, handler MessageHandler) error {
 
 	albumHandler := newGroupedMessageHandler(handler, albumSettleDelay)
 	handleMessage := func(ctx context.Context, entities tg.Entities, raw tg.MessageClass) error {
-		message, ok := raw.(*tg.Message)
-		if !ok || message.Out {
+		message, ok := processableUpdateMessage(raw)
+		if !ok {
 			return nil
 		}
 		mapped := mapUpdateMessage(entities, message)
@@ -122,6 +122,14 @@ func (c *Client) Listen(ctx context.Context, handler MessageHandler) error {
 		_ = albumHandler.Flush(context.Background())
 		return nil
 	})
+}
+
+func processableUpdateMessage(raw tg.MessageClass) (*tg.Message, bool) {
+	message, ok := raw.(*tg.Message)
+	if !ok {
+		return nil, false
+	}
+	return message, true
 }
 
 func (c *Client) Fetch(ctx context.Context, channel sources.ChannelRef, cursor sources.Cursor, limit int) ([]sources.ChannelMessage, sources.Cursor, error) {

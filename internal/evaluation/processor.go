@@ -62,6 +62,18 @@ func (p Processor) ProcessMessage(ctx context.Context, source domain.ListingSour
 		Status:  "received",
 	}
 
+	if !looksLikeApartmentListing(message, listing) {
+		record.Score = &domain.ListingScore{
+			PassedHardFilters: false,
+			RejectionReasons:  []string{"message is not an apartment listing"},
+			ScoreTotal:        0,
+			ScoreBreakdown:    scoring.BasicScoreBreakdown(listing, p.Prefs),
+			ShortSummary:      listing.Title + " rejected: message is not an apartment listing.",
+		}
+		record.Status = "rejected_non_listing"
+		return p.finish(ctx, record)
+	}
+
 	basicReasons := scoring.BasicFilterReasons(listing, p.Prefs)
 	if len(basicReasons) > 0 {
 		record.Score = &domain.ListingScore{
@@ -171,6 +183,67 @@ func scoringListingWithInsights(listing domain.ApartmentListing, insights domain
 		listing.HasOven = true
 	}
 	return listing
+}
+
+func looksLikeApartmentListing(message sources.ChannelMessage, listing domain.ApartmentListing) bool {
+	if len(message.Photos) > 0 || listing.Price > 0 || listing.AreaM2 > 0 {
+		return true
+	}
+
+	text := strings.ToLower(strings.TrimSpace(listing.Title + "\n" + listing.Description))
+	if text == "" {
+		return len(message.Photos) > 0
+	}
+
+	serviceSignals := []string{
+		"абонемент",
+		"администратор",
+		"активаци",
+		"закрепл",
+		"оплат",
+		"правила",
+		"публикаци",
+		"размещени",
+		"реклам",
+		"welcome to the group",
+		"добро пожаловать в группу",
+	}
+	propertySignals := []string{
+		"апартамент",
+		"аренд",
+		"bedroom",
+		"flat",
+		"rent",
+		"sale",
+		"studio",
+		"квар",
+		"прода",
+		"сдам",
+		"сдаю",
+		"сдаёт",
+		"сдается",
+		"сдаётся",
+		"студи",
+	}
+
+	hasServiceSignal := containsAnySubstring(text, serviceSignals...)
+	hasPropertySignal := containsAnySubstring(text, propertySignals...)
+	if hasServiceSignal && !hasPropertySignal {
+		return false
+	}
+	if strings.Contains(text, "групп") && strings.Contains(text, "недвижимост") && !hasPropertySignal {
+		return false
+	}
+	return hasPropertySignal
+}
+
+func containsAnySubstring(text string, needles ...string) bool {
+	for _, needle := range needles {
+		if strings.Contains(text, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p Processor) geocodeListing(ctx context.Context, listing domain.ApartmentListing) domain.ApartmentListing {

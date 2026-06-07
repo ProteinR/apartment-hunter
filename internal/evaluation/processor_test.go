@@ -117,6 +117,56 @@ func TestProcessMessageSkipsPhotoLoadingWhenBasicFiltersFail(t *testing.T) {
 	}
 }
 
+func TestProcessMessageRejectsServicePostBeforeGeocodingAndAI(t *testing.T) {
+	geocoder := &fakeGeocoder{}
+	loader := &countingPhotoLoader{}
+	processor := Processor{
+		Prefs: domain.UserPreferences{
+			MaxBudget:         650,
+			MinAreaM2:         50,
+			RequireDishwasher: true,
+			RequireOven:       true,
+			Locations: []domain.LocationPreference{{
+				Name:              "Batumi, Georgia",
+				Latitude:          41.64610,
+				Longitude:         41.64049,
+				MaxDistanceMeters: 1000,
+			}},
+		},
+		Geocoder:    geocoder,
+		PhotoLoader: loader,
+		Analyzer: fakeAnalyzer{insights: domain.ListingInsights{
+			InteriorQuality: 1,
+			ViewQuality:     1,
+		}},
+	}
+
+	result, err := processor.ProcessMessage(context.Background(), domain.ListingSourceRef{}, sources.ChannelMessage{
+		ChannelID: "domikibatumi",
+		MessageID: 952575,
+		Text: "Константин Кулумбаев 👋🏻\n" +
+			"Добро пожаловать в группу по недвижимости в Батуми!\n" +
+			"📌 Приобретите абонемент для публикации объявлений.\n\n" +
+			"🏠 По вопросам оплаты и активации абонемента — пишите администратору в личные сообщения. @pr_manager19\n\n" +
+			"✅ Правила и подробности размещения — в закреплённом сообщении.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Record.Status != "rejected_non_listing" {
+		t.Fatalf("expected rejected_non_listing, got %s", result.Record.Status)
+	}
+	if geocoder.calls != 0 {
+		t.Fatalf("expected geocoder not to be called, got %d calls", geocoder.calls)
+	}
+	if loader.calls != 0 {
+		t.Fatalf("expected photo loader not to be called, got %d calls", loader.calls)
+	}
+	if result.Record.AIUsage != nil {
+		t.Fatalf("expected AI not to be called, got usage %+v", result.Record.AIUsage)
+	}
+}
+
 func TestProcessMessageDoesNotBasicRejectUnknownArea(t *testing.T) {
 	loader := &countingPhotoLoader{}
 	processor := Processor{

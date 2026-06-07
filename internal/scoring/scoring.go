@@ -26,6 +26,7 @@ func (s Scorer) Score(listing domain.ApartmentListing, prefs domain.UserPreferen
 }
 
 func ScoreWithInsights(listing domain.ApartmentListing, prefs domain.UserPreferences, insights domain.ListingInsights) domain.ListingScore {
+	prefs = normalizeScoringPreferences(prefs)
 	listing = listingWithInsightAppliances(listing, insights)
 	reasons := hardFilterReasons(listing, prefs, insights)
 	breakdown := BreakdownWithInsights(listing, prefs, insights)
@@ -45,6 +46,7 @@ func ScoreWithInsights(listing domain.ApartmentListing, prefs domain.UserPrefere
 }
 
 func BreakdownWithInsights(listing domain.ApartmentListing, prefs domain.UserPreferences, insights domain.ListingInsights) map[string]float64 {
+	prefs = normalizeScoringPreferences(prefs)
 	listing = listingWithInsightAppliances(listing, insights)
 	return map[string]float64{
 		"location":   locationScore(listing, prefs),
@@ -57,6 +59,7 @@ func BreakdownWithInsights(listing domain.ApartmentListing, prefs domain.UserPre
 }
 
 func BasicScoreBreakdown(listing domain.ApartmentListing, prefs domain.UserPreferences) map[string]float64 {
+	prefs = normalizeScoringPreferences(prefs)
 	return map[string]float64{
 		"location":   locationScore(listing, prefs),
 		"area":       areaScore(listing.AreaM2, prefs.MinAreaM2),
@@ -66,6 +69,7 @@ func BasicScoreBreakdown(listing domain.ApartmentListing, prefs domain.UserPrefe
 }
 
 func BasicFilterReasons(listing domain.ApartmentListing, prefs domain.UserPreferences) []string {
+	prefs = normalizeScoringPreferences(prefs)
 	reasons := []string{}
 	if prefs.MaxBudget > 0 && listing.Price > prefs.MaxBudget {
 		reasons = append(reasons, fmt.Sprintf("price %d exceeds max budget %d", listing.Price, prefs.MaxBudget))
@@ -74,6 +78,73 @@ func BasicFilterReasons(listing domain.ApartmentListing, prefs domain.UserPrefer
 		reasons = append(reasons, fmt.Sprintf("area %.1f is below minimum %.1f", listing.AreaM2, prefs.MinAreaM2))
 	}
 	return reasons
+}
+
+func normalizeScoringPreferences(prefs domain.UserPreferences) domain.UserPreferences {
+	if prefs.BudgetMin != nil {
+		prefs.MinBudget = *prefs.BudgetMin
+	}
+	if prefs.BudgetMax != nil {
+		prefs.MaxBudget = *prefs.BudgetMax
+	}
+	if prefs.AreaMin != nil {
+		prefs.MinAreaM2 = *prefs.AreaMin
+	}
+	for _, amenity := range prefs.RequiredAmenities {
+		switch strings.ToLower(strings.TrimSpace(amenity)) {
+		case "dishwasher":
+			prefs.RequireDishwasher = true
+		case "oven":
+			prefs.RequireOven = true
+		}
+	}
+	if prefs.Importance == (domain.ImportanceWeights{}) {
+		prefs.Importance = domain.ImportanceWeights{
+			Location:   prefs.Weights.Location,
+			Interior:   prefs.Weights.Interior,
+			View:       prefs.Weights.View,
+			Price:      prefs.Weights.Price,
+			Appliances: prefs.Weights.Amenities,
+		}
+		if prefs.Importance == (domain.ImportanceWeights{}) {
+			prefs.Importance = domain.ImportanceWeights{
+				Location:   1,
+				Interior:   1,
+				View:       1,
+				Price:      1,
+				Appliances: 1,
+			}
+		}
+	}
+	for _, reject := range prefs.InteriorPreferences.Reject {
+		switch normalizeRuleSlug(reject) {
+		case "glossyceiling", "glossyceilings":
+			prefs.Reject.GlossyCeilings = true
+		case "darkwalls", "darkwall":
+			prefs.Reject.DarkWalls = true
+		case "oldrenovation", "oldrepair":
+			prefs.Reject.OldRenovation = true
+		}
+	}
+	for _, rule := range prefs.RejectRules {
+		switch normalizeRuleSlug(rule) {
+		case "glossyceiling", "glossyceilings":
+			prefs.Reject.GlossyCeilings = true
+		case "darkwalls", "darkwall":
+			prefs.Reject.DarkWalls = true
+		case "oldrenovation", "oldrepair":
+			prefs.Reject.OldRenovation = true
+		case "windowsfacingneighborbuilding", "windowfacingneighborbuilding", "windowsfacingadjacentbuilding", "windowfacingadjacentbuilding", "windowsfacinghouse", "windowfacinghouse":
+			prefs.Reject.WindowsFacingHouse = true
+		}
+	}
+	return prefs
+}
+
+func normalizeRuleSlug(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.NewReplacer("-", "", "_", "", " ", "").Replace(value)
+	return value
 }
 
 func requiredApplianceReasons(listing domain.ApartmentListing, prefs domain.UserPreferences) []string {

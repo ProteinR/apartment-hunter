@@ -235,6 +235,8 @@ func statusLabel(status string) string {
 		return "прошло"
 	case "rejected_basic":
 		return "не прошло базовые фильтры"
+	case "rejected_non_listing":
+		return "не объявление о квартире"
 	case "rejected_location":
 		return "не прошло гео-фильтр"
 	case "rejected_ai":
@@ -272,6 +274,8 @@ func rejectionReasonLabel(reason string) string {
 		return "обнаружен старый ремонт"
 	case "windows facing neighboring house detected":
 		return "окна выходят на соседний дом"
+	case "message is not an apartment listing":
+		return "сообщение не является объявлением о квартире"
 	case "listing location is unresolved":
 		return "локацию объявления не удалось определить"
 	case "listing location is outside preferred search area":
