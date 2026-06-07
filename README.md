@@ -100,9 +100,15 @@ Postgres-профили позволяют одному боту обслужи�
 
 ```text
 /channels
+/subscribe https://t.me/example_channel Batumi rentals
 /subscribe @example_channel Batumi rentals
 /unsubscribe @example_channel
 ```
+
+Бот не вступает в чаты и группы автоматически. Сначала вступите в подходящие
+Telegram-источники вручную с аккаунта, которым запускается worker, затем
+пришлите боту public ссылки `t.me/name` или usernames `@name`. Если источники
+уже добавлены в профиль, `/channels` покажет текущий список.
 
 Вручную прочитать историю каналов через Telegram Userbot API:
 
@@ -161,10 +167,12 @@ docker compose up --build
 Эта команда запускает Postgres и Telegram preferences bot. Worker не стартует
 по умолчанию, потому что на чистой БД еще нет профиля пользователя. Сначала
 откройте бота в Telegram, отправьте `/start`, пройдите интервью и добавьте
-каналы:
+каналы. Автоматического вступления нет: сначала вступите в подходящие чаты
+вручную, затем пришлите public ссылки или usernames:
 
 ```text
-/subscribe @example_channel Batumi rentals
+https://t.me/example_channel
+@another_rent_channel
 ```
 
 После этого укажите созданный profile id в `.env` и запустите worker:

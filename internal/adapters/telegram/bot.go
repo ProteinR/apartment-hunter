@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -155,9 +156,13 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 		reply, err := b.unsubscribeChannel(context.Background(), chatID, text)
 		return textResponse{Text: reply}, err
 	}
+	if looksLikeChannelSubscription(text) {
+		reply, err := b.subscribeChannelsFromText(context.Background(), chatID, text)
+		return textResponse{Text: reply}, err
+	}
 	if text == "/start" || text == "/preferences" || text == "/restart" {
 		b.setSession(chatID, &preferenceSession{State: "awaiting_query"})
-		return textResponse{Text: "Опиши квартиру одним сообщением."}, nil
+		return textResponse{Text: preferencesStartMessage}, nil
 	}
 
 	session := b.getSession(chatID)
@@ -187,7 +192,8 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 			if err := b.saveDraft(context.Background(), chatID, session.Draft); err != nil {
 				return textResponse{}, err
 			}
-			return textResponse{Text: "Готово, фильтры сохранены.", ReplyMarkup: removeKeyboard()}, nil
+			reply, err := b.afterPreferencesSavedMessage(context.Background(), chatID)
+			return textResponse{Text: reply, ReplyMarkup: removeKeyboard()}, err
 		case "edit":
 			session.State = "awaiting_query"
 			b.setSession(chatID, session)
@@ -204,18 +210,57 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 	}
 }
 
-func (b *Bot) listChannels(ctx context.Context, chatID int64) (string, error) {
-	profile, ok, err := b.store.GetProfile(ctx, profiles.IDForTelegramChat(chatID))
+func (b *Bot) afterPreferencesSavedMessage(ctx context.Context, chatID int64) (string, error) {
+	channels, err := b.channelList(ctx, chatID)
 	if err != nil {
 		return "", err
 	}
+	var lines []string
+	lines = append(lines, "Готово, фильтры сохранены.")
+	lines = append(lines, "")
+	lines = append(lines, "Теперь нужны источники объявлений. Я не вступаю в чаты автоматически: вступи в подходящие Telegram-чаты/группы вручную со своего аккаунта, а сюда пришли public ссылки или usernames.")
+	lines = append(lines, "")
+	if len(channels) > 0 {
+		lines = append(lines, "Уже подключены:")
+		lines = append(lines, channels...)
+		lines = append(lines, "")
+		lines = append(lines, "Можно добавить еще: пришли t.me/name или @name, по одному или несколько сразу.")
+	} else {
+		lines = append(lines, "Пока источников нет. Пришли, например:")
+		lines = append(lines, "https://t.me/batumi_rentals")
+		lines = append(lines, "@another_rent_channel")
+	}
+	lines = append(lines, "")
+	lines = append(lines, "Посмотреть список: /channels")
+	return strings.Join(lines, "\n"), nil
+}
+
+func (b *Bot) listChannels(ctx context.Context, chatID int64) (string, error) {
+	channels, err := b.channelList(ctx, chatID)
+	if err != nil {
+		return "", err
+	}
+	if len(channels) == 0 {
+		return "Источники пока не подключены.\n\nВступи вручную в подходящие Telegram-чаты/группы, затем пришли сюда public ссылки или usernames, например:\nhttps://t.me/batumi_rentals\n@another_rent_channel\n\nАвтоматически вступать в чаты я не буду.", nil
+	}
+	lines := []string{"Подключенные источники:"}
+	lines = append(lines, channels...)
+	lines = append(lines, "", "Добавить еще: пришли t.me/name или @name.", "Удалить: /unsubscribe @name")
+	return strings.Join(lines, "\n"), nil
+}
+
+func (b *Bot) channelList(ctx context.Context, chatID int64) ([]string, error) {
+	profile, ok, err := b.store.GetProfile(ctx, profiles.IDForTelegramChat(chatID))
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
-		return "Send /start first to create your profile.", nil
+		return nil, nil
 	}
 	if len(profile.Channels) == 0 {
-		return "No channel subscriptions. Add one with /subscribe @channel_username optional title", nil
+		return nil, nil
 	}
-	lines := []string{"Channel subscriptions:"}
+	var lines []string
 	for _, sub := range profile.Channels {
 		handle := sub.Source.Username
 		if handle == "" {
@@ -227,19 +272,45 @@ func (b *Bot) listChannels(ctx context.Context, chatID int64) (string, error) {
 		}
 		lines = append(lines, "- "+name)
 	}
-	return strings.Join(lines, "\n"), nil
+	return lines, nil
 }
 
 func (b *Bot) subscribeChannel(ctx context.Context, chatID int64, text string) (string, error) {
 	parts := strings.Fields(text)
 	if len(parts) < 2 {
-		return "Usage: /subscribe @channel_username optional title", nil
+		return "Пришли public ссылку или username: /subscribe https://t.me/channel_name optional title", nil
 	}
-	username := strings.TrimPrefix(strings.TrimSpace(parts[1]), "@")
+	username, ok := parsePublicTelegramUsername(parts[1])
+	if !ok {
+		return unsupportedChannelRefMessage(parts[1]), nil
+	}
 	if username == "" {
-		return "Usage: /subscribe @channel_username optional title", nil
+		return "Пришли public ссылку или username: /subscribe https://t.me/channel_name optional title", nil
 	}
 	title := strings.TrimSpace(strings.TrimPrefix(text, parts[0]+" "+parts[1]))
+	return b.upsertChannel(ctx, chatID, username, title)
+}
+
+func (b *Bot) subscribeChannelsFromText(ctx context.Context, chatID int64, text string) (string, error) {
+	refs := publicTelegramUsernamesFromText(text)
+	if len(refs) == 0 {
+		return unsupportedChannelRefMessage(text), nil
+	}
+	var added []string
+	for _, username := range refs {
+		reply, err := b.upsertChannel(ctx, chatID, username, "")
+		if err != nil {
+			return "", err
+		}
+		added = append(added, reply)
+	}
+	lines := append([]string{"Источники обновлены:"}, added...)
+	lines = append(lines, "", "Важно: я не вступаю в чаты автоматически. Убедись, что аккаунт, которым запущен worker, уже вступил в эти чаты/группы.", "Список источников: /channels")
+	return strings.Join(lines, "\n"), nil
+}
+
+func (b *Bot) upsertChannel(ctx context.Context, chatID int64, username, title string) (string, error) {
+	username = strings.TrimPrefix(strings.TrimSpace(username), "@")
 	profileID := profiles.IDForTelegramChat(chatID)
 	if err := b.store.UpsertProfile(ctx, profiles.Profile{ID: profileID, TelegramChatID: chatID}); err != nil {
 		return "", err
@@ -256,25 +327,104 @@ func (b *Bot) subscribeChannel(ctx context.Context, chatID int64, text string) (
 		return "", err
 	}
 	if added {
-		return "Subscribed to @" + username, nil
+		return "Добавлен @" + username, nil
 	}
-	return "Updated subscription @" + username, nil
+	return "Обновлен @" + username, nil
 }
 
 func (b *Bot) unsubscribeChannel(ctx context.Context, chatID int64, text string) (string, error) {
 	parts := strings.Fields(text)
 	if len(parts) != 2 {
-		return "Usage: /unsubscribe @channel_username", nil
+		return "Использование: /unsubscribe @channel_username", nil
 	}
-	username := strings.TrimPrefix(strings.TrimSpace(parts[1]), "@")
+	username, ok := parsePublicTelegramUsername(parts[1])
+	if !ok {
+		return unsupportedChannelRefMessage(parts[1]), nil
+	}
 	removed, err := b.store.RemoveProfileChannel(ctx, profiles.IDForTelegramChat(chatID), username)
 	if err != nil {
 		return "", err
 	}
 	if !removed {
-		return "No subscription found for @" + username, nil
+		return "Источник @" + username + " не найден.", nil
 	}
-	return "Unsubscribed from @" + username, nil
+	return "Источник @" + username + " удален.", nil
+}
+
+func looksLikeChannelSubscription(text string) bool {
+	text = strings.TrimSpace(text)
+	if strings.HasPrefix(text, "@") {
+		return true
+	}
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "t.me/") || strings.Contains(lower, "telegram.me/")
+}
+
+func publicTelegramUsernamesFromText(text string) []string {
+	seen := map[string]bool{}
+	var usernames []string
+	for _, token := range strings.Fields(text) {
+		username, ok := parsePublicTelegramUsername(token)
+		if !ok || seen[strings.ToLower(username)] {
+			continue
+		}
+		seen[strings.ToLower(username)] = true
+		usernames = append(usernames, username)
+	}
+	return usernames
+}
+
+func parsePublicTelegramUsername(raw string) (string, bool) {
+	value := strings.TrimSpace(raw)
+	value = strings.Trim(value, " \t\r\n,.;:()[]{}<>")
+	if value == "" {
+		return "", false
+	}
+	if strings.HasPrefix(value, "@") {
+		username := strings.TrimPrefix(value, "@")
+		return cleanTelegramUsername(username)
+	}
+	lower := strings.ToLower(value)
+	if strings.HasPrefix(lower, "t.me/") || strings.HasPrefix(lower, "telegram.me/") {
+		value = "https://" + value
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Host == "" {
+		return "", false
+	}
+	host := strings.TrimPrefix(strings.ToLower(parsed.Host), "www.")
+	if host != "t.me" && host != "telegram.me" {
+		return "", false
+	}
+	path := strings.Trim(parsed.Path, "/")
+	if path == "" {
+		return "", false
+	}
+	segments := strings.Split(path, "/")
+	segment := segments[0]
+	if strings.EqualFold(segment, "s") && len(segments) > 1 {
+		segment = segments[1]
+	}
+	return cleanTelegramUsername(segment)
+}
+
+func cleanTelegramUsername(username string) (string, bool) {
+	username = strings.TrimSpace(username)
+	username = strings.Trim(username, " \t\r\n,.;:()[]{}<>")
+	if username == "" ||
+		strings.HasPrefix(username, "+") ||
+		strings.EqualFold(username, "joinchat") ||
+		strings.EqualFold(username, "c") {
+		return "", false
+	}
+	if strings.Contains(username, "/") || strings.Contains(username, "?") || strings.Contains(username, "#") {
+		return "", false
+	}
+	return strings.TrimPrefix(username, "@"), true
+}
+
+func unsupportedChannelRefMessage(value string) string {
+	return "Пока я могу подключать только public Telegram-источники по @username или t.me/name.\n\nЕсли это invite-ссылка вида t.me/+..., вступи вручную, но для чтения мне все равно нужен public username канала/группы. Автоматическое вступление не выполняю."
 }
 
 func (b *Bot) saveProfile(ctx context.Context, chatID int64, prefs domain.UserPreferences) error {

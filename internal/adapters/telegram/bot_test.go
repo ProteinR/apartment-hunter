@@ -79,6 +79,21 @@ func TestHandleTextParsesPreviewsAndSavesPreferences(t *testing.T) {
 			BudgetMax:         intPtr(650),
 			AreaMin:           floatPtr(50),
 			RequiredAmenities: []string{"dishwasher", "oven"},
+			InteriorPreferences: domain.InteriorPreferences{
+				Style:  []string{"fresh_renovation", "bright", "neutral_tones"},
+				Reject: []string{"glossy_ceiling"},
+			},
+			RejectRules: []string{"windows_facing_adjacent_building_close"},
+			LocationPreferences: []domain.LocationPreference{{
+				CenterName:         "6 May Park",
+				RadiusMeters:       intPtr(1000),
+				BoundaryStreetName: stringPtr("Pushkin Street"),
+				BoundaryRule:       stringPtr("not beyond"),
+				RawText:            "район парка 6 мая",
+				UnresolvedRules:    []string{},
+				Confidence:         0.8,
+				Type:               "radius_with_boundary",
+			}},
 		}},
 	}
 	bot := New("test-token", outputDir, WithProfileStore(store), WithPreferencesParser(parser), WithGeometryBuilder(fakeGeometryBuilder{}))
@@ -88,7 +103,7 @@ func TestHandleTextParsesPreviewsAndSavesPreferences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reply != "Опиши квартиру одним сообщением." {
+	if !strings.Contains(reply, "Опиши, какую квартиру ищем") || !strings.Contains(reply, "Например:") {
 		t.Fatalf("unexpected start reply %q", reply)
 	}
 
@@ -99,14 +114,34 @@ func TestHandleTextParsesPreviewsAndSavesPreferences(t *testing.T) {
 	if !strings.Contains(reply, "Ваш запрос:") || !strings.Contains(reply, "Нормализованное описание:") || !strings.Contains(reply, "Бюджет: до 650 USD") {
 		t.Fatalf("unexpected preview:\n%s", reply)
 	}
+	for _, expected := range []string{
+		"* посудомойка",
+		"* духовка",
+		"* свежий ремонт",
+		"* глянцевые потолки",
+		"* окна вплотную к соседнему дому",
+		"* район парка 6 мая, радиус 1000 м",
+		"* ограничение: не дальше Pushkin Street",
+	} {
+		if !strings.Contains(reply, expected) {
+			t.Fatalf("expected preview to contain %q:\n%s", expected, reply)
+		}
+	}
+	for _, unexpected := range []string{"* dishwasher", "* oven", "fresh_renovation", "glossy_ceiling"} {
+		if strings.Contains(reply, unexpected) {
+			t.Fatalf("preview should not expose %q:\n%s", unexpected, reply)
+		}
+	}
 	if len(store.searchProfiles) != 0 {
 		t.Fatal("preferences should not be saved before confirmation")
 	}
-	reply, err = bot.HandleText(chatID, "Save")
+	reply, err = bot.HandleText(chatID, "Сохранить")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reply != "Готово, фильтры сохранены." {
+	if !strings.Contains(reply, "Готово, фильтры сохранены.") ||
+		!strings.Contains(reply, "Теперь нужны источники объявлений.") ||
+		!strings.Contains(reply, "не вступаю в чаты автоматически") {
 		t.Fatalf("unexpected save reply %q", reply)
 	}
 
@@ -141,11 +176,11 @@ func TestSubscribeChannelUsesProfileStore(t *testing.T) {
 	store := newFakeProfileStore()
 	bot := New("test-token", t.TempDir(), WithProfileStore(store))
 
-	reply, err := bot.HandleText(42, "/subscribe @rentals Batumi rentals")
+	reply, err := bot.HandleText(42, "/subscribe https://t.me/rentals Batumi rentals")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reply != "Subscribed to @rentals" {
+	if reply != "Добавлен @rentals" {
 		t.Fatalf("unexpected reply %q", reply)
 	}
 	profile, ok, err := store.GetProfile(context.Background(), "telegram_42")
@@ -157,6 +192,43 @@ func TestSubscribeChannelUsesProfileStore(t *testing.T) {
 	}
 	if profile.Channels[0].Source.Title != "Batumi rentals" {
 		t.Fatalf("unexpected channel title %q", profile.Channels[0].Source.Title)
+	}
+}
+
+func TestPlainChannelLinksAddSubscriptions(t *testing.T) {
+	store := newFakeProfileStore()
+	bot := New("test-token", t.TempDir(), WithProfileStore(store))
+
+	reply, err := bot.HandleText(42, "https://t.me/batumi_rentals @rentals2 https://t.me/batumi_rentals/123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reply, "Источники обновлены:") ||
+		!strings.Contains(reply, "Добавлен @batumi_rentals") ||
+		!strings.Contains(reply, "Добавлен @rentals2") ||
+		!strings.Contains(reply, "не вступаю в чаты автоматически") {
+		t.Fatalf("unexpected reply %q", reply)
+	}
+	profile, ok, err := store.GetProfile(context.Background(), "telegram_42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || len(profile.Channels) != 2 {
+		t.Fatalf("expected two channels to be saved, got %+v", profile)
+	}
+}
+
+func TestPrivateInviteLinkExplainsManualLimitation(t *testing.T) {
+	store := newFakeProfileStore()
+	bot := New("test-token", t.TempDir(), WithProfileStore(store))
+
+	reply, err := bot.HandleText(42, "https://t.me/+abcdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reply, "только public Telegram-источники") ||
+		!strings.Contains(reply, "Автоматическое вступление не выполняю") {
+		t.Fatalf("unexpected reply %q", reply)
 	}
 }
 
@@ -187,5 +259,9 @@ func intPtr(value int) *int {
 }
 
 func floatPtr(value float64) *float64 {
+	return &value
+}
+
+func stringPtr(value string) *string {
 	return &value
 }
