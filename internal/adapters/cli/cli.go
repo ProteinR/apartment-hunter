@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"apartment-hunter/internal/adapters/geocodingmock"
 	"apartment-hunter/internal/adapters/googlemaps"
@@ -67,32 +68,7 @@ func (a App) Run(args []string) error {
 		}
 		return a.score(args[1], args[2])
 	case "telegram":
-		outputDir := "preferences"
-		if len(args) > 1 {
-			outputDir = args[1]
-		}
-		token := os.Getenv("TELEGRAM_BOT_TOKEN")
-		if token == "" {
-			return fmt.Errorf("TELEGRAM_BOT_TOKEN is required")
-		}
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer stop()
-		store, err := openPostgresStore(ctx)
-		if err != nil {
-			return err
-		}
-		defer store.Close()
-		nlpParser, err := openaipreferences.FromEnv()
-		if err != nil {
-			return err
-		}
-		prefsParser := preferenceparser.Service{
-			Normalizer: nlpParser,
-			Extractor:  nlpParser,
-		}
-		geometry := preferenceparser.PostGISGeometryBuilder{Resolver: newGoogleGeocoder()}
-		fmt.Fprintf(a.Out, "Telegram bot started. Saving profiles to Postgres\n")
-		return telegram.New(token, outputDir, telegram.WithPreferencesParser(prefsParser), telegram.WithGeometryBuilder(geometry), telegram.WithProfileStore(store)).Run(ctx.Done())
+		return a.telegram(args)
 	case "telegram-read":
 		profileID, err := profileIDArg(args, "telegram-read")
 		if err != nil {
@@ -121,6 +97,95 @@ func (a App) telegramProcess(profileID string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	return a.telegramProcessWithContext(ctx, profileID, reader)
+}
+
+func (a App) telegram(args []string) error {
+	outputDir := "preferences"
+	if len(args) > 1 {
+		outputDir = args[1]
+	}
+	token := os.Getenv("TELEGRAM_BOT_TOKEN")
+	if token == "" {
+		return fmt.Errorf("TELEGRAM_BOT_TOKEN is required")
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if profileID := strings.TrimSpace(os.Getenv("APARTMENT_HUNTER_PROFILE_ID")); profileID != "" {
+		if reason := telegramWorkerDisabledReason(); reason != "" {
+			fmt.Fprintf(a.Out, "Telegram worker not started: %s\n", reason)
+		} else {
+			go func() {
+				if err := a.runTelegramWorker(ctx, profileID); err != nil {
+					fmt.Fprintf(a.Err, "Telegram worker failed for %s: %v\n", profileID, err)
+				}
+			}()
+		}
+	} else {
+		fmt.Fprintf(a.Out, "Telegram worker not started: APARTMENT_HUNTER_PROFILE_ID is not set\n")
+	}
+
+	store, err := openPostgresStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	nlpParser, err := openaipreferences.FromEnv()
+	if err != nil {
+		return err
+	}
+	prefsParser := preferenceparser.Service{
+		Normalizer: nlpParser,
+		Extractor:  nlpParser,
+	}
+	geometry := preferenceparser.PostGISGeometryBuilder{Resolver: newGoogleGeocoder()}
+	fmt.Fprintf(a.Out, "Telegram bot started. Saving profiles to Postgres\n")
+
+	err = telegram.New(token, outputDir, telegram.WithPreferencesParser(prefsParser), telegram.WithGeometryBuilder(geometry), telegram.WithProfileStore(store)).Run(ctx.Done())
+	stop()
+	return err
+}
+
+func (a App) runTelegramWorker(ctx context.Context, profileID string) error {
+	reader, err := telegramuserbot.FromEnv(a.In)
+	if err != nil {
+		return err
+	}
+
+	for {
+		err := a.telegramProcessWithContext(ctx, profileID, reader)
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err == nil {
+			return nil
+		}
+		fmt.Fprintf(a.Err, "Telegram worker stopped for %s: %v; retrying in 15s\n", profileID, err)
+		timer := time.NewTimer(15 * time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+		}
+	}
+}
+
+func telegramWorkerDisabledReason() string {
+	if strings.TrimSpace(os.Getenv("TELEGRAM_API_ID")) == "" {
+		return "TELEGRAM_API_ID is not set"
+	}
+	if strings.TrimSpace(os.Getenv("TELEGRAM_API_HASH")) == "" {
+		return "TELEGRAM_API_HASH is not set"
+	}
+	if strings.TrimSpace(os.Getenv("TELEGRAM_PHONE")) == "" && strings.TrimSpace(os.Getenv("TELEGRAM_SESSION_STRING")) == "" {
+		return "TELEGRAM_PHONE or TELEGRAM_SESSION_STRING is not set"
+	}
+	return ""
+}
+
+func (a App) telegramProcessWithContext(ctx context.Context, profileID string, reader *telegramuserbot.Client) error {
 	store, err := openPostgresStore(ctx)
 	if err != nil {
 		return err
@@ -156,6 +221,11 @@ func (a App) telegramProcess(profileID string) error {
 
 	botToken := strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN"))
 	fmt.Fprintf(a.Out, "Listening for new Telegram messages for %s\n", profileID)
+	if botToken == "" || profile.TelegramChatID == 0 {
+		fmt.Fprintf(a.Out, "Telegram notifications disabled: bot token set=%t, chat id=%d\n", botToken != "", profile.TelegramChatID)
+	} else {
+		fmt.Fprintf(a.Out, "Telegram notifications enabled for chat %d\n", profile.TelegramChatID)
+	}
 	return reader.Listen(ctx, func(ctx context.Context, message sources.ChannelMessage) error {
 		profile, ok, err := store.GetProfile(ctx, profileID)
 		if err != nil {
@@ -184,7 +254,8 @@ func (a App) telegramProcess(profileID string) error {
 			return err
 		}
 		fmt.Fprintf(a.Out, "Processed %s/%d: %s\n", message.ChannelID, message.MessageID, result.Record.Status)
-		if result.Record.Status == "passed" && botToken != "" && profile.TelegramChatID != 0 {
+		if botToken != "" && profile.TelegramChatID != 0 {
+			fmt.Fprintf(a.Out, "Sending notification for %s/%d to chat %d\n", message.ChannelID, message.MessageID, profile.TelegramChatID)
 			if err := telegram.SendText(ctx, botToken, profile.TelegramChatID, evaluation.NotificationText(result.Record)); err != nil {
 				return err
 			}

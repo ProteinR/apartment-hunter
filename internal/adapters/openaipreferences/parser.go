@@ -152,6 +152,9 @@ func (p *Parser) call(ctx context.Context, instructions, input, schemaName strin
 
 const normalizationInstructions = `Ты выполняешь только нормализацию требований пользователя.
 Твоя задача улучшить структуру текста и читаемость.
+Нормализованное описание должно быть на том же языке, на котором пользователь написал запрос.
+Если запрос написан на русском, весь normalized_query должен быть на русском; не используй английские слова, названия полей, служебные slugs или enum-значения.
+Если в исходном запросе есть иностранное собственное название, сохрани его только если нет очевидного общеупотребимого варианта на языке пользователя.
 Запрещено добавлять новые требования, предположения, районы, удобства, площади, цены, характеристики или предпочтения, которых нет в исходном тексте.
 Если требование неоднозначно, сохрани его как есть.
 Не меняй числовые значения.
@@ -163,8 +166,10 @@ Return only strict JSON matching the schema.
 Use null for missing numeric values and empty arrays for missing lists.
 Do not invent exact coordinates.
 Coordinates and Google place IDs must remain empty unless present in the input.
-Ambiguous location phrases must be preserved in unresolved_location_rules.
-Use stable English slugs for amenities and reject rules, for example dishwasher, oven, glossy_ceiling, dark_old_renovation.`
+Human-readable text fields must preserve the input language: name, center_name, boundary_street_name, raw_text, and unresolved_location_rules.
+If the input is Russian, keep those human-readable text fields in Russian and do not translate them into English.
+Use stable English slugs only for machine-readable enum/list fields such as required_amenities, preferred_amenities, interior_preferences.style, interior_preferences.reject, reject_rules, type, and boundary_rule.
+Ambiguous location phrases must be preserved in unresolved_location_rules in the original input language.`
 
 func normalizationSchema() map[string]any {
 	return map[string]any{

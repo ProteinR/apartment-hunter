@@ -26,6 +26,10 @@ services:
       - .env
     environment:
       DATABASE_URL: postgres://apartment_hunter:apartment_hunter@postgres:5432/apartment_hunter?sslmode=disable
+      TELEGRAM_SESSION_FILE: /app/.telegram/userbot.session
+      TELEGRAM_MEDIA_DIR: /app/.telegram/media
+    volumes:
+      - telegram-session:/app/.telegram
 
   worker:
     build: .

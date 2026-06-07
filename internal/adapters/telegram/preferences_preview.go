@@ -20,17 +20,17 @@ func buildPreferencesPreview(draft preferenceparser.Draft) string {
 	lang := previewLanguage(draft.RawQuery + "\n" + draft.NormalizedQuery)
 	var b strings.Builder
 	fmt.Fprintf(&b, "Ваш запрос:\n\n%s\n\n", draft.RawQuery)
-	fmt.Fprintf(&b, "Нормализованное описание:\n\n%s\n\n", draft.NormalizedQuery)
+	fmt.Fprintf(&b, "Нормализованное описание:\n\n%s\n\n", displayFreeText(draft.NormalizedQuery, lang))
 	b.WriteString("Распознанные фильтры:\n\n")
 	if prefs.BudgetMin != nil || prefs.BudgetMax != nil {
 		b.WriteString("Бюджет: ")
 		switch {
 		case prefs.BudgetMin != nil && prefs.BudgetMax != nil:
-			fmt.Fprintf(&b, "от %d до %d USD\n", *prefs.BudgetMin, *prefs.BudgetMax)
+			fmt.Fprintf(&b, "от %d до %d %s\n", *prefs.BudgetMin, *prefs.BudgetMax, displayCurrency("USD", lang))
 		case prefs.BudgetMax != nil:
-			fmt.Fprintf(&b, "до %d USD\n", *prefs.BudgetMax)
+			fmt.Fprintf(&b, "до %d %s\n", *prefs.BudgetMax, displayCurrency("USD", lang))
 		case prefs.BudgetMin != nil:
-			fmt.Fprintf(&b, "от %d USD\n", *prefs.BudgetMin)
+			fmt.Fprintf(&b, "от %d %s\n", *prefs.BudgetMin, displayCurrency("USD", lang))
 		}
 	}
 	if prefs.AreaMin != nil || prefs.AreaMax != nil {
@@ -45,13 +45,13 @@ func buildPreferencesPreview(draft preferenceparser.Draft) string {
 		}
 	}
 	appendList(&b, "Обязательно", prefs.RequiredAmenities, lang)
-	appendList(&b, "Предпочтительно", prefs.PreferredAmenities, lang)
+	appendList(&b, "Предпочтительно", withoutExisting(prefs.PreferredAmenities, prefs.RequiredAmenities), lang)
 	appendList(&b, "Стиль", prefs.InteriorPreferences.Style, lang)
 	rejects := append([]string{}, prefs.InteriorPreferences.Reject...)
 	rejects = append(rejects, prefs.RejectRules...)
 	appendList(&b, "Исключить", rejects, lang)
 	appendLocations(&b, prefs.LocationPreferences, lang)
-	appendList(&b, "Неразобранные geo-правила", prefs.UnresolvedLocationRules, lang)
+	appendList(&b, "Неразобранные гео-правила", prefs.UnresolvedLocationRules, lang)
 	b.WriteString("\nСохранить?")
 	return b.String()
 }
@@ -90,7 +90,11 @@ func appendLocations(b *strings.Builder, locations []domain.LocationPreference, 
 			if loc.BoundaryRule != nil {
 				rule = displayPreferenceValue(*loc.BoundaryRule, lang) + " "
 			}
-			fmt.Fprintf(b, "* ограничение: %s%s\n", rule, displayPreferenceValue(*loc.BoundaryStreetName, lang))
+			street := displayPreferenceValue(*loc.BoundaryStreetName, lang)
+			if lang == "ru" && loc.BoundaryRule != nil && displayPreferenceValue(*loc.BoundaryRule, lang) == "не дальше" {
+				street = displayBoundaryTarget(*loc.BoundaryStreetName)
+			}
+			fmt.Fprintf(b, "* ограничение: %s%s\n", rule, street)
 		}
 	}
 }
@@ -109,6 +113,21 @@ func compactStrings(values []string) []string {
 	return out
 }
 
+func withoutExisting(values, existing []string) []string {
+	seen := map[string]bool{}
+	for _, value := range existing {
+		seen[strings.TrimSpace(value)] = true
+	}
+	var out []string
+	for _, value := range values {
+		if seen[strings.TrimSpace(value)] {
+			continue
+		}
+		out = append(out, value)
+	}
+	return out
+}
+
 func previewLanguage(text string) string {
 	for _, r := range text {
 		if r >= 'А' && r <= 'я' || r == 'Ё' || r == 'ё' {
@@ -116,6 +135,24 @@ func previewLanguage(text string) string {
 		}
 	}
 	return "en"
+}
+
+func displayFreeText(value, lang string) string {
+	value = strings.TrimSpace(value)
+	if lang != "ru" {
+		return value
+	}
+	for from, to := range russianFreeTextReplacements {
+		value = strings.ReplaceAll(value, from, to)
+	}
+	return value
+}
+
+func displayCurrency(value, lang string) string {
+	if lang == "ru" && value == "USD" {
+		return "$"
+	}
+	return value
 }
 
 func displayPreferenceValue(value, lang string) string {
@@ -126,10 +163,51 @@ func displayPreferenceValue(value, lang string) string {
 	if translated, ok := russianPreferenceLabels[value]; ok {
 		return translated
 	}
+	value = displayFreeText(value, lang)
+	if translated, ok := russianPreferenceLabels[value]; ok {
+		return translated
+	}
 	if strings.HasPrefix(value, "not beyond ") {
-		return "не дальше " + strings.TrimSpace(strings.TrimPrefix(value, "not beyond "))
+		return "не дальше " + displayBoundaryTarget(strings.TrimSpace(strings.TrimPrefix(value, "not beyond ")))
+	}
+	if strings.Contains(value, "_") {
+		return displaySlug(value)
 	}
 	return value
+}
+
+func displayBoundaryTarget(value string) string {
+	value = displayPreferenceValue(value, "ru")
+	if strings.HasPrefix(value, "улица ") {
+		return "улицы " + strings.TrimSpace(strings.TrimPrefix(value, "улица "))
+	}
+	return value
+}
+
+func displaySlug(value string) string {
+	parts := strings.Split(value, "_")
+	translated := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		if label, ok := russianSlugParts[part]; ok {
+			translated = append(translated, label)
+		}
+	}
+	if len(translated) == 0 {
+		return "неуточненное требование"
+	}
+	return strings.Join(translated, " ")
+}
+
+var russianFreeTextReplacements = map[string]string{
+	"6 May Park":       "парк 6 мая",
+	"Pushkin Street":   "улица Пушкина",
+	"New Boulevard":    "Новый бульвар",
+	"USD":              "$",
+	"fresh":            "свежий",
+	"light renovation": "светлый ремонт",
 }
 
 var russianPreferenceLabels = map[string]string{
@@ -137,6 +215,8 @@ var russianPreferenceLabels = map[string]string{
 	"dark_old_renovation":                    "темный старый ремонт",
 	"dark_walls":                             "темные стены",
 	"dishwasher":                             "посудомойка",
+	"fresh":                                  "свежий ремонт",
+	"light_renovation":                       "светлый ремонт",
 	"fresh_renovation":                       "свежий ремонт",
 	"glossy_ceiling":                         "глянцевые потолки",
 	"grey_tones":                             "серые тона",
@@ -145,10 +225,30 @@ var russianPreferenceLabels = map[string]string{
 	"oven":                                   "духовка",
 	"pastel_tones":                           "пастельные тона",
 	"not beyond":                             "не дальше",
+	"not beyond Pushkin Street":              "не дальше улицы Пушкина",
 	"radius":                                 "радиус",
 	"sea":                                    "моря",
+	"window_facing_adjacent_building":        "окна вплотную к соседнему дому",
+	"window_facing_construction_site":        "окна на строящийся объект",
 	"windows_facing_adjacent_building_close": "окна вплотную к соседнему дому",
 	"windows_facing_house":                   "окна в соседний дом",
+}
+
+var russianSlugParts = map[string]string{
+	"adjacent":     "соседний",
+	"building":     "дом",
+	"ceiling":      "потолок",
+	"construction": "стройка",
+	"dark":         "темный",
+	"facing":       "вид",
+	"fresh":        "свежий",
+	"glossy":       "глянцевый",
+	"light":        "светлый",
+	"old":          "старый",
+	"renovation":   "ремонт",
+	"site":         "объект",
+	"window":       "окно",
+	"windows":      "окна",
 }
 
 func confirmationKeyboard() models.ReplyMarkup {

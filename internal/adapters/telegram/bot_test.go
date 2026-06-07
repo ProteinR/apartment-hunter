@@ -76,14 +76,15 @@ func TestHandleTextParsesPreviewsAndSavesPreferences(t *testing.T) {
 	parser := preferenceparser.Service{
 		Normalizer: fakeNormalizer{normalized: "Бюджет:\n* до 650 USD"},
 		Extractor: fakeExtractor{prefs: domain.UserPreferences{
-			BudgetMax:         intPtr(650),
-			AreaMin:           floatPtr(50),
-			RequiredAmenities: []string{"dishwasher", "oven"},
+			BudgetMax:          intPtr(650),
+			AreaMin:            floatPtr(50),
+			RequiredAmenities:  []string{"dishwasher", "oven"},
+			PreferredAmenities: []string{"dishwasher", "oven"},
 			InteriorPreferences: domain.InteriorPreferences{
-				Style:  []string{"fresh_renovation", "bright", "neutral_tones"},
+				Style:  []string{"fresh", "light_renovation", "neutral_tones"},
 				Reject: []string{"glossy_ceiling"},
 			},
-			RejectRules: []string{"windows_facing_adjacent_building_close"},
+			RejectRules: []string{"window_facing_adjacent_building", "window_facing_construction_site"},
 			LocationPreferences: []domain.LocationPreference{{
 				CenterName:         "6 May Park",
 				RadiusMeters:       intPtr(1000),
@@ -94,6 +95,7 @@ func TestHandleTextParsesPreviewsAndSavesPreferences(t *testing.T) {
 				Confidence:         0.8,
 				Type:               "radius_with_boundary",
 			}},
+			UnresolvedLocationRules: []string{"not beyond Pushkin Street"},
 		}},
 	}
 	bot := New("test-token", outputDir, WithProfileStore(store), WithPreferencesParser(parser), WithGeometryBuilder(fakeGeometryBuilder{}))
@@ -111,23 +113,27 @@ func TestHandleTextParsesPreviewsAndSavesPreferences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(reply, "Ваш запрос:") || !strings.Contains(reply, "Нормализованное описание:") || !strings.Contains(reply, "Бюджет: до 650 USD") {
+	if !strings.Contains(reply, "Ваш запрос:") || !strings.Contains(reply, "Нормализованное описание:") || !strings.Contains(reply, "Бюджет: до 650 $") {
 		t.Fatalf("unexpected preview:\n%s", reply)
 	}
 	for _, expected := range []string{
 		"* посудомойка",
 		"* духовка",
 		"* свежий ремонт",
+		"* светлый ремонт",
 		"* глянцевые потолки",
 		"* окна вплотную к соседнему дому",
+		"* окна на строящийся объект",
 		"* район парка 6 мая, радиус 1000 м",
-		"* ограничение: не дальше Pushkin Street",
+		"* ограничение: не дальше улицы Пушкина",
+		"Неразобранные гео-правила:",
+		"* не дальше улицы Пушкина",
 	} {
 		if !strings.Contains(reply, expected) {
 			t.Fatalf("expected preview to contain %q:\n%s", expected, reply)
 		}
 	}
-	for _, unexpected := range []string{"* dishwasher", "* oven", "fresh_renovation", "glossy_ceiling"} {
+	for _, unexpected := range []string{"* dishwasher", "* oven", "fresh_renovation", "light_renovation", "glossy_ceiling", "window_facing", "construction_site", "USD", "Pushkin Street", "Предпочтительно:"} {
 		if strings.Contains(reply, unexpected) {
 			t.Fatalf("preview should not expose %q:\n%s", unexpected, reply)
 		}
