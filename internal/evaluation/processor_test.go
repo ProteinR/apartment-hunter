@@ -17,7 +17,8 @@ type fakeAnalyzer struct {
 }
 
 type fakeGeocoder struct {
-	calls int
+	calls   int
+	queries []string
 }
 
 type fakeLocationMatcher struct {
@@ -28,6 +29,7 @@ type fakeLocationMatcher struct {
 
 func (g *fakeGeocoder) Resolve(ctx context.Context, query string, maxDistanceMeters int) (domain.LocationPreference, error) {
 	g.calls++
+	g.queries = append(g.queries, query)
 	return domain.LocationPreference{Name: "Europe Square, Batumi", Latitude: 41.6511, Longitude: 41.6367}, nil
 }
 
@@ -63,6 +65,31 @@ func TestProcessMessageGeocodesListingAfterBasicFilters(t *testing.T) {
 	}
 	if result.Record.Listing.Latitude != 41.6511 || result.Record.Listing.Longitude != 41.6367 {
 		t.Fatalf("unexpected coordinates %.6f %.6f", result.Record.Listing.Latitude, result.Record.Listing.Longitude)
+	}
+}
+
+func TestProcessMessageGeocodesExplicitAddressBeforeFullListingText(t *testing.T) {
+	geocoder := &fakeGeocoder{}
+	processor := Processor{
+		Prefs:    domain.UserPreferences{MaxBudget: 800},
+		Geocoder: geocoder,
+	}
+
+	_, err := processor.ProcessMessage(context.Background(), domain.ListingSourceRef{}, sources.ChannelMessage{
+		Text: "#сдам #2спальни #батуми\n" +
+			"3х комнатная квартира рядом с Парком 6 Мая\n" +
+			"📍ул. Горгиладзе, 45\n" +
+			"✔️75 м2\n" +
+			"💸 650$ на год",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if geocoder.calls != 1 {
+		t.Fatalf("expected geocoder to stop after first successful address query, got %d calls", geocoder.calls)
+	}
+	if len(geocoder.queries) != 1 || geocoder.queries[0] != "ул. Горгиладзе, 45" {
+		t.Fatalf("expected explicit address query first, got %+v", geocoder.queries)
 	}
 }
 

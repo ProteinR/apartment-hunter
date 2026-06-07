@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"apartment-hunter/internal/dedup"
@@ -176,23 +177,58 @@ func (p Processor) geocodeListing(ctx context.Context, listing domain.ApartmentL
 	if p.Geocoder == nil || listing.Latitude != 0 || listing.Longitude != 0 {
 		return listing
 	}
-	query := strings.TrimSpace(listing.Description)
-	if query == "" {
-		query = listing.Title
-	}
-	if query == "" {
+	for _, query := range geocodeListingQueries(listing) {
+		loc, err := p.Geocoder.Resolve(ctx, query, 0)
+		if err != nil || loc.Latitude == 0 || loc.Longitude == 0 {
+			continue
+		}
+		listing.Latitude = loc.Latitude
+		listing.Longitude = loc.Longitude
+		if listing.District == "" {
+			listing.District = loc.Name
+		}
 		return listing
-	}
-	loc, err := p.Geocoder.Resolve(ctx, query, 0)
-	if err != nil || loc.Latitude == 0 || loc.Longitude == 0 {
-		return listing
-	}
-	listing.Latitude = loc.Latitude
-	listing.Longitude = loc.Longitude
-	if listing.District == "" {
-		listing.District = loc.Name
 	}
 	return listing
+}
+
+var addressLinePattern = regexp.MustCompile(`(?i)(^|[\s,])(?:ул\.?|улица|street|st\.?|avenue|ave\.?|проспект|пр-т|переулок|пер\.?|road|rd\.?|lane|ln\.?)\s+`)
+
+func geocodeListingQueries(listing domain.ApartmentListing) []string {
+	var queries []string
+	seen := map[string]bool{}
+	add := func(query string) {
+		query = cleanGeocodeQuery(query)
+		if query == "" || seen[query] {
+			return
+		}
+		seen[query] = true
+		queries = append(queries, query)
+	}
+
+	for _, line := range strings.Split(listing.Description, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.Contains(line, "📍") {
+			add(strings.TrimSpace(line[strings.LastIndex(line, "📍")+len("📍"):]))
+			continue
+		}
+		if addressLinePattern.MatchString(line) {
+			add(line)
+		}
+	}
+	add(listing.Description)
+	add(listing.Title)
+	return queries
+}
+
+func cleanGeocodeQuery(query string) string {
+	query = strings.TrimSpace(query)
+	query = strings.TrimLeft(query, " \t-–—•*✔️✅🔶⚜️")
+	query = strings.TrimSpace(query)
+	return query
 }
 
 func listingWithHashablePhotos(listing domain.ApartmentListing) domain.ApartmentListing {

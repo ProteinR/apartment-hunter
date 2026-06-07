@@ -1,0 +1,6 @@
+.git
+.cache
+.gocache
+.telegram
+.env
+preferences

@@ -227,7 +227,7 @@ func (a App) telegramProcessWithContext(ctx context.Context, profileID string, r
 	} else {
 		fmt.Fprintf(a.Out, "Telegram notifications enabled for chat %d, debug mode=%t\n", profile.TelegramChatID, profiles.DebugModeEnabled(profile))
 	}
-	return reader.Listen(ctx, func(ctx context.Context, message sources.ChannelMessage) error {
+	handleMessage := func(ctx context.Context, message sources.ChannelMessage) error {
 		profile, ok, err := store.GetProfile(ctx, profileID)
 		if err != nil {
 			return err
@@ -262,7 +262,60 @@ func (a App) telegramProcessWithContext(ctx context.Context, profileID string, r
 			}
 		}
 		return nil
-	})
+	}
+	if err := a.catchUpTelegramHistory(ctx, profileID, reader, store, handleMessage); err != nil {
+		return err
+	}
+	return reader.Listen(ctx, handleMessage)
+}
+
+func (a App) catchUpTelegramHistory(ctx context.Context, profileID string, reader *telegramuserbot.Client, store *pgstore.Repository, handler telegramuserbot.MessageHandler) error {
+	profile, ok, err := store.GetProfile(ctx, profileID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("profile %q not found", profileID)
+	}
+	if len(profile.Channels) == 0 {
+		return nil
+	}
+
+	for _, sub := range profile.Channels {
+		limit := sub.Limit
+		if limit <= 0 {
+			limit = 50
+		}
+		fmt.Fprintf(a.Out, "Catching up Telegram history for @%s, limit=%d\n", subscriptionName(sub), limit)
+		messages, _, err := reader.Fetch(ctx, sub.Source, sources.Cursor{}, limit)
+		if err != nil {
+			return err
+		}
+		for i := len(messages) - 1; i >= 0; i-- {
+			message := messages[i]
+			if strings.TrimSpace(message.Text) == "" && len(message.Photos) == 0 {
+				continue
+			}
+			exists, err := store.EvaluationExists(ctx, profileID, message.ChannelID, message.MessageID)
+			if err != nil {
+				return err
+			}
+			if exists {
+				continue
+			}
+			if err := handler(ctx, message); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func subscriptionName(sub profiles.ChannelSubscription) string {
+	if sub.Source.Username != "" {
+		return strings.TrimPrefix(sub.Source.Username, "@")
+	}
+	return strings.TrimPrefix(sub.Source.ID, "@")
 }
 
 func shouldSendTelegramNotification(profile profiles.Profile, record domain.ListingEvaluationRecord) bool {

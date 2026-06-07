@@ -135,6 +135,37 @@ func TestBuildReportLocalizesRejectionReasons(t *testing.T) {
 	}
 }
 
+func TestBuildReportLocalizesLocationRejectionReason(t *testing.T) {
+	report := BuildReport(domain.ListingEvaluationRecord{
+		Listing: domain.ApartmentListing{
+			Title:     "Apartment",
+			District:  "Batumi, Georgia",
+			Latitude:  41.65110,
+			Longitude: 41.63670,
+		},
+		Status: "rejected_location",
+		Score: &domain.ListingScore{
+			PassedHardFilters: false,
+			RejectionReasons:  []string{"listing location is outside preferred search area"},
+			ScoreBreakdown:    map[string]float64{"location": 0},
+		},
+	}, domain.UserPreferences{
+		Locations: []domain.LocationPreference{{Name: "6 May Park"}},
+	})
+
+	for _, expected := range []string{
+		"Локация: не удовлетворено (Batumi, Georgia; координаты 41.65110, 41.63670)",
+		"локация объявления вне выбранной зоны поиска",
+	} {
+		if !strings.Contains(report, expected) {
+			t.Fatalf("expected report to contain %q:\n%s", expected, report)
+		}
+	}
+	if strings.Contains(report, "listing location is outside preferred search area") {
+		t.Fatalf("expected report not to contain untranslated location rejection reason:\n%s", report)
+	}
+}
+
 func TestBuildReportUsesEmojiForChecklistDecisions(t *testing.T) {
 	prefs := domain.UserPreferences{
 		MaxBudget:         600,

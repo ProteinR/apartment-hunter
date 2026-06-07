@@ -532,7 +532,7 @@ func sendMessageWithMarkup(ctx context.Context, api *telegrambot.Bot, chatID int
 }
 
 func SendText(ctx context.Context, token string, chatID int64, text string) error {
-	api, err := telegrambot.New(token)
+	api, err := telegrambot.New(token, telegrambot.WithHTTPClient(20*time.Second, &http.Client{Timeout: 20 * time.Second}))
 	if err != nil {
 		return err
 	}

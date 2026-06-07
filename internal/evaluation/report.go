@@ -272,6 +272,10 @@ func rejectionReasonLabel(reason string) string {
 		return "обнаружен старый ремонт"
 	case "windows facing neighboring house detected":
 		return "окна выходят на соседний дом"
+	case "listing location is unresolved":
+		return "локацию объявления не удалось определить"
+	case "listing location is outside preferred search area":
+		return "локация объявления вне выбранной зоны поиска"
 	default:
 		return reason
 	}
@@ -305,7 +309,13 @@ func areaNote(listing domain.ApartmentListing, prefs domain.UserPreferences) str
 
 func locationNote(listing domain.ApartmentListing, prefs domain.UserPreferences) string {
 	if listing.District != "" {
+		if listing.Latitude != 0 || listing.Longitude != 0 {
+			return fmt.Sprintf(" (%s; координаты %.5f, %.5f)", listing.District, listing.Latitude, listing.Longitude)
+		}
 		return " (" + listing.District + ")"
+	}
+	if listing.Latitude != 0 || listing.Longitude != 0 {
+		return fmt.Sprintf(" (координаты %.5f, %.5f)", listing.Latitude, listing.Longitude)
 	}
 	if len(prefs.Locations) == 0 {
 		return " (локации не заданы)"

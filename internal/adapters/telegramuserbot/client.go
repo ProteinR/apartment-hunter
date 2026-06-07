@@ -393,9 +393,9 @@ func resolveChannel(ctx context.Context, api *tg.Client, channel sources.Channel
 }
 
 func mapMessage(ref sources.ChannelRef, resolved resolvedChannel, message *tg.Message) sources.ChannelMessage {
-	channelID := ref.ID
+	channelID := resolved.ID
 	if channelID == "" {
-		channelID = resolved.ID
+		channelID = ref.ID
 	}
 	channelName := ref.Title
 	if channelName == "" {

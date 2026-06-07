@@ -348,6 +348,20 @@ func (r *Repository) SaveEvaluation(ctx context.Context, record domain.ListingEv
 	return err
 }
 
+func (r *Repository) EvaluationExists(ctx context.Context, profileID, channelID string, messageID int) (bool, error) {
+	if strings.TrimSpace(profileID) == "" || strings.TrimSpace(channelID) == "" || messageID == 0 {
+		return false, nil
+	}
+	var exists bool
+	err := r.db.QueryRowContext(ctx, `
+		select exists (
+			select 1 from listing_evaluations
+			where profile_id = $1 and channel_id = $2 and message_id = $3
+		)
+	`, profileID, channelID, messageID).Scan(&exists)
+	return exists, err
+}
+
 func (r *Repository) SaveImageFingerprints(ctx context.Context, listingID string, fingerprints []dedup.ListingImageFingerprint) error {
 	for _, fingerprint := range fingerprints {
 		hashesJSON, err := json.Marshal(fingerprint.Hashes)
