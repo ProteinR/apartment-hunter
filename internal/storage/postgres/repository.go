@@ -98,6 +98,22 @@ func (r *Repository) GetProfile(ctx context.Context, id string) (profiles.Profil
 	return profile, true, nil
 }
 
+func (r *Repository) SaveSearchProfile(ctx context.Context, profile domain.UserSearchProfile) error {
+	preferencesJSON, err := json.Marshal(profile.Preferences)
+	if err != nil {
+		return err
+	}
+	var searchAreaWKT any
+	if profile.SearchArea != nil && strings.TrimSpace(profile.SearchArea.WKT) != "" {
+		searchAreaWKT = profile.SearchArea.WKT
+	}
+	_, err = r.db.ExecContext(ctx, `
+		insert into user_search_profiles (user_id, raw_query, normalized_query, preferences_json, search_area)
+		values ($1, $2, $3, $4, case when $5::text is null then null else ST_GeomFromText($5, 4326) end)
+	`, profile.UserID, profile.RawQuery, profile.NormalizedQuery, preferencesJSON, searchAreaWKT)
+	return err
+}
+
 func (r *Repository) UpsertProfileChannel(ctx context.Context, profileID string, sub profiles.ChannelSubscription) (bool, error) {
 	sub = normalizeSubscription(sub)
 	exists, err := r.profileChannelExists(ctx, profileID, sub.Source)

@@ -72,6 +72,35 @@ func (g *Geocoder) Resolve(ctx context.Context, query string, maxDistanceMeters 
 	}, nil
 }
 
+func (g *Geocoder) ResolvePlace(ctx context.Context, query string) (*domain.ResolvedPlace, error) {
+	loc, err := g.Resolve(ctx, query, 0)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(loc.Name) == "" || (loc.Latitude == 0 && loc.Longitude == 0) {
+		return nil, nil
+	}
+	return &domain.ResolvedPlace{
+		Name:       loc.Name,
+		Latitude:   loc.Latitude,
+		Longitude:  loc.Longitude,
+		Confidence: 0.8,
+	}, nil
+}
+
+func (g *Geocoder) ResolveStreet(ctx context.Context, query string) (*domain.ResolvedStreet, error) {
+	place, err := g.ResolvePlace(ctx, query)
+	if err != nil || place == nil {
+		return nil, err
+	}
+	return &domain.ResolvedStreet{
+		Name:       place.Name,
+		Latitude:   place.Latitude,
+		Longitude:  place.Longitude,
+		Confidence: place.Confidence,
+	}, nil
+}
+
 func (g *Geocoder) queryWithRegion(query string) string {
 	if g.DefaultRegion == "" || strings.Contains(query, ",") {
 		return query

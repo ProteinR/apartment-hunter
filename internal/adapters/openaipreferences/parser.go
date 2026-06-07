@@ -1,0 +1,315 @@
+package openaipreferences
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+
+	"apartment-hunter/internal/domain"
+)
+
+const (
+	defaultAPIURL = "https://api.openai.com/v1/responses"
+	defaultModel  = "gpt-4.1-mini"
+)
+
+type Parser struct {
+	apiKey string
+	model  string
+	apiURL string
+	client *http.Client
+}
+
+type Option func(*Parser)
+
+func WithHTTPClient(client *http.Client) Option {
+	return func(p *Parser) {
+		p.client = client
+	}
+}
+
+func WithAPIURL(apiURL string) Option {
+	return func(p *Parser) {
+		p.apiURL = strings.TrimSpace(apiURL)
+	}
+}
+
+func WithModel(model string) Option {
+	return func(p *Parser) {
+		p.model = strings.TrimSpace(model)
+	}
+}
+
+func New(apiKey string, opts ...Option) *Parser {
+	p := &Parser{
+		apiKey: strings.TrimSpace(apiKey),
+		model:  defaultModel,
+		apiURL: defaultAPIURL,
+		client: &http.Client{Timeout: 45 * time.Second},
+	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	if p.model == "" {
+		p.model = defaultModel
+	}
+	if p.apiURL == "" {
+		p.apiURL = defaultAPIURL
+	}
+	return p
+}
+
+func FromEnv(opts ...Option) (*Parser, error) {
+	apiKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+	if apiKey == "" {
+		return nil, errors.New("OPENAI_API_KEY is required for natural language preferences parser")
+	}
+	envOpts := []Option{}
+	if model := strings.TrimSpace(os.Getenv("OPENAI_PREFERENCES_MODEL")); model != "" {
+		envOpts = append(envOpts, WithModel(model))
+	}
+	if apiURL := strings.TrimSpace(os.Getenv("OPENAI_BASE_URL")); apiURL != "" {
+		envOpts = append(envOpts, WithAPIURL(strings.TrimRight(apiURL, "/")+"/responses"))
+	}
+	envOpts = append(envOpts, opts...)
+	return New(apiKey, envOpts...), nil
+}
+
+func (p *Parser) Normalize(ctx context.Context, input string) (string, error) {
+	var out struct {
+		NormalizedQuery string `json:"normalized_query"`
+	}
+	if err := p.call(ctx, normalizationInstructions, input, "normalized_preferences", normalizationSchema(), &out); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out.NormalizedQuery), nil
+}
+
+func (p *Parser) Extract(ctx context.Context, normalizedInput string) (*domain.UserPreferences, error) {
+	var out domain.UserPreferences
+	if err := p.call(ctx, extractionInstructions, normalizedInput, "user_preferences", preferencesSchema(), &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (p *Parser) call(ctx context.Context, instructions, input, schemaName string, schema map[string]any, out any) error {
+	if p.apiKey == "" {
+		return errors.New("missing OpenAI API key")
+	}
+	payload := responsesRequest{
+		Model:        p.model,
+		Instructions: instructions,
+		Input: []inputMessage{{
+			Role: "user",
+			Content: []contentItem{{
+				Type: "input_text",
+				Text: input,
+			}},
+		}},
+		Text: textConfig{Format: jsonSchema{
+			Type:   "json_schema",
+			Name:   schemaName,
+			Strict: true,
+			Schema: schema,
+		}},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.apiURL, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("openai preferences API status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	outputText, err := extractOutputText(respBody)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal([]byte(outputText), out)
+}
+
+const normalizationInstructions = `Ты выполняешь только нормализацию требований пользователя.
+Твоя задача улучшить структуру текста и читаемость.
+Запрещено добавлять новые требования, предположения, районы, удобства, площади, цены, характеристики или предпочтения, которых нет в исходном тексте.
+Если требование неоднозначно, сохрани его как есть.
+Не меняй числовые значения.
+Не заменяй "желательно" на "обязательно" и не заменяй "обязательно" на "желательно".
+Верни только strict JSON по схеме.`
+
+const extractionInstructions = `Extract apartment search preferences from the normalized user requirements.
+Return only strict JSON matching the schema.
+Use null for missing numeric values and empty arrays for missing lists.
+Do not invent exact coordinates.
+Coordinates and Google place IDs must remain empty unless present in the input.
+Ambiguous location phrases must be preserved in unresolved_location_rules.
+Use stable English slugs for amenities and reject rules, for example dishwasher, oven, glossy_ceiling, dark_old_renovation.`
+
+func normalizationSchema() map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required":             []string{"normalized_query"},
+		"properties": map[string]any{
+			"normalized_query": map[string]any{"type": "string"},
+		},
+	}
+}
+
+func preferencesSchema() map[string]any {
+	locationPreference := map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required": []string{
+			"name", "type", "center_name", "radius_meters", "boundary_street_name",
+			"boundary_rule", "geometry_wkt", "google_place_id", "confidence", "raw_text", "unresolved_rules",
+		},
+		"properties": map[string]any{
+			"name":                 map[string]any{"type": "string"},
+			"type":                 map[string]any{"type": "string"},
+			"center_name":          map[string]any{"type": "string"},
+			"radius_meters":        nullableInteger(),
+			"boundary_street_name": nullableString(),
+			"boundary_rule":        nullableString(),
+			"geometry_wkt":         nullableString(),
+			"google_place_id":      nullableString(),
+			"confidence":           map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+			"raw_text":             map[string]any{"type": "string"},
+			"unresolved_rules":     stringArray(),
+		},
+	}
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required": []string{
+			"budget_min", "budget_max", "area_min", "area_max", "required_amenities",
+			"preferred_amenities", "interior_preferences", "reject_rules",
+			"location_preferences", "weights", "unresolved_location_rules",
+		},
+		"properties": map[string]any{
+			"budget_min":          nullableInteger(),
+			"budget_max":          nullableInteger(),
+			"area_min":            nullableNumber(),
+			"area_max":            nullableNumber(),
+			"required_amenities":  stringArray(),
+			"preferred_amenities": stringArray(),
+			"interior_preferences": map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+				"required":             []string{"style", "reject"},
+				"properties": map[string]any{
+					"style":  stringArray(),
+					"reject": stringArray(),
+				},
+			},
+			"reject_rules": stringArray(),
+			"location_preferences": map[string]any{
+				"type":  "array",
+				"items": locationPreference,
+			},
+			"weights": map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+				"required":             []string{"location", "interior", "view", "price", "amenities"},
+				"properties": map[string]any{
+					"location":  map[string]any{"type": "integer"},
+					"interior":  map[string]any{"type": "integer"},
+					"view":      map[string]any{"type": "integer"},
+					"price":     map[string]any{"type": "integer"},
+					"amenities": map[string]any{"type": "integer"},
+				},
+			},
+			"unresolved_location_rules": stringArray(),
+		},
+	}
+}
+
+func nullableInteger() map[string]any {
+	return map[string]any{"type": []string{"integer", "null"}}
+}
+
+func nullableNumber() map[string]any {
+	return map[string]any{"type": []string{"number", "null"}}
+}
+
+func nullableString() map[string]any {
+	return map[string]any{"type": []string{"string", "null"}}
+}
+
+func stringArray() map[string]any {
+	return map[string]any{"type": "array", "items": map[string]any{"type": "string"}}
+}
+
+type responsesRequest struct {
+	Model        string         `json:"model"`
+	Instructions string         `json:"instructions"`
+	Input        []inputMessage `json:"input"`
+	Text         textConfig     `json:"text"`
+}
+
+type inputMessage struct {
+	Role    string        `json:"role"`
+	Content []contentItem `json:"content"`
+}
+
+type contentItem struct {
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
+}
+
+type textConfig struct {
+	Format jsonSchema `json:"format"`
+}
+
+type jsonSchema struct {
+	Type   string         `json:"type"`
+	Name   string         `json:"name"`
+	Strict bool           `json:"strict"`
+	Schema map[string]any `json:"schema"`
+}
+
+func extractOutputText(body []byte) (string, error) {
+	var response struct {
+		Output []struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+		OutputText string `json:"output_text"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(response.OutputText) != "" {
+		return response.OutputText, nil
+	}
+	for _, output := range response.Output {
+		for _, content := range output.Content {
+			if strings.TrimSpace(content.Text) != "" {
+				return content.Text, nil
+			}
+		}
+	}
+	return "", errors.New("openai response did not contain output text")
+}

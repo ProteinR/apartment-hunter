@@ -13,6 +13,7 @@ import (
 
 	"apartment-hunter/internal/adapters/geocodingmock"
 	"apartment-hunter/internal/adapters/googlemaps"
+	"apartment-hunter/internal/adapters/openaipreferences"
 	"apartment-hunter/internal/adapters/openaivision"
 	"apartment-hunter/internal/adapters/telegram"
 	"apartment-hunter/internal/adapters/telegramuserbot"
@@ -23,6 +24,7 @@ import (
 	"apartment-hunter/internal/geocoding"
 	"apartment-hunter/internal/interview"
 	"apartment-hunter/internal/listingparser"
+	"apartment-hunter/internal/preferenceparser"
 	"apartment-hunter/internal/preferences"
 	"apartment-hunter/internal/profiles"
 	"apartment-hunter/internal/scoring"
@@ -80,8 +82,17 @@ func (a App) Run(args []string) error {
 			return err
 		}
 		defer store.Close()
+		nlpParser, err := openaipreferences.FromEnv()
+		if err != nil {
+			return err
+		}
+		prefsParser := preferenceparser.Service{
+			Normalizer: nlpParser,
+			Extractor:  nlpParser,
+		}
+		geometry := preferenceparser.PostGISGeometryBuilder{Resolver: newGoogleGeocoder()}
 		fmt.Fprintf(a.Out, "Telegram bot started. Saving profiles to Postgres\n")
-		return telegram.New(token, outputDir, telegram.WithLocationResolver(newLocationResolver()), telegram.WithProfileStore(store)).Run(ctx.Done())
+		return telegram.New(token, outputDir, telegram.WithPreferencesParser(prefsParser), telegram.WithGeometryBuilder(geometry), telegram.WithProfileStore(store)).Run(ctx.Done())
 	case "telegram-read":
 		profileID, err := profileIDArg(args, "telegram-read")
 		if err != nil {

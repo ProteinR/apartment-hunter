@@ -2,13 +2,17 @@ package telegram
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	"apartment-hunter/internal/domain"
+	"apartment-hunter/internal/preferenceparser"
 	"apartment-hunter/internal/profiles"
 )
 
 type fakeProfileStore struct {
-	profiles map[string]profiles.Profile
+	profiles       map[string]profiles.Profile
+	searchProfiles []domain.UserSearchProfile
 }
 
 func newFakeProfileStore() *fakeProfileStore {
@@ -26,6 +30,11 @@ func (s *fakeProfileStore) UpsertProfile(ctx context.Context, profile profiles.P
 	}
 	existing.ID = profile.ID
 	s.profiles[profile.ID] = existing
+	return nil
+}
+
+func (s *fakeProfileStore) SaveSearchProfile(ctx context.Context, profile domain.UserSearchProfile) error {
+	s.searchProfiles = append(s.searchProfiles, profile)
 	return nil
 }
 
@@ -61,30 +70,44 @@ func (s *fakeProfileStore) RemoveProfileChannel(ctx context.Context, profileID, 
 	return false, nil
 }
 
-func TestHandleTextRunsInterviewAndSavesPreferences(t *testing.T) {
+func TestHandleTextParsesPreviewsAndSavesPreferences(t *testing.T) {
 	outputDir := t.TempDir()
 	store := newFakeProfileStore()
-	bot := New("test-token", outputDir, WithProfileStore(store))
+	parser := preferenceparser.Service{
+		Normalizer: fakeNormalizer{normalized: "Бюджет:\n* до 650 USD"},
+		Extractor: fakeExtractor{prefs: domain.UserPreferences{
+			BudgetMax:         intPtr(650),
+			AreaMin:           floatPtr(50),
+			RequiredAmenities: []string{"dishwasher", "oven"},
+		}},
+	}
+	bot := New("test-token", outputDir, WithProfileStore(store), WithPreferencesParser(parser), WithGeometryBuilder(fakeGeometryBuilder{}))
 	chatID := int64(42)
 
-	reply, err := bot.HandleText(chatID, "/start")
+	reply, err := bot.HandleText(chatID, "/preferences")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reply == "" {
-		t.Fatal("expected start reply")
+	if reply != "Опиши квартиру одним сообщением." {
+		t.Fatalf("unexpected start reply %q", reply)
 	}
 
-	answers := []string{
-		"400", "1200", "45", "y", "y", "1000", "y", "n", "Old Boulevard",
-		"minimalist", "y", "n", "y", "n", "5", "4", "3", "2", "1",
+	reply, err = bot.HandleText(chatID, "Ищу квартиру до 650 с посудомойкой")
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	for _, answer := range answers {
-		reply, err = bot.HandleText(chatID, answer)
-		if err != nil {
-			t.Fatal(err)
-		}
+	if !strings.Contains(reply, "Ваш запрос:") || !strings.Contains(reply, "Нормализованное описание:") || !strings.Contains(reply, "Бюджет: до 650 USD") {
+		t.Fatalf("unexpected preview:\n%s", reply)
+	}
+	if len(store.searchProfiles) != 0 {
+		t.Fatal("preferences should not be saved before confirmation")
+	}
+	reply, err = bot.HandleText(chatID, "Save")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != "Готово, фильтры сохранены." {
+		t.Fatalf("unexpected save reply %q", reply)
 	}
 
 	profile, ok, err := store.GetProfile(context.Background(), "telegram_42")
@@ -100,8 +123,17 @@ func TestHandleTextRunsInterviewAndSavesPreferences(t *testing.T) {
 	if profile.TelegramChatID != 42 {
 		t.Fatalf("unexpected chat id %d", profile.TelegramChatID)
 	}
-	if profile.Preferences.MaxBudget != 1200 {
+	if profile.Preferences.MaxBudget != 650 {
 		t.Fatalf("unexpected max budget %d", profile.Preferences.MaxBudget)
+	}
+	if len(store.searchProfiles) != 1 {
+		t.Fatalf("expected search profile to be saved, got %d", len(store.searchProfiles))
+	}
+	if store.searchProfiles[0].RawQuery != "Ищу квартиру до 650 с посудомойкой" {
+		t.Fatalf("unexpected raw query %q", store.searchProfiles[0].RawQuery)
+	}
+	if store.searchProfiles[0].NormalizedQuery != "Бюджет:\n* до 650 USD" {
+		t.Fatalf("unexpected normalized query %q", store.searchProfiles[0].NormalizedQuery)
 	}
 }
 
@@ -126,4 +158,34 @@ func TestSubscribeChannelUsesProfileStore(t *testing.T) {
 	if profile.Channels[0].Source.Title != "Batumi rentals" {
 		t.Fatalf("unexpected channel title %q", profile.Channels[0].Source.Title)
 	}
+}
+
+type fakeNormalizer struct {
+	normalized string
+}
+
+func (n fakeNormalizer) Normalize(ctx context.Context, input string) (string, error) {
+	return n.normalized, nil
+}
+
+type fakeExtractor struct {
+	prefs domain.UserPreferences
+}
+
+func (e fakeExtractor) Extract(ctx context.Context, normalizedInput string) (*domain.UserPreferences, error) {
+	return &e.prefs, nil
+}
+
+type fakeGeometryBuilder struct{}
+
+func (fakeGeometryBuilder) BuildSearchGeometry(ctx context.Context, prefs []domain.LocationPreference) (*domain.GeoSearchArea, error) {
+	return &domain.GeoSearchArea{SRID: 4326}, nil
+}
+
+func intPtr(value int) *int {
+	return &value
+}
+
+func floatPtr(value float64) *float64 {
+	return &value
 }

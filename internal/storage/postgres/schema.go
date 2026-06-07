@@ -1,6 +1,8 @@
 package postgres
 
 const schemaSQL = `
+create extension if not exists postgis;
+
 create table if not exists listing_evaluations (
 	id bigserial primary key,
 	listing_id text not null unique,
@@ -53,6 +55,51 @@ create table if not exists profiles (
 	created_at timestamptz not null default now(),
 	updated_at timestamptz not null default now()
 );
+
+create table if not exists user_search_profiles (
+	id bigserial primary key,
+	user_id text not null,
+	raw_query text not null,
+	normalized_query text not null,
+	preferences_json jsonb not null,
+	search_area geometry(MultiPolygon, 4326),
+	created_at timestamptz not null default now(),
+	updated_at timestamptz not null default now()
+);
+
+create index if not exists user_search_profiles_user_created_idx
+	on user_search_profiles (user_id, created_at desc);
+
+create index if not exists user_search_profiles_search_area_gix
+	on user_search_profiles using gist (search_area);
+
+create table if not exists listings (
+	id text primary key,
+	latitude double precision,
+	longitude double precision,
+	location geometry(Point, 4326),
+	payload jsonb not null default '{}'::jsonb,
+	created_at timestamptz not null default now(),
+	updated_at timestamptz not null default now()
+);
+
+create index if not exists listings_location_gix
+	on listings using gist (location);
+
+create or replace function listings_set_location()
+returns trigger as $$
+begin
+	if new.longitude is not null and new.latitude is not null then
+		new.location = ST_SetSRID(ST_MakePoint(new.longitude, new.latitude), 4326);
+	end if;
+	return new;
+end;
+$$ language plpgsql;
+
+drop trigger if exists listings_set_location_trigger on listings;
+create trigger listings_set_location_trigger
+	before insert or update of latitude, longitude on listings
+	for each row execute function listings_set_location();
 
 create table if not exists profile_channels (
 	profile_id text not null references profiles(id) on delete cascade,

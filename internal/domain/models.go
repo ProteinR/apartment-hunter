@@ -10,6 +10,18 @@ type UserPreferences struct {
 	DesiredStyle      string               `json:"desired_style"`
 	Reject            RejectionPreferences `json:"reject"`
 	Importance        ImportanceWeights    `json:"importance"`
+
+	BudgetMin               *int                 `json:"budget_min,omitempty"`
+	BudgetMax               *int                 `json:"budget_max,omitempty"`
+	AreaMin                 *float64             `json:"area_min,omitempty"`
+	AreaMax                 *float64             `json:"area_max,omitempty"`
+	RequiredAmenities       []string             `json:"required_amenities"`
+	PreferredAmenities      []string             `json:"preferred_amenities"`
+	InteriorPreferences     InteriorPreferences  `json:"interior_preferences"`
+	RejectRules             []string             `json:"reject_rules"`
+	LocationPreferences     []LocationPreference `json:"location_preferences"`
+	Weights                 PreferenceWeights    `json:"weights"`
+	UnresolvedLocationRules []string             `json:"unresolved_location_rules"`
 }
 
 type LocationPreference struct {
@@ -17,6 +29,22 @@ type LocationPreference struct {
 	MaxDistanceMeters int     `json:"max_distance_meters"`
 	Latitude          float64 `json:"latitude,omitempty"`
 	Longitude         float64 `json:"longitude,omitempty"`
+
+	Type               string   `json:"type,omitempty"`
+	CenterName         string   `json:"center_name,omitempty"`
+	RadiusMeters       *int     `json:"radius_meters,omitempty"`
+	BoundaryStreetName *string  `json:"boundary_street_name,omitempty"`
+	BoundaryRule       *string  `json:"boundary_rule,omitempty"`
+	GeometryWKT        *string  `json:"geometry_wkt,omitempty"`
+	GooglePlaceID      *string  `json:"google_place_id,omitempty"`
+	Confidence         float64  `json:"confidence,omitempty"`
+	RawText            string   `json:"raw_text,omitempty"`
+	UnresolvedRules    []string `json:"unresolved_rules,omitempty"`
+}
+
+type InteriorPreferences struct {
+	Style  []string `json:"style"`
+	Reject []string `json:"reject"`
 }
 
 type RejectionPreferences struct {
@@ -32,6 +60,47 @@ type ImportanceWeights struct {
 	View       int `json:"view"`
 	Price      int `json:"price"`
 	Appliances int `json:"appliances"`
+}
+
+type PreferenceWeights struct {
+	Location  int `json:"location"`
+	Interior  int `json:"interior"`
+	View      int `json:"view"`
+	Price     int `json:"price"`
+	Amenities int `json:"amenities"`
+}
+
+type ResolvedPlace struct {
+	Name          string
+	Latitude      float64
+	Longitude     float64
+	GooglePlaceID string
+	Confidence    float64
+}
+
+type ResolvedStreet struct {
+	Name          string
+	Latitude      float64
+	Longitude     float64
+	GeometryWKT   string
+	GooglePlaceID string
+	Confidence    float64
+}
+
+type GeoSearchArea struct {
+	WKT             string   `json:"wkt"`
+	GeoJSON         string   `json:"geojson"`
+	SRID            int      `json:"srid"`
+	UnresolvedRules []string `json:"unresolved_rules"`
+}
+
+type UserSearchProfile struct {
+	ID              string          `json:"id,omitempty"`
+	UserID          string          `json:"user_id"`
+	RawQuery        string          `json:"raw_query"`
+	NormalizedQuery string          `json:"normalized_query"`
+	Preferences     UserPreferences `json:"preferences"`
+	SearchArea      *GeoSearchArea  `json:"search_area,omitempty"`
 }
 
 type ApartmentListing struct {

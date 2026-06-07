@@ -9,8 +9,7 @@ import (
 	"time"
 
 	"apartment-hunter/internal/domain"
-	"apartment-hunter/internal/geocoding"
-	"apartment-hunter/internal/interview"
+	"apartment-hunter/internal/preferenceparser"
 	"apartment-hunter/internal/profiles"
 	"apartment-hunter/internal/sources"
 
@@ -21,17 +20,24 @@ import (
 type Bot struct {
 	token    string
 	client   *http.Client
-	sessions map[int64]*interview.Session
-	resolver geocoding.Resolver
+	sessions map[int64]*preferenceSession
 	store    ProfileStore
+	parser   preferenceparser.Service
+	geometry preferenceparser.GeometryBuilder
 	mu       sync.Mutex
 }
 
 type ProfileStore interface {
 	UpsertProfile(ctx context.Context, profile profiles.Profile) error
 	GetProfile(ctx context.Context, id string) (profiles.Profile, bool, error)
+	SaveSearchProfile(ctx context.Context, profile domain.UserSearchProfile) error
 	UpsertProfileChannel(ctx context.Context, profileID string, sub profiles.ChannelSubscription) (bool, error)
 	RemoveProfileChannel(ctx context.Context, profileID, channel string) (bool, error)
+}
+
+type preferenceSession struct {
+	State string
+	Draft preferenceparser.Draft
 }
 
 type Option func(*Bot)
@@ -42,9 +48,9 @@ func WithHTTPClient(client *http.Client) Option {
 	}
 }
 
-func WithLocationResolver(resolver geocoding.Resolver) Option {
+func WithPreferencesParser(parser preferenceparser.Service) Option {
 	return func(bot *Bot) {
-		bot.resolver = resolver
+		bot.parser = parser
 	}
 }
 
@@ -54,11 +60,17 @@ func WithProfileStore(store ProfileStore) Option {
 	}
 }
 
+func WithGeometryBuilder(builder preferenceparser.GeometryBuilder) Option {
+	return func(bot *Bot) {
+		bot.geometry = builder
+	}
+}
+
 func New(token, outputDir string, opts ...Option) *Bot {
 	bot := &Bot{
 		token:    token,
 		client:   &http.Client{Timeout: 20 * time.Second},
-		sessions: map[int64]*interview.Session{},
+		sessions: map[int64]*preferenceSession{},
 	}
 	for _, opt := range opts {
 		opt(bot)
@@ -109,54 +121,87 @@ func (b *Bot) handleUpdate(ctx context.Context, api *telegrambot.Bot, update *mo
 }
 
 func (b *Bot) handleMessage(ctx context.Context, api *telegrambot.Bot, chatID int64, text string) error {
-	reply, err := b.handleText(chatID, text)
+	response, err := b.handleTextResponse(chatID, text)
 	if err != nil {
 		return err
 	}
-	return sendMessage(ctx, api, chatID, reply)
+	return sendMessageWithMarkup(ctx, api, chatID, response.Text, response.ReplyMarkup)
 }
 
 func (b *Bot) handleText(chatID int64, text string) (string, error) {
+	response, err := b.handleTextResponse(chatID, text)
+	return response.Text, err
+}
+
+type textResponse struct {
+	Text        string
+	ReplyMarkup models.ReplyMarkup
+}
+
+func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error) {
 	if b.store == nil {
-		return "", fmt.Errorf("profile store is required")
+		return textResponse{}, fmt.Errorf("profile store is required")
 	}
 	text = strings.TrimSpace(text)
 	if strings.HasPrefix(text, "/channels") {
-		return b.listChannels(context.Background(), chatID)
+		reply, err := b.listChannels(context.Background(), chatID)
+		return textResponse{Text: reply}, err
 	}
 	if strings.HasPrefix(text, "/subscribe") {
-		return b.subscribeChannel(context.Background(), chatID, text)
+		reply, err := b.subscribeChannel(context.Background(), chatID, text)
+		return textResponse{Text: reply}, err
 	}
 	if strings.HasPrefix(text, "/unsubscribe") {
-		return b.unsubscribeChannel(context.Background(), chatID, text)
+		reply, err := b.unsubscribeChannel(context.Background(), chatID, text)
+		return textResponse{Text: reply}, err
 	}
 	if text == "/start" || text == "/preferences" || text == "/restart" {
-		session := interview.NewSessionWithResolver(b.resolver)
-		b.setSession(chatID, session)
-		question, _ := session.CurrentQuestion()
-		return "Настроим поиск квартиры. Отвечайте коротко, можно на русском.\n\n" + question.Prompt, nil
+		b.setSession(chatID, &preferenceSession{State: "awaiting_query"})
+		return textResponse{Text: "Опиши квартиру одним сообщением."}, nil
 	}
 
 	session := b.getSession(chatID)
 	if session == nil {
-		return "Отправьте /start, чтобы настроить поиск квартиры.", nil
+		return textResponse{Text: "Отправьте /preferences, чтобы настроить поиск квартиры."}, nil
 	}
-
-	next, done, err := session.Answer(text)
-	if err != nil {
-		current, _ := session.CurrentQuestion()
-		return err.Error() + "\n" + current.Prompt, nil
+	switch session.State {
+	case "awaiting_query":
+		if b.parser.Normalizer == nil || b.parser.Extractor == nil {
+			return textResponse{}, fmt.Errorf("preferences parser is required")
+		}
+		draft, err := b.parser.BuildDraft(context.Background(), text)
+		if err != nil {
+			return textResponse{}, err
+		}
+		session.State = "awaiting_confirmation"
+		session.Draft = draft
+		b.setSession(chatID, session)
+		return textResponse{
+			Text:        buildPreferencesPreview(draft),
+			ReplyMarkup: confirmationKeyboard(),
+		}, nil
+	case "awaiting_confirmation":
+		switch normalizeConfirmation(text) {
+		case "save":
+			b.deleteSession(chatID)
+			if err := b.saveDraft(context.Background(), chatID, session.Draft); err != nil {
+				return textResponse{}, err
+			}
+			return textResponse{Text: "Готово, фильтры сохранены.", ReplyMarkup: removeKeyboard()}, nil
+		case "edit":
+			session.State = "awaiting_query"
+			b.setSession(chatID, session)
+			return textResponse{Text: "Отправь исправленный запрос одним сообщением.", ReplyMarkup: removeKeyboard()}, nil
+		case "cancel":
+			b.deleteSession(chatID)
+			return textResponse{Text: "Настройка отменена.", ReplyMarkup: removeKeyboard()}, nil
+		default:
+			return textResponse{Text: "Выбери Save, Edit или Cancel.", ReplyMarkup: confirmationKeyboard()}, nil
+		}
+	default:
+		b.deleteSession(chatID)
+		return textResponse{Text: "Отправьте /preferences, чтобы настроить поиск квартиры."}, nil
 	}
-	if !done {
-		return next.Prompt, nil
-	}
-
-	prefs := session.Preferences()
-	b.deleteSession(chatID)
-	if err := b.saveProfile(context.Background(), chatID, prefs); err != nil {
-		return "", err
-	}
-	return "Готово, предпочтения сохранены.", nil
 }
 
 func (b *Bot) listChannels(ctx context.Context, chatID int64) (string, error) {
@@ -240,13 +285,36 @@ func (b *Bot) saveProfile(ctx context.Context, chatID int64, prefs domain.UserPr
 	})
 }
 
-func (b *Bot) getSession(chatID int64) *interview.Session {
+func (b *Bot) saveDraft(ctx context.Context, chatID int64, draft preferenceparser.Draft) error {
+	userID := profiles.IDForTelegramChat(chatID)
+	var area *domain.GeoSearchArea
+	if b.geometry != nil {
+		built, err := b.geometry.BuildSearchGeometry(ctx, draft.Preferences.LocationPreferences)
+		if err != nil {
+			return err
+		}
+		area = built
+		draft.Preferences.UnresolvedLocationRules = append(draft.Preferences.UnresolvedLocationRules, built.UnresolvedRules...)
+	}
+	if err := b.store.SaveSearchProfile(ctx, domain.UserSearchProfile{
+		UserID:          userID,
+		RawQuery:        draft.RawQuery,
+		NormalizedQuery: draft.NormalizedQuery,
+		Preferences:     draft.Preferences,
+		SearchArea:      area,
+	}); err != nil {
+		return err
+	}
+	return b.saveProfile(ctx, chatID, draft.Preferences)
+}
+
+func (b *Bot) getSession(chatID int64) *preferenceSession {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.sessions[chatID]
 }
 
-func (b *Bot) setSession(chatID int64, session *interview.Session) {
+func (b *Bot) setSession(chatID int64, session *preferenceSession) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.sessions[chatID] = session
@@ -259,9 +327,14 @@ func (b *Bot) deleteSession(chatID int64) {
 }
 
 func sendMessage(ctx context.Context, api *telegrambot.Bot, chatID int64, text string) error {
+	return sendMessageWithMarkup(ctx, api, chatID, text, nil)
+}
+
+func sendMessageWithMarkup(ctx context.Context, api *telegrambot.Bot, chatID int64, text string, markup models.ReplyMarkup) error {
 	_, err := api.SendMessage(ctx, &telegrambot.SendMessageParams{
-		ChatID: chatID,
-		Text:   text,
+		ChatID:      chatID,
+		Text:        text,
+		ReplyMarkup: markup,
 	})
 	return err
 }
