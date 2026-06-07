@@ -14,7 +14,7 @@ import (
 
 var (
 	pricePattern = regexp.MustCompile(`(?i)(?:[$₾][ \t]*([0-9][0-9 \t.,]{0,8})|(?:usd|gel|lari)[ \t]*([0-9][0-9 \t.,]{0,8})|([0-9][0-9 \t.,]{0,8})[ \t]*(?:[$₾]|usd|gel|lari))`)
-	areaPattern  = regexp.MustCompile(`(?i)([0-9]+(?:[.,][0-9]+)?)\s*(?:m2|m²|кв\.?\s?м|sqm)`)
+	areaPattern  = regexp.MustCompile(`(?i)([0-9]+(?:[.,][0-9]+)?)\s*(?:m2|m²|м2|м²|кв\.?\s?м\.?|м\.?\s?кв\.?|sqm|²)`)
 )
 
 func FromChannelMessage(message sources.ChannelMessage) domain.ApartmentListing {
@@ -40,11 +40,23 @@ func FromChannelMessage(message sources.ChannelMessage) domain.ApartmentListing 
 		AreaM2:      parseArea(text),
 		Photos:      photos,
 	}
+	lowerText := strings.ToLower(text)
+	listing.HasDishwasher = containsAny(lowerText, "dishwasher", "посудомойка", "посудомоечная", "посудомоечную")
+	listing.HasOven = containsAny(lowerText, "oven", "духовка", "духовой шкаф", "духовым шкафом")
 	if lat, lng, ok := geocoding.FindCoordinates(text); ok {
 		listing.Latitude = lat
 		listing.Longitude = lng
 	}
 	return listing
+}
+
+func containsAny(text string, needles ...string) bool {
+	for _, needle := range needles {
+		if strings.Contains(text, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func listingID(message sources.ChannelMessage) string {

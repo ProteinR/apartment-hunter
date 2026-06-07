@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"apartment-hunter/internal/domain"
@@ -39,6 +40,8 @@ type Client struct {
 }
 
 type MessageHandler func(ctx context.Context, message sources.ChannelMessage) error
+
+const albumSettleDelay = 1500 * time.Millisecond
 
 func FromEnv(codeReader io.Reader) (*Client, error) {
 	appID, err := strconv.Atoi(strings.TrimSpace(os.Getenv("TELEGRAM_API_ID")))
@@ -92,6 +95,7 @@ func (c *Client) Listen(ctx context.Context, handler MessageHandler) error {
 		UpdateHandler:  dispatcher,
 	})
 
+	albumHandler := newGroupedMessageHandler(handler, albumSettleDelay)
 	handleMessage := func(ctx context.Context, entities tg.Entities, raw tg.MessageClass) error {
 		message, ok := raw.(*tg.Message)
 		if !ok || message.Out {
@@ -101,7 +105,7 @@ func (c *Client) Listen(ctx context.Context, handler MessageHandler) error {
 		if mapped.ChannelID == "" && mapped.ChannelUsername == "" {
 			return nil
 		}
-		return handler(ctx, mapped)
+		return albumHandler.Handle(ctx, mapped)
 	}
 	dispatcher.OnNewMessage(func(ctx context.Context, entities tg.Entities, update *tg.UpdateNewMessage) error {
 		return handleMessage(ctx, entities, update.Message)
@@ -115,6 +119,7 @@ func (c *Client) Listen(ctx context.Context, handler MessageHandler) error {
 			return err
 		}
 		<-ctx.Done()
+		_ = albumHandler.Flush(context.Background())
 		return nil
 	})
 }
@@ -173,7 +178,145 @@ func (c *Client) Fetch(ctx context.Context, channel sources.ChannelRef, cursor s
 	if err != nil {
 		return nil, cursor, err
 	}
-	return messages, next, nil
+	return coalesceGroupedMessages(messages), next, nil
+}
+
+type groupedMessageHandler struct {
+	handler MessageHandler
+	delay   time.Duration
+
+	mu      sync.Mutex
+	pending map[groupedMessageKey]*pendingGroupedMessage
+}
+
+type pendingGroupedMessage struct {
+	ctx      context.Context
+	message  sources.ChannelMessage
+	timer    *time.Timer
+	flushing bool
+}
+
+type groupedMessageKey struct {
+	channelID       string
+	channelUsername string
+	groupedID       int64
+}
+
+func newGroupedMessageHandler(handler MessageHandler, delay time.Duration) *groupedMessageHandler {
+	return &groupedMessageHandler{
+		handler: handler,
+		delay:   delay,
+		pending: map[groupedMessageKey]*pendingGroupedMessage{},
+	}
+}
+
+func (h *groupedMessageHandler) Handle(ctx context.Context, message sources.ChannelMessage) error {
+	if message.GroupedID == 0 {
+		return h.handler(ctx, message)
+	}
+
+	key := groupedKey(message)
+	h.mu.Lock()
+	pending := h.pending[key]
+	if pending == nil {
+		pending = &pendingGroupedMessage{ctx: ctx, message: message}
+		h.pending[key] = pending
+	} else {
+		pending.message = mergeGroupedMessage(pending.message, message)
+	}
+	if pending.timer != nil {
+		pending.timer.Stop()
+	}
+	pending.timer = time.AfterFunc(h.delay, func() {
+		_ = h.flushKey(key)
+	})
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *groupedMessageHandler) Flush(ctx context.Context) error {
+	h.mu.Lock()
+	keys := make([]groupedMessageKey, 0, len(h.pending))
+	for key := range h.pending {
+		keys = append(keys, key)
+	}
+	h.mu.Unlock()
+
+	for _, key := range keys {
+		if err := h.flushKeyWithContext(ctx, key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (h *groupedMessageHandler) flushKey(key groupedMessageKey) error {
+	return h.flushKeyWithContext(nil, key)
+}
+
+func (h *groupedMessageHandler) flushKeyWithContext(ctx context.Context, key groupedMessageKey) error {
+	h.mu.Lock()
+	pending := h.pending[key]
+	if pending == nil || pending.flushing {
+		h.mu.Unlock()
+		return nil
+	}
+	pending.flushing = true
+	delete(h.pending, key)
+	if pending.timer != nil {
+		pending.timer.Stop()
+	}
+	message := pending.message
+	if ctx == nil && pending.ctx != nil {
+		ctx = pending.ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	h.mu.Unlock()
+
+	return h.handler(ctx, message)
+}
+
+func coalesceGroupedMessages(messages []sources.ChannelMessage) []sources.ChannelMessage {
+	out := make([]sources.ChannelMessage, 0, len(messages))
+	indexByKey := map[groupedMessageKey]int{}
+	for _, message := range messages {
+		if message.GroupedID == 0 {
+			out = append(out, message)
+			continue
+		}
+		key := groupedKey(message)
+		index, ok := indexByKey[key]
+		if !ok {
+			indexByKey[key] = len(out)
+			out = append(out, message)
+			continue
+		}
+		out[index] = mergeGroupedMessage(out[index], message)
+	}
+	return out
+}
+
+func groupedKey(message sources.ChannelMessage) groupedMessageKey {
+	return groupedMessageKey{
+		channelID:       message.ChannelID,
+		channelUsername: message.ChannelUsername,
+		groupedID:       message.GroupedID,
+	}
+}
+
+func mergeGroupedMessage(base, next sources.ChannelMessage) sources.ChannelMessage {
+	base.Photos = append(base.Photos, next.Photos...)
+	if strings.TrimSpace(base.Text) == "" && strings.TrimSpace(next.Text) != "" {
+		photos := base.Photos
+		base = next
+		base.Photos = photos
+	}
+	if base.Date.IsZero() || (!next.Date.IsZero() && next.Date.Before(base.Date)) {
+		base.Date = next.Date
+	}
+	return base
 }
 
 func (c *Client) sessionStorage(ctx context.Context) (session.Storage, error) {

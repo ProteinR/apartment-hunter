@@ -188,7 +188,7 @@ func (e *Evaluator) analyze(ctx context.Context, listing domain.ApartmentListing
 
 	payload := responsesRequest{
 		Model:        e.model,
-		Instructions: "You evaluate rental apartment listings. Use the listing text and photos. Return only structured JSON matching the schema. Be conservative: mark visual defects true only when clearly visible or directly stated.",
+		Instructions: "You evaluate rental apartment listings. Use the listing text and photos. Return only structured JSON matching the schema. Be conservative: mark visual defects true only when clearly visible or directly stated. Mark dishwasher and oven true when they are directly stated in text or clearly visible in the kitchen photos.",
 		Input: []inputMessage{{
 			Role:    "user",
 			Content: content,
@@ -413,6 +413,8 @@ func jsonSchemaFormat() jsonSchema {
 			"additionalProperties": false,
 			"required": []string{
 				"style",
+				"has_dishwasher",
+				"has_oven",
 				"has_glossy_ceilings",
 				"has_dark_walls",
 				"has_old_renovation",
@@ -426,6 +428,8 @@ func jsonSchemaFormat() jsonSchema {
 					"type":        "string",
 					"description": "Interior style such as minimalist, scandinavian, loft, classic, modern, or unknown.",
 				},
+				"has_dishwasher":       map[string]any{"type": "boolean", "description": "True when a dishwasher is directly stated or clearly visible in the photos."},
+				"has_oven":             map[string]any{"type": "boolean", "description": "True when an oven or built-in oven is directly stated or clearly visible in the photos."},
 				"has_glossy_ceilings":  map[string]any{"type": "boolean"},
 				"has_dark_walls":       map[string]any{"type": "boolean"},
 				"has_old_renovation":   map[string]any{"type": "boolean"},

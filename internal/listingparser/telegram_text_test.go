@@ -47,6 +47,55 @@ func TestFromChannelMessageDoesNotTreatAreaAsPrice(t *testing.T) {
 	}
 }
 
+func TestFromChannelMessageParsesCyrillicAreaFormats(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want float64
+	}{
+		{name: "cyrillic m2", text: "Сдаётся квартира\n55 м2\n500 $", want: 55},
+		{name: "cyrillic m squared", text: "Площадь: 45 м² / Этаж: 3/9", want: 45},
+		{name: "square meters abbreviation", text: "65 кв.м\nцена 800$", want: 65},
+		{name: "meters square abbreviation", text: "800$ 1+1 70 м.кв,\nКлдиашвили 14", want: 70},
+		{name: "bare square symbol", text: "Цена 450$\n40 ²\nЦентральное отопление", want: 40},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			listing := FromChannelMessage(sources.ChannelMessage{Text: tt.text})
+			if listing.AreaM2 != tt.want {
+				t.Fatalf("expected area %.1f, got %.1f", tt.want, listing.AreaM2)
+			}
+		})
+	}
+}
+
+func TestFromChannelMessageParsesDomikiBatumiBasics(t *testing.T) {
+	listing := FromChannelMessage(sources.ChannelMessage{
+		ChannelID: "domikibatumi",
+		MessageID: 952526,
+		Text: "сдам квартиру 2+1\n" +
+			"🔶12 этаж\n" +
+			"🔶50 м²\n" +
+			"🔶Духовка\n" +
+			"🔶посудомойка\n" +
+			"💰Цена 500$",
+	})
+
+	if listing.Price != 500 {
+		t.Fatalf("expected price 500, got %d", listing.Price)
+	}
+	if listing.AreaM2 != 50 {
+		t.Fatalf("expected area 50, got %.1f", listing.AreaM2)
+	}
+	if !listing.HasOven {
+		t.Fatalf("expected oven to be detected")
+	}
+	if !listing.HasDishwasher {
+		t.Fatalf("expected dishwasher to be detected")
+	}
+}
+
 func TestFromChannelMessageParsesCoordinates(t *testing.T) {
 	listing := FromChannelMessage(sources.ChannelMessage{
 		Text: "Flat near park\nhttps://maps.google.com/?q=41.6466,41.6266\n50 m2\n$600",

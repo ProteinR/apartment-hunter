@@ -30,9 +30,11 @@ func (Evaluator) Analyze(listing domain.ApartmentListing) domain.ListingInsights
 	insights.WindowsFacingHouse = containsAny(text, "windows facing house", "окна в соседний дом", "окна в дом")
 
 	if containsAny(text, "dishwasher", "посудомойка", "посудомоечная") {
+		insights.HasDishwasher = true
 		insights.DescriptionHighlights = append(insights.DescriptionHighlights, "dishwasher mentioned")
 	}
 	if containsAny(text, "oven", "духовка", "духовой шкаф") {
+		insights.HasOven = true
 		insights.DescriptionHighlights = append(insights.DescriptionHighlights, "oven mentioned")
 	}
 

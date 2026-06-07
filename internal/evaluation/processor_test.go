@@ -12,6 +12,10 @@ type countingPhotoLoader struct {
 	calls int
 }
 
+type fakeAnalyzer struct {
+	insights domain.ListingInsights
+}
+
 type fakeGeocoder struct {
 	calls int
 }
@@ -35,6 +39,10 @@ func (m *fakeLocationMatcher) MatchesListingLocation(ctx context.Context, profil
 func (l *countingPhotoLoader) LoadPhotos(ctx context.Context, message sources.ChannelMessage, listing domain.ApartmentListing) (domain.ApartmentListing, error) {
 	l.calls++
 	return listing, nil
+}
+
+func (a fakeAnalyzer) AnalyzeWithUsage(ctx context.Context, listing domain.ApartmentListing) (domain.ListingInsights, domain.AIUsage, error) {
+	return a.insights, domain.AIUsage{}, nil
 }
 
 func TestProcessMessageGeocodesListingAfterBasicFilters(t *testing.T) {
@@ -79,6 +87,32 @@ func TestProcessMessageSkipsPhotoLoadingWhenBasicFiltersFail(t *testing.T) {
 	}
 	if loader.calls != 0 {
 		t.Fatalf("expected photo loader not to be called, got %d calls", loader.calls)
+	}
+}
+
+func TestProcessMessageDoesNotBasicRejectUnknownArea(t *testing.T) {
+	loader := &countingPhotoLoader{}
+	processor := Processor{
+		Prefs:       domain.UserPreferences{MaxBudget: 800, MinAreaM2: 50},
+		PhotoLoader: loader,
+	}
+
+	result, err := processor.ProcessMessage(context.Background(), domain.ListingSourceRef{}, sources.ChannelMessage{
+		Photos: []sources.ChannelPhoto{{
+			ID: "telegram-photo-location:test-token",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Record.Status == "rejected_basic" {
+		t.Fatalf("expected unknown area not to be rejected by basic filters, got reasons %v", result.Record.Score.RejectionReasons)
+	}
+	if result.Record.Status != "failed" || result.Record.FailureReason != "AI analyzer is not configured" {
+		t.Fatalf("expected processing to continue past basic filters, got status=%s failure=%q", result.Record.Status, result.Record.FailureReason)
+	}
+	if loader.calls != 1 {
+		t.Fatalf("expected photo loader to be called once, got %d calls", loader.calls)
 	}
 }
 
@@ -139,5 +173,43 @@ func TestProcessMessageLoadsPhotosWhenLocationMatches(t *testing.T) {
 	}
 	if loader.calls != 1 {
 		t.Fatalf("expected photo loader to be called once, got %d calls", loader.calls)
+	}
+}
+
+func TestProcessMessageDoesNotRejectMissingAppliancesBeforePhotoAnalysis(t *testing.T) {
+	loader := &countingPhotoLoader{}
+	processor := Processor{
+		Prefs: domain.UserPreferences{
+			MaxBudget:         800,
+			MinAreaM2:         50,
+			RequireDishwasher: true,
+			RequireOven:       true,
+		},
+		PhotoLoader: loader,
+		Analyzer: fakeAnalyzer{insights: domain.ListingInsights{
+			HasDishwasher:   true,
+			HasOven:         true,
+			InteriorQuality: 0.7,
+			ViewQuality:     0.6,
+		}},
+	}
+
+	result, err := processor.ProcessMessage(context.Background(), domain.ListingSourceRef{}, sources.ChannelMessage{
+		Text: "Apartment\n650 USD\n55 m2",
+		Photos: []sources.ChannelPhoto{{
+			ID: "telegram-photo-location:test-token",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loader.calls != 1 {
+		t.Fatalf("expected photo loader to be called once, got %d calls", loader.calls)
+	}
+	if !result.Record.Listing.HasDishwasher || !result.Record.Listing.HasOven {
+		t.Fatalf("expected appliances from insights to be reflected on listing: %+v", result.Record.Listing)
+	}
+	if result.Record.Status != "passed" {
+		t.Fatalf("expected listing to pass after appliance insights, got %s with reasons %v", result.Record.Status, result.Record.Score.RejectionReasons)
 	}
 }

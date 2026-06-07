@@ -144,6 +144,8 @@ type ListingScore struct {
 
 type ListingInsights struct {
 	Style                 string   `json:"style"`
+	HasDishwasher         bool     `json:"has_dishwasher"`
+	HasOven               bool     `json:"has_oven"`
 	HasGlossyCeilings     bool     `json:"has_glossy_ceilings"`
 	HasDarkWalls          bool     `json:"has_dark_walls"`
 	HasOldRenovation      bool     `json:"has_old_renovation"`

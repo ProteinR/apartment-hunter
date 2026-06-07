@@ -82,7 +82,7 @@ func areaChecklistItem(record domain.ListingEvaluationRecord, prefs domain.UserP
 		return checklistItem{Label: "Метраж", Mark: "-", Note: " (требование не задано)"}
 	}
 	if record.Listing.AreaM2 <= 0 {
-		return checklistItem{Label: "Метраж", Mark: "✗", Note: " (метраж не найден)"}
+		return checklistItem{Label: "Метраж", Mark: "❌", Note: " (метраж не найден)"}
 	}
 	return checklistItem{Label: "Метраж", Mark: passMark(record.Listing.AreaM2 >= prefs.MinAreaM2), Note: note}
 }
@@ -93,12 +93,12 @@ func priceChecklistItem(record domain.ListingEvaluationRecord, prefs domain.User
 		return checklistItem{Label: "Цена", Mark: "-", Note: " (требование не задано)"}
 	}
 	if record.Listing.Price <= 0 {
-		return checklistItem{Label: "Цена", Mark: "✗", Note: " (цена не найдена)"}
+		return checklistItem{Label: "Цена", Mark: "❌", Note: " (цена не найдена)"}
 	}
 	if prefs.MaxBudget > 0 && record.Listing.Price > prefs.MaxBudget {
-		return checklistItem{Label: "Цена", Mark: "✗", Note: note}
+		return checklistItem{Label: "Цена", Mark: "❌", Note: note}
 	}
-	return checklistItem{Label: "Цена", Mark: "✓", Note: note}
+	return checklistItem{Label: "Цена", Mark: "✅", Note: note}
 }
 
 func locationChecklistItem(record domain.ListingEvaluationRecord, prefs domain.UserPreferences) checklistItem {
@@ -109,12 +109,12 @@ func locationChecklistItem(record domain.ListingEvaluationRecord, prefs domain.U
 		return checklistItem{Label: "Локация", Mark: "-", Note: " (не анализировалась из-за базового фильтра)"}
 	}
 	if record.Status == "rejected_location" {
-		return checklistItem{Label: "Локация", Mark: "✗", Note: locationNote(record.Listing, prefs)}
+		return checklistItem{Label: "Локация", Mark: "❌", Note: locationNote(record.Listing, prefs)}
 	}
 	if record.Status == "received" || record.Status == "failed" {
 		return checklistItem{Label: "Локация", Mark: "-", Note: " (не завершена проверка)"}
 	}
-	return checklistItem{Label: "Локация", Mark: "✓", Note: locationNote(record.Listing, prefs)}
+	return checklistItem{Label: "Локация", Mark: "✅", Note: locationNote(record.Listing, prefs)}
 }
 
 func appliancesChecklistItem(record domain.ListingEvaluationRecord, prefs domain.UserPreferences) checklistItem {
@@ -124,6 +124,9 @@ func appliancesChecklistItem(record domain.ListingEvaluationRecord, prefs domain
 	}
 	ok := (!prefs.RequireDishwasher || record.Listing.HasDishwasher) &&
 		(!prefs.RequireOven || record.Listing.HasOven)
+	if record.Status == "rejected_basic" && !ok {
+		return checklistItem{Label: "Техника", Mark: "-", Note: " (не анализировалась по фото из-за базового фильтра)"}
+	}
 	return checklistItem{Label: "Техника", Mark: passMark(ok), Note: note}
 }
 
@@ -168,16 +171,16 @@ func viewChecklistItem(record domain.ListingEvaluationRecord) checklistItem {
 
 func passMark(ok bool) string {
 	if ok {
-		return "✓"
+		return "✅"
 	}
-	return "✗"
+	return "❌"
 }
 
 func checklistStatus(mark string) string {
 	switch mark {
-	case "✓":
+	case "✅":
 		return "удовлетворено"
-	case "✗":
+	case "❌":
 		return "не удовлетворено"
 	default:
 		return "пропущено"
@@ -202,8 +205,18 @@ func reportItems(record domain.ListingEvaluationRecord, prefs domain.UserPrefere
 	add("interior", "Ремонт", "")
 	add("view", "Вид из окна", "")
 	add("price", "Цена", priceNote(record.Listing, prefs))
-	add("appliances", "Техника", appliancesNote(record.Listing, prefs))
+	if shouldShowAppliancesScore(record, prefs) {
+		add("appliances", "Техника", appliancesNote(record.Listing, prefs))
+	}
 	return items
+}
+
+func shouldShowAppliancesScore(record domain.ListingEvaluationRecord, prefs domain.UserPreferences) bool {
+	if record.Status != "rejected_basic" {
+		return true
+	}
+	return (!prefs.RequireDishwasher || record.Listing.HasDishwasher) &&
+		(!prefs.RequireOven || record.Listing.HasOven)
 }
 
 func tenPoint(value float64) int {

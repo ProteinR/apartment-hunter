@@ -26,6 +26,7 @@ func (s Scorer) Score(listing domain.ApartmentListing, prefs domain.UserPreferen
 }
 
 func ScoreWithInsights(listing domain.ApartmentListing, prefs domain.UserPreferences, insights domain.ListingInsights) domain.ListingScore {
+	listing = listingWithInsightAppliances(listing, insights)
 	reasons := hardFilterReasons(listing, prefs, insights)
 	breakdown := BreakdownWithInsights(listing, prefs, insights)
 
@@ -44,6 +45,7 @@ func ScoreWithInsights(listing domain.ApartmentListing, prefs domain.UserPrefere
 }
 
 func BreakdownWithInsights(listing domain.ApartmentListing, prefs domain.UserPreferences, insights domain.ListingInsights) map[string]float64 {
+	listing = listingWithInsightAppliances(listing, insights)
 	return map[string]float64{
 		"location":   locationScore(listing, prefs),
 		"area":       areaScore(listing.AreaM2, prefs.MinAreaM2),
@@ -68,9 +70,14 @@ func BasicFilterReasons(listing domain.ApartmentListing, prefs domain.UserPrefer
 	if prefs.MaxBudget > 0 && listing.Price > prefs.MaxBudget {
 		reasons = append(reasons, fmt.Sprintf("price %d exceeds max budget %d", listing.Price, prefs.MaxBudget))
 	}
-	if prefs.MinAreaM2 > 0 && listing.AreaM2 < prefs.MinAreaM2 {
+	if prefs.MinAreaM2 > 0 && listing.AreaM2 > 0 && listing.AreaM2 < prefs.MinAreaM2 {
 		reasons = append(reasons, fmt.Sprintf("area %.1f is below minimum %.1f", listing.AreaM2, prefs.MinAreaM2))
 	}
+	return reasons
+}
+
+func requiredApplianceReasons(listing domain.ApartmentListing, prefs domain.UserPreferences) []string {
+	reasons := []string{}
 	if prefs.RequireDishwasher && !listing.HasDishwasher {
 		reasons = append(reasons, "dishwasher is required")
 	}
@@ -81,7 +88,9 @@ func BasicFilterReasons(listing domain.ApartmentListing, prefs domain.UserPrefer
 }
 
 func hardFilterReasons(listing domain.ApartmentListing, prefs domain.UserPreferences, insights domain.ListingInsights) []string {
+	listing = listingWithInsightAppliances(listing, insights)
 	reasons := BasicFilterReasons(listing, prefs)
+	reasons = append(reasons, requiredApplianceReasons(listing, prefs)...)
 	if prefs.Reject.GlossyCeilings && insights.HasGlossyCeilings {
 		reasons = append(reasons, "glossy ceilings detected")
 	}
@@ -95,6 +104,16 @@ func hardFilterReasons(listing domain.ApartmentListing, prefs domain.UserPrefere
 		reasons = append(reasons, "windows facing neighboring house detected")
 	}
 	return reasons
+}
+
+func listingWithInsightAppliances(listing domain.ApartmentListing, insights domain.ListingInsights) domain.ApartmentListing {
+	if insights.HasDishwasher {
+		listing.HasDishwasher = true
+	}
+	if insights.HasOven {
+		listing.HasOven = true
+	}
+	return listing
 }
 
 func locationScore(listing domain.ApartmentListing, prefs domain.UserPreferences) float64 {

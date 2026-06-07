@@ -142,6 +142,8 @@ func (p Processor) ProcessMessage(ctx context.Context, source domain.ListingSour
 	}
 	record.Insights = &insights
 	record.AIUsage = &usage
+	listing = scoringListingWithInsights(listing, insights)
+	record.Listing = listing
 	score := scoring.ScoreWithInsights(listing, p.Prefs, insights)
 	record.Score = &score
 	if score.PassedHardFilters {
@@ -158,6 +160,16 @@ func (p Processor) ProcessMessage(ctx context.Context, source domain.ListingSour
 		}
 	}
 	return p.finish(ctx, record)
+}
+
+func scoringListingWithInsights(listing domain.ApartmentListing, insights domain.ListingInsights) domain.ApartmentListing {
+	if insights.HasDishwasher {
+		listing.HasDishwasher = true
+	}
+	if insights.HasOven {
+		listing.HasOven = true
+	}
+	return listing
 }
 
 func (p Processor) geocodeListing(ctx context.Context, listing domain.ApartmentListing) domain.ApartmentListing {

@@ -41,6 +41,63 @@ func TestScoreRejectsHardFilters(t *testing.T) {
 	}
 }
 
+func TestScoreUsesInsightAppliances(t *testing.T) {
+	scorer := New(fakeEvaluator{insights: domain.ListingInsights{
+		HasDishwasher:   true,
+		HasOven:         true,
+		InteriorQuality: 0.7,
+		ViewQuality:     0.6,
+	}})
+	result := scorer.Score(domain.ApartmentListing{
+		Title:  "Photo-confirmed kitchen",
+		Price:  650,
+		AreaM2: 55,
+	}, domain.UserPreferences{
+		MaxBudget:         800,
+		MinAreaM2:         50,
+		RequireDishwasher: true,
+		RequireOven:       true,
+		Importance:        domain.ImportanceWeights{Price: 1, Appliances: 1},
+	})
+
+	if !result.PassedHardFilters {
+		t.Fatalf("expected listing to pass with appliances confirmed by insights, got %v", result.RejectionReasons)
+	}
+	if result.ScoreBreakdown["appliances"] != 1 {
+		t.Fatalf("expected full appliance score, got %v", result.ScoreBreakdown["appliances"])
+	}
+}
+
+func TestBasicFilterDoesNotRejectUnknownArea(t *testing.T) {
+	reasons := BasicFilterReasons(domain.ApartmentListing{
+		Title:  "Photo-only album item",
+		Price:  500,
+		AreaM2: 0,
+	}, domain.UserPreferences{
+		MaxBudget: 800,
+		MinAreaM2: 50,
+	})
+
+	if len(reasons) != 0 {
+		t.Fatalf("expected unknown area not to fail basic filters, got %v", reasons)
+	}
+}
+
+func TestBasicFilterRejectsKnownAreaBelowMinimum(t *testing.T) {
+	reasons := BasicFilterReasons(domain.ApartmentListing{
+		Title:  "Too small",
+		Price:  500,
+		AreaM2: 40,
+	}, domain.UserPreferences{
+		MaxBudget: 800,
+		MinAreaM2: 50,
+	})
+
+	if len(reasons) != 1 || reasons[0] != "area 40.0 is below minimum 50.0" {
+		t.Fatalf("expected known undersized area rejection, got %v", reasons)
+	}
+}
+
 func TestScoreWeightsBreakdown(t *testing.T) {
 	scorer := New(fakeEvaluator{insights: domain.ListingInsights{Style: "minimalist", InteriorQuality: 0.8, ViewQuality: 0.6}})
 	result := scorer.Score(domain.ApartmentListing{
