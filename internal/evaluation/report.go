@@ -10,45 +10,45 @@ import (
 
 func BuildReport(record domain.ListingEvaluationRecord, prefs domain.UserPreferences) string {
 	lines := []string{
-		"Отчет по объявлению",
-		record.Listing.Title,
-		"Статус: " + statusLabel(record.Status),
+		"🏠 Отчет по объявлению",
+		"📌 " + record.Listing.Title,
+		"🚦 Статус: " + statusLabel(record.Status),
 	}
 	if record.Score != nil {
-		lines = append(lines, fmt.Sprintf("Итог: %.0f/100", record.Score.ScoreTotal))
+		lines = append(lines, fmt.Sprintf("🎯 Итог: %.0f/100", record.Score.ScoreTotal))
 	}
 	if record.Source.MessageLink != "" {
-		lines = append(lines, "Сообщение: "+record.Source.MessageLink)
+		lines = append(lines, "🔗 Сообщение: "+record.Source.MessageLink)
 	} else if record.Source.ChannelID != "" && record.Source.MessageID != 0 {
-		lines = append(lines, fmt.Sprintf("Источник: %s/%d", record.Source.ChannelID, record.Source.MessageID))
+		lines = append(lines, fmt.Sprintf("🔗 Источник: %s/%d", record.Source.ChannelID, record.Source.MessageID))
 	}
 	if text := originalMessageText(record.Listing.Description); text != "" {
-		lines = append(lines, "", "Текст объявления:", text)
+		lines = append(lines, "", "📝 Текст объявления:", text)
 	}
 
-	lines = append(lines, "", "Критерии:")
+	lines = append(lines, "", "✅ Критерии:")
 	for _, item := range checklistItems(record, prefs) {
-		lines = append(lines, fmt.Sprintf("- %s %s%s", item.Mark, item.Label, item.Note))
+		lines = append(lines, fmt.Sprintf("- %s %s: %s%s", item.Mark, item.Label, checklistStatus(item.Mark), item.Note))
 	}
 
 	if items := reportItems(record, prefs); len(items) > 0 {
-		lines = append(lines, "", "Баллы:")
+		lines = append(lines, "", "📊 Баллы:")
 		for _, item := range items {
 			lines = append(lines, fmt.Sprintf("- %s: %d/10%s", item.Label, item.Score, item.Note))
 		}
 	}
 
 	if record.Score != nil && len(record.Score.RejectionReasons) > 0 {
-		lines = append(lines, "", "Причины отказа:")
+		lines = append(lines, "", "⛔ Причины отказа:")
 		for _, reason := range record.Score.RejectionReasons {
-			lines = append(lines, "- "+reason)
+			lines = append(lines, "- "+rejectionReasonLabel(reason))
 		}
 	}
 	if record.FailureReason != "" {
-		lines = append(lines, "", "Ошибка: "+record.FailureReason)
+		lines = append(lines, "", "⚠️ Ошибка: "+record.FailureReason)
 	}
 	if record.AIUsage != nil && record.AIUsage.TotalTokens > 0 {
-		lines = append(lines, "", fmt.Sprintf("OpenAI: %s, tokens %d, cost $%.6f", record.AIUsage.Model, record.AIUsage.TotalTokens, record.AIUsage.CostUSD))
+		lines = append(lines, "", fmt.Sprintf("🤖 OpenAI: %s, tokens %d, cost $%.6f", record.AIUsage.Model, record.AIUsage.TotalTokens, record.AIUsage.CostUSD))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -173,6 +173,17 @@ func passMark(ok bool) string {
 	return "✗"
 }
 
+func checklistStatus(mark string) string {
+	switch mark {
+	case "✓":
+		return "удовлетворено"
+	case "✗":
+		return "не удовлетворено"
+	default:
+		return "пропущено"
+	}
+}
+
 func reportItems(record domain.ListingEvaluationRecord, prefs domain.UserPreferences) []reportItem {
 	if record.Score == nil {
 		return nil
@@ -221,6 +232,35 @@ func statusLabel(status string) string {
 		return "ошибка обработки"
 	default:
 		return status
+	}
+}
+
+func rejectionReasonLabel(reason string) string {
+	var price, maxBudget int
+	if _, err := fmt.Sscanf(reason, "price %d exceeds max budget %d", &price, &maxBudget); err == nil {
+		return fmt.Sprintf("цена %d выше максимального бюджета %d", price, maxBudget)
+	}
+
+	var area, minArea float64
+	if _, err := fmt.Sscanf(reason, "area %f is below minimum %f", &area, &minArea); err == nil {
+		return fmt.Sprintf("метраж %.1f ниже минимума %.1f", area, minArea)
+	}
+
+	switch reason {
+	case "dishwasher is required":
+		return "посудомойка обязательна"
+	case "oven is required":
+		return "духовка обязательна"
+	case "glossy ceilings detected":
+		return "обнаружены глянцевые потолки"
+	case "dark walls detected":
+		return "обнаружены темные стены"
+	case "old renovation detected":
+		return "обнаружен старый ремонт"
+	case "windows facing neighboring house detected":
+		return "окна выходят на соседний дом"
+	default:
+		return reason
 	}
 }
 

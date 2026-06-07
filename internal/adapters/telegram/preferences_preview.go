@@ -263,8 +263,25 @@ func confirmationKeyboard() models.ReplyMarkup {
 	}
 }
 
-func removeKeyboard() models.ReplyMarkup {
-	return &models.ReplyKeyboardRemove{RemoveKeyboard: true}
+func mainCommandKeyboard() models.ReplyMarkup {
+	return &models.ReplyKeyboardMarkup{
+		Keyboard: [][]models.KeyboardButton{
+			{
+				{Text: "/preferences"},
+				{Text: "/channels"},
+			},
+			{
+				{Text: "/subscribe"},
+				{Text: "/unsubscribe"},
+			},
+			{
+				{Text: "/debug"},
+				{Text: "/debug on"},
+				{Text: "/debug off"},
+			},
+		},
+		ResizeKeyboard: true,
+	}
 }
 
 func normalizeConfirmation(text string) string {

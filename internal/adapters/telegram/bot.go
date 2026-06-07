@@ -146,28 +146,32 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 	text = strings.TrimSpace(text)
 	if strings.HasPrefix(text, "/channels") {
 		reply, err := b.listChannels(context.Background(), chatID)
-		return textResponse{Text: reply}, err
+		return textResponse{Text: reply, ReplyMarkup: mainCommandKeyboard()}, err
 	}
 	if strings.HasPrefix(text, "/subscribe") {
 		reply, err := b.subscribeChannel(context.Background(), chatID, text)
-		return textResponse{Text: reply}, err
+		return textResponse{Text: reply, ReplyMarkup: mainCommandKeyboard()}, err
 	}
 	if strings.HasPrefix(text, "/unsubscribe") {
 		reply, err := b.unsubscribeChannel(context.Background(), chatID, text)
-		return textResponse{Text: reply}, err
+		return textResponse{Text: reply, ReplyMarkup: mainCommandKeyboard()}, err
+	}
+	if strings.HasPrefix(text, "/debug") {
+		reply, err := b.debugMode(context.Background(), chatID, text)
+		return textResponse{Text: reply, ReplyMarkup: mainCommandKeyboard()}, err
 	}
 	if looksLikeChannelSubscription(text) {
 		reply, err := b.subscribeChannelsFromText(context.Background(), chatID, text)
-		return textResponse{Text: reply}, err
+		return textResponse{Text: reply, ReplyMarkup: mainCommandKeyboard()}, err
 	}
 	if text == "/start" || text == "/preferences" || text == "/restart" {
 		b.setSession(chatID, &preferenceSession{State: "awaiting_query"})
-		return textResponse{Text: preferencesStartMessage}, nil
+		return textResponse{Text: preferencesStartMessage, ReplyMarkup: mainCommandKeyboard()}, nil
 	}
 
 	session := b.getSession(chatID)
 	if session == nil {
-		return textResponse{Text: "Отправьте /preferences, чтобы настроить поиск квартиры."}, nil
+		return textResponse{Text: "Выберите команду кнопкой ниже или отправьте /preferences, чтобы настроить поиск квартиры.", ReplyMarkup: mainCommandKeyboard()}, nil
 	}
 	switch session.State {
 	case "awaiting_query":
@@ -193,20 +197,20 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 				return textResponse{}, err
 			}
 			reply, err := b.afterPreferencesSavedMessage(context.Background(), chatID)
-			return textResponse{Text: reply, ReplyMarkup: removeKeyboard()}, err
+			return textResponse{Text: reply, ReplyMarkup: mainCommandKeyboard()}, err
 		case "edit":
 			session.State = "awaiting_query"
 			b.setSession(chatID, session)
-			return textResponse{Text: "Отправь исправленный запрос одним сообщением.", ReplyMarkup: removeKeyboard()}, nil
+			return textResponse{Text: "Отправь исправленный запрос одним сообщением.", ReplyMarkup: mainCommandKeyboard()}, nil
 		case "cancel":
 			b.deleteSession(chatID)
-			return textResponse{Text: "Настройка отменена.", ReplyMarkup: removeKeyboard()}, nil
+			return textResponse{Text: "Настройка отменена.", ReplyMarkup: mainCommandKeyboard()}, nil
 		default:
 			return textResponse{Text: "Выбери Save, Edit или Cancel.", ReplyMarkup: confirmationKeyboard()}, nil
 		}
 	default:
 		b.deleteSession(chatID)
-		return textResponse{Text: "Отправьте /preferences, чтобы настроить поиск квартиры."}, nil
+		return textResponse{Text: "Выберите команду кнопкой ниже или отправьте /preferences, чтобы настроить поиск квартиры.", ReplyMarkup: mainCommandKeyboard()}, nil
 	}
 }
 
@@ -349,6 +353,44 @@ func (b *Bot) unsubscribeChannel(ctx context.Context, chatID int64, text string)
 		return "Источник @" + username + " не найден.", nil
 	}
 	return "Источник @" + username + " удален.", nil
+}
+
+func (b *Bot) debugMode(ctx context.Context, chatID int64, text string) (string, error) {
+	parts := strings.Fields(strings.TrimSpace(text))
+	profileID := profiles.IDForTelegramChat(chatID)
+	if len(parts) == 1 || strings.EqualFold(parts[1], "status") {
+		profile, ok, err := b.store.GetProfile(ctx, profileID)
+		if err != nil {
+			return "", err
+		}
+		if !ok {
+			return "Debug mode: on\n\nВ этом режиме я пересылаю отчет по каждому обработанному объявлению. Выключить: /debug off", nil
+		}
+		return debugModeStatusMessage(profiles.DebugModeEnabled(profile)), nil
+	}
+	switch strings.ToLower(parts[1]) {
+	case "on", "вкл", "enable", "enabled":
+		enabled := true
+		if err := b.store.UpsertProfile(ctx, profiles.Profile{ID: profileID, TelegramChatID: chatID, DebugMode: &enabled}); err != nil {
+			return "", err
+		}
+		return debugModeStatusMessage(true), nil
+	case "off", "выкл", "disable", "disabled":
+		enabled := false
+		if err := b.store.UpsertProfile(ctx, profiles.Profile{ID: profileID, TelegramChatID: chatID, DebugMode: &enabled}); err != nil {
+			return "", err
+		}
+		return debugModeStatusMessage(false), nil
+	default:
+		return "Использование: /debug, /debug on или /debug off", nil
+	}
+}
+
+func debugModeStatusMessage(enabled bool) string {
+	if enabled {
+		return "Debug mode: on\n\nЯ пересылаю отчет по каждому обработанному объявлению: прошедшему, отклоненному, дубликату или ошибке. Выключить: /debug off"
+	}
+	return "Debug mode: off\n\nЯ пересылаю только объявления, которые прошли фильтры. Включить все отчеты: /debug on"
 }
 
 func looksLikeChannelSubscription(text string) bool {

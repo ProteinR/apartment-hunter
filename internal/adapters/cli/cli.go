@@ -112,6 +112,12 @@ func (a App) telegram(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	store, err := openPostgresStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
 	if profileID := strings.TrimSpace(os.Getenv("APARTMENT_HUNTER_PROFILE_ID")); profileID != "" {
 		if reason := telegramWorkerDisabledReason(); reason != "" {
 			fmt.Fprintf(a.Out, "Telegram worker not started: %s\n", reason)
@@ -126,11 +132,6 @@ func (a App) telegram(args []string) error {
 		fmt.Fprintf(a.Out, "Telegram worker not started: APARTMENT_HUNTER_PROFILE_ID is not set\n")
 	}
 
-	store, err := openPostgresStore(ctx)
-	if err != nil {
-		return err
-	}
-	defer store.Close()
 	nlpParser, err := openaipreferences.FromEnv()
 	if err != nil {
 		return err
@@ -224,7 +225,7 @@ func (a App) telegramProcessWithContext(ctx context.Context, profileID string, r
 	if botToken == "" || profile.TelegramChatID == 0 {
 		fmt.Fprintf(a.Out, "Telegram notifications disabled: bot token set=%t, chat id=%d\n", botToken != "", profile.TelegramChatID)
 	} else {
-		fmt.Fprintf(a.Out, "Telegram notifications enabled for chat %d\n", profile.TelegramChatID)
+		fmt.Fprintf(a.Out, "Telegram notifications enabled for chat %d, debug mode=%t\n", profile.TelegramChatID, profiles.DebugModeEnabled(profile))
 	}
 	return reader.Listen(ctx, func(ctx context.Context, message sources.ChannelMessage) error {
 		profile, ok, err := store.GetProfile(ctx, profileID)
@@ -254,7 +255,7 @@ func (a App) telegramProcessWithContext(ctx context.Context, profileID string, r
 			return err
 		}
 		fmt.Fprintf(a.Out, "Processed %s/%d: %s\n", message.ChannelID, message.MessageID, result.Record.Status)
-		if botToken != "" && profile.TelegramChatID != 0 {
+		if botToken != "" && profile.TelegramChatID != 0 && shouldSendTelegramNotification(profile, result.Record) {
 			fmt.Fprintf(a.Out, "Sending notification for %s/%d to chat %d\n", message.ChannelID, message.MessageID, profile.TelegramChatID)
 			if err := telegram.SendText(ctx, botToken, profile.TelegramChatID, evaluation.NotificationText(result.Record)); err != nil {
 				return err
@@ -262,6 +263,10 @@ func (a App) telegramProcessWithContext(ctx context.Context, profileID string, r
 		}
 		return nil
 	})
+}
+
+func shouldSendTelegramNotification(profile profiles.Profile, record domain.ListingEvaluationRecord) bool {
+	return profiles.DebugModeEnabled(profile) || record.Status == "passed"
 }
 
 func profileSubscribedToMessage(profile profiles.Profile, message sources.ChannelMessage) bool {

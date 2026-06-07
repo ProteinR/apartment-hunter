@@ -8,6 +8,8 @@ import (
 	"apartment-hunter/internal/domain"
 	"apartment-hunter/internal/preferenceparser"
 	"apartment-hunter/internal/profiles"
+
+	"github.com/go-telegram/bot/models"
 )
 
 type fakeProfileStore struct {
@@ -27,6 +29,10 @@ func (s *fakeProfileStore) UpsertProfile(ctx context.Context, profile profiles.P
 	if profile.Preferences != nil {
 		prefs := *profile.Preferences
 		existing.Preferences = &prefs
+	}
+	if profile.DebugMode != nil {
+		debugMode := *profile.DebugMode
+		existing.DebugMode = &debugMode
 	}
 	existing.ID = profile.ID
 	s.profiles[profile.ID] = existing
@@ -236,6 +242,84 @@ func TestPrivateInviteLinkExplainsManualLimitation(t *testing.T) {
 		!strings.Contains(reply, "Автоматическое вступление не выполняю") {
 		t.Fatalf("unexpected reply %q", reply)
 	}
+}
+
+func TestDebugModeCanBeToggled(t *testing.T) {
+	store := newFakeProfileStore()
+	bot := New("test-token", t.TempDir(), WithProfileStore(store))
+
+	reply, err := bot.HandleText(42, "/debug")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reply, "Debug mode: on") {
+		t.Fatalf("unexpected default debug reply %q", reply)
+	}
+
+	reply, err = bot.HandleText(42, "/debug off")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reply, "Debug mode: off") {
+		t.Fatalf("unexpected disable reply %q", reply)
+	}
+	profile, ok, err := store.GetProfile(context.Background(), "telegram_42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || profile.DebugMode == nil || *profile.DebugMode {
+		t.Fatalf("expected debug mode to be disabled, got %+v", profile)
+	}
+
+	reply, err = bot.HandleText(42, "/debug on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reply, "Debug mode: on") {
+		t.Fatalf("unexpected enable reply %q", reply)
+	}
+	profile, _, _ = store.GetProfile(context.Background(), "telegram_42")
+	if profile.DebugMode == nil || !*profile.DebugMode {
+		t.Fatalf("expected debug mode to be enabled, got %+v", profile)
+	}
+}
+
+func TestRepliesIncludeCommandKeyboard(t *testing.T) {
+	store := newFakeProfileStore()
+	bot := New("test-token", t.TempDir(), WithProfileStore(store))
+
+	response, err := bot.handleTextResponse(42, "/start")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyboard, ok := response.ReplyMarkup.(*models.ReplyKeyboardMarkup)
+	if !ok {
+		t.Fatalf("expected command keyboard, got %T", response.ReplyMarkup)
+	}
+	for _, expected := range []string{"/preferences", "/channels", "/subscribe", "/unsubscribe", "/debug", "/debug on", "/debug off"} {
+		if !keyboardHasButton(keyboard, expected) {
+			t.Fatalf("expected keyboard to contain %q: %+v", expected, keyboard.Keyboard)
+		}
+	}
+
+	response, err = bot.handleTextResponse(42, "/channels")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := response.ReplyMarkup.(*models.ReplyKeyboardMarkup); !ok {
+		t.Fatalf("expected command keyboard after /channels, got %T", response.ReplyMarkup)
+	}
+}
+
+func keyboardHasButton(keyboard *models.ReplyKeyboardMarkup, text string) bool {
+	for _, row := range keyboard.Keyboard {
+		for _, button := range row {
+			if button.Text == text {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 type fakeNormalizer struct {

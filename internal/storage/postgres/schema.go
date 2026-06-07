@@ -48,13 +48,50 @@ create index if not exists listing_evaluations_message_idx
 alter table listing_evaluations
 	add column if not exists report text;
 
+alter table listing_evaluations
+	add column if not exists ai_provider text,
+	add column if not exists ai_model text,
+	add column if not exists input_tokens integer,
+	add column if not exists cached_input_tokens integer,
+	add column if not exists output_tokens integer,
+	add column if not exists reasoning_tokens integer,
+	add column if not exists total_tokens integer,
+	add column if not exists input_price_per_million_usd numeric(12, 6),
+	add column if not exists cached_input_price_per_million_usd numeric(12, 6),
+	add column if not exists output_price_per_million_usd numeric(12, 6),
+	add column if not exists cost_usd numeric(14, 8);
+
+update listing_evaluations
+set input_tokens = coalesce(input_tokens, 0),
+	cached_input_tokens = coalesce(cached_input_tokens, 0),
+	output_tokens = coalesce(output_tokens, 0),
+	reasoning_tokens = coalesce(reasoning_tokens, 0),
+	total_tokens = coalesce(total_tokens, 0),
+	input_price_per_million_usd = coalesce(input_price_per_million_usd, 0),
+	cached_input_price_per_million_usd = coalesce(cached_input_price_per_million_usd, 0),
+	output_price_per_million_usd = coalesce(output_price_per_million_usd, 0),
+	cost_usd = coalesce(cost_usd, 0)
+where input_tokens is null
+	or cached_input_tokens is null
+	or output_tokens is null
+	or reasoning_tokens is null
+	or total_tokens is null
+	or input_price_per_million_usd is null
+	or cached_input_price_per_million_usd is null
+	or output_price_per_million_usd is null
+	or cost_usd is null;
+
 create table if not exists profiles (
 	id text primary key,
 	telegram_chat_id bigint unique,
 	preferences jsonb,
+	debug_mode boolean not null default true,
 	created_at timestamptz not null default now(),
 	updated_at timestamptz not null default now()
 );
+
+alter table profiles
+	add column if not exists debug_mode boolean not null default true;
 
 create table if not exists user_search_profiles (
 	id bigserial primary key,

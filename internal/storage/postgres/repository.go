@@ -58,31 +58,38 @@ func (r *Repository) UpsertProfile(ctx context.Context, profile profiles.Profile
 		}
 		preferencesJSON = data
 	}
+	var debugMode any
+	if profile.DebugMode != nil {
+		debugMode = *profile.DebugMode
+	}
 	_, err := r.db.ExecContext(ctx, `
-		insert into profiles (id, telegram_chat_id, preferences)
-		values ($1, $2, $3)
+		insert into profiles (id, telegram_chat_id, preferences, debug_mode)
+		values ($1, $2, $3, coalesce($4, true))
 		on conflict (id) do update set
 			telegram_chat_id = coalesce(excluded.telegram_chat_id, profiles.telegram_chat_id),
 			preferences = coalesce(excluded.preferences, profiles.preferences),
+			debug_mode = coalesce($4, profiles.debug_mode),
 			updated_at = now()
-	`, profile.ID, nullInt64(profile.TelegramChatID), preferencesJSON)
+	`, profile.ID, nullInt64(profile.TelegramChatID), preferencesJSON, debugMode)
 	return err
 }
 
 func (r *Repository) GetProfile(ctx context.Context, id string) (profiles.Profile, bool, error) {
 	var profile profiles.Profile
 	var preferencesJSON []byte
+	var debugMode bool
 	err := r.db.QueryRowContext(ctx, `
-		select id, coalesce(telegram_chat_id, 0), preferences
+		select id, coalesce(telegram_chat_id, 0), preferences, debug_mode
 		from profiles
 		where id = $1
-	`, id).Scan(&profile.ID, &profile.TelegramChatID, &preferencesJSON)
+	`, id).Scan(&profile.ID, &profile.TelegramChatID, &preferencesJSON, &debugMode)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return profiles.Profile{}, false, nil
 		}
 		return profiles.Profile{}, false, err
 	}
+	profile.DebugMode = &debugMode
 	if len(preferencesJSON) > 0 {
 		var prefs domain.UserPreferences
 		if err := json.Unmarshal(preferencesJSON, &prefs); err != nil {
@@ -496,14 +503,14 @@ func usageField(usage *domain.AIUsage, getter func(domain.AIUsage) string) any {
 
 func usageInt(usage *domain.AIUsage, getter func(domain.AIUsage) int) any {
 	if usage == nil {
-		return nil
+		return 0
 	}
 	return getter(*usage)
 }
 
 func usageFloat(usage *domain.AIUsage, getter func(domain.AIUsage) float64) any {
 	if usage == nil {
-		return nil
+		return 0
 	}
 	return getter(*usage)
 }

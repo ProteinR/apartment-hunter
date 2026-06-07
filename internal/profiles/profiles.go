@@ -22,6 +22,7 @@ type Profile struct {
 	PreferencesPath string                  `json:"preferences_path"`
 	Preferences     *domain.UserPreferences `json:"preferences,omitempty"`
 	Channels        []ChannelSubscription   `json:"channels"`
+	DebugMode       *bool                   `json:"debug_mode,omitempty"`
 }
 
 type ChannelSubscription struct {
@@ -74,6 +75,9 @@ func (c *Config) Upsert(profile Profile) {
 			}
 			if profile.Channels != nil {
 				c.Profiles[i].Channels = profile.Channels
+			}
+			if profile.DebugMode != nil {
+				c.Profiles[i].DebugMode = profile.DebugMode
 			}
 			return
 		}
@@ -147,4 +151,11 @@ func sameChannel(left, right sources.ChannelRef) bool {
 
 func IDForTelegramChat(chatID int64) string {
 	return "telegram_" + strconv.FormatInt(chatID, 10)
+}
+
+func DebugModeEnabled(profile Profile) bool {
+	if profile.DebugMode == nil {
+		return true
+	}
+	return *profile.DebugMode
 }
