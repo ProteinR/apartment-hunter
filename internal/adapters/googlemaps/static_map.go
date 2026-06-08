@@ -26,10 +26,18 @@ type StaticMapRenderer struct {
 }
 
 func (r StaticMapRenderer) ListingSearchAreaURL(listing domain.ApartmentListing, searchAreaGeoJSON string) string {
-	if strings.TrimSpace(r.APIKey) == "" || strings.TrimSpace(searchAreaGeoJSON) == "" {
+	if listing.Latitude == 0 && listing.Longitude == 0 {
 		return ""
 	}
-	if listing.Latitude == 0 && listing.Longitude == 0 {
+	return r.searchAreaURL(searchAreaGeoJSON, "color:red|label:A|"+formatCoord(listing.Latitude)+","+formatCoord(listing.Longitude))
+}
+
+func (r StaticMapRenderer) SearchAreaURL(searchAreaGeoJSON string) string {
+	return r.searchAreaURL(searchAreaGeoJSON, "")
+}
+
+func (r StaticMapRenderer) searchAreaURL(searchAreaGeoJSON string, marker string) string {
+	if strings.TrimSpace(r.APIKey) == "" || strings.TrimSpace(searchAreaGeoJSON) == "" {
 		return ""
 	}
 	polygons, ok := parseMultiPolygon(searchAreaGeoJSON)
@@ -60,7 +68,9 @@ func (r StaticMapRenderer) ListingSearchAreaURL(listing domain.ApartmentListing,
 		values.Set("size", size)
 		values.Set("scale", "2")
 		values.Set("maptype", mapType)
-		values.Set("markers", "color:red|label:A|"+formatCoord(listing.Latitude)+","+formatCoord(listing.Longitude))
+		if marker != "" {
+			values.Set("markers", marker)
+		}
 		for _, polygon := range polygons {
 			path := staticMapPath(polygon, step)
 			if path != "" {
@@ -80,6 +90,15 @@ func (r StaticMapRenderer) ListingSearchAreaURL(listing domain.ApartmentListing,
 
 func (r StaticMapRenderer) ListingSearchAreaImage(ctx context.Context, listing domain.ApartmentListing, searchAreaGeoJSON string) ([]byte, error) {
 	mapURL := r.ListingSearchAreaURL(listing, searchAreaGeoJSON)
+	return r.fetchImage(ctx, mapURL)
+}
+
+func (r StaticMapRenderer) SearchAreaImage(ctx context.Context, searchAreaGeoJSON string) ([]byte, error) {
+	mapURL := r.SearchAreaURL(searchAreaGeoJSON)
+	return r.fetchImage(ctx, mapURL)
+}
+
+func (r StaticMapRenderer) fetchImage(ctx context.Context, mapURL string) ([]byte, error) {
 	if mapURL == "" {
 		return nil, nil
 	}

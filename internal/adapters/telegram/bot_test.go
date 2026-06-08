@@ -2,15 +2,20 @@ package telegram
 
 import (
 	"context"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 
+	"apartment-hunter/internal/adapters/googlemaps"
 	"apartment-hunter/internal/domain"
 	"apartment-hunter/internal/preferenceparser"
 	"apartment-hunter/internal/profiles"
 
 	"github.com/go-telegram/bot/models"
 )
+
+const testSearchAreaGeoJSON = `{"type":"MultiPolygon","coordinates":[[[[41.620000,41.640000],[41.630000,41.640000],[41.630000,41.650000],[41.620000,41.650000],[41.620000,41.640000]]]]}`
 
 type fakeProfileStore struct {
 	profiles        map[string]profiles.Profile
@@ -192,6 +197,134 @@ func TestHandleTextParsesPreviewsAndSavesPreferences(t *testing.T) {
 	}
 	if store.searchProfiles[0].NormalizedQuery != "Бюджет:\n* до 650 USD" {
 		t.Fatalf("unexpected normalized query %q", store.searchProfiles[0].NormalizedQuery)
+	}
+}
+
+func TestHandleTextResponseIncludesSearchAreaMapInConfirmation(t *testing.T) {
+	store := newFakeProfileStore()
+	parser := preferenceparser.Service{
+		Normalizer: fakeNormalizer{normalized: "Ищу квартиру около парка 6 мая"},
+		Extractor: fakeExtractor{prefs: domain.UserPreferences{
+			BudgetMax: intPtr(650),
+			LocationPreferences: []domain.LocationPreference{{
+				CenterName:   "6 May Park",
+				RadiusMeters: intPtr(1000),
+				RawText:      "около парка 6 мая",
+			}},
+		}},
+	}
+	mapClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Query().Get("markers") != "" {
+			t.Fatalf("confirmation map should not include listing marker: %q", req.URL.RawQuery)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader("png-bytes")),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})}
+
+	bot := New(
+		"test-token",
+		t.TempDir(),
+		WithProfileStore(store),
+		WithPreferencesParser(parser),
+		WithGeometryBuilder(fakeGeometryBuilder{geoJSON: testSearchAreaGeoJSON}),
+		WithSearchAreaMapRenderer(googlemaps.StaticMapRenderer{APIKey: "test-key", Endpoint: "https://static-maps.test/map", Client: mapClient}),
+	)
+
+	if _, err := bot.handleTextResponse(42, "/preferences"); err != nil {
+		t.Fatal(err)
+	}
+	response, err := bot.handleTextResponse(42, "Ищу квартиру до 650 около парка 6 мая")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(response.PhotoBytes) != "png-bytes" || response.PhotoFilename != "search-area-map.png" {
+		t.Fatalf("expected map photo in response, got filename=%q bytes=%q", response.PhotoFilename, string(response.PhotoBytes))
+	}
+	if !strings.Contains(response.Text, "Распознанные фильтры:") || !strings.Contains(response.Text, "Сохранить?") {
+		t.Fatalf("unexpected caption %q", response.Text)
+	}
+	if len([]rune(response.Text)) > 1024 {
+		t.Fatalf("caption exceeds Telegram limit: %d", len([]rune(response.Text)))
+	}
+	if _, ok := response.ReplyMarkup.(*models.ReplyKeyboardMarkup); !ok {
+		t.Fatalf("expected confirmation keyboard, got %T", response.ReplyMarkup)
+	}
+}
+
+func TestAwaitingConfirmationAcceptsGeoJSONSearchArea(t *testing.T) {
+	store := newFakeProfileStore()
+	parser := preferenceparser.Service{
+		Normalizer: fakeNormalizer{normalized: "Ищу квартиру около парка 6 мая"},
+		Extractor: fakeExtractor{prefs: domain.UserPreferences{
+			BudgetMax: intPtr(650),
+			LocationPreferences: []domain.LocationPreference{{
+				CenterName:   "6 May Park",
+				RadiusMeters: intPtr(1000),
+				RawText:      "около парка 6 мая",
+			}},
+		}},
+	}
+	bot := New(
+		"test-token",
+		t.TempDir(),
+		WithProfileStore(store),
+		WithPreferencesParser(parser),
+		WithGeometryBuilder(fakeGeometryBuilder{geoJSON: testSearchAreaGeoJSON}),
+	)
+
+	if _, err := bot.HandleText(42, "/preferences"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bot.HandleText(42, "Ищу квартиру до 650 около парка 6 мая"); err != nil {
+		t.Fatal(err)
+	}
+	editedGeoJSON := `{
+		"type": "FeatureCollection",
+		"features": [{
+			"type": "Feature",
+			"properties": {},
+			"geometry": {
+				"type": "Polygon",
+				"coordinates": [[
+					[41.620000, 41.640000],
+					[41.631000, 41.640000],
+					[41.631000, 41.651000],
+					[41.620000, 41.651000]
+				]]
+			}
+		}]
+	}`
+	reply, err := bot.HandleText(42, editedGeoJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reply, "Карту можно поправить вручную") || !strings.Contains(reply, batumiGeoJSONEditorURL) {
+		t.Fatalf("expected updated preview with editor link, got %q", reply)
+	}
+
+	reply, err = bot.HandleText(42, "Сохранить")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reply, "Готово, фильтры сохранены.") {
+		t.Fatalf("unexpected save reply %q", reply)
+	}
+	if len(store.searchProfiles) != 1 {
+		t.Fatalf("expected search profile to be saved, got %d", len(store.searchProfiles))
+	}
+	area := store.searchProfiles[0].SearchArea
+	if area == nil {
+		t.Fatal("expected edited search area to be saved")
+	}
+	if !strings.HasPrefix(area.WKT, "MULTIPOLYGON(((") || !strings.Contains(area.WKT, "41.63100000 41.65100000") {
+		t.Fatalf("unexpected WKT %q", area.WKT)
+	}
+	if !strings.Contains(area.GeoJSON, `"MultiPolygon"`) {
+		t.Fatalf("unexpected GeoJSON %q", area.GeoJSON)
 	}
 }
 
@@ -398,10 +531,18 @@ func (e fakeExtractor) Extract(ctx context.Context, normalizedInput string) (*do
 	return &e.prefs, nil
 }
 
-type fakeGeometryBuilder struct{}
+type fakeGeometryBuilder struct {
+	geoJSON string
+}
 
-func (fakeGeometryBuilder) BuildSearchGeometry(ctx context.Context, prefs []domain.LocationPreference) (*domain.GeoSearchArea, error) {
-	return &domain.GeoSearchArea{SRID: 4326}, nil
+func (b fakeGeometryBuilder) BuildSearchGeometry(ctx context.Context, prefs []domain.LocationPreference) (*domain.GeoSearchArea, error) {
+	return &domain.GeoSearchArea{SRID: 4326, GeoJSON: b.geoJSON}, nil
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func intPtr(value int) *int {

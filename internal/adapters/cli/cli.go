@@ -33,6 +33,8 @@ import (
 	pgstore "apartment-hunter/internal/storage/postgres"
 )
 
+const telegramPhotoCaptionMaxRunes = 1024
+
 type App struct {
 	In  io.Reader
 	Out io.Writer
@@ -142,9 +144,10 @@ func (a App) telegram(args []string) error {
 		Extractor:  nlpParser,
 	}
 	geometry := preferenceparser.PostGISGeometryBuilder{Resolver: newGoogleGeocoder()}
+	mapRenderer := googlemaps.StaticMapRenderer{APIKey: strings.TrimSpace(os.Getenv("APARTMENT_HUNTER_GOOGLE_MAPS_API_KEY"))}
 	fmt.Fprintf(a.Out, "Telegram bot started. Saving profiles to Postgres\n")
 
-	err = telegram.New(token, outputDir, telegram.WithPreferencesParser(prefsParser), telegram.WithGeometryBuilder(geometry), telegram.WithProfileStore(store)).Run(ctx.Done())
+	err = telegram.New(token, outputDir, telegram.WithPreferencesParser(prefsParser), telegram.WithGeometryBuilder(geometry), telegram.WithSearchAreaMapRenderer(mapRenderer), telegram.WithProfileStore(store)).Run(ctx.Done())
 	stop()
 	return err
 }
@@ -262,17 +265,29 @@ func (a App) telegramProcessWithContext(ctx context.Context, profileID string, r
 		fmt.Fprintf(a.Out, "Processed %s/%d: %s\n", message.ChannelID, message.MessageID, result.Record.Status)
 		if botToken != "" && profile.TelegramChatID != 0 && shouldSendTelegramNotification(profile, result.Record) {
 			fmt.Fprintf(a.Out, "Sending notification for %s/%d to chat %d\n", message.ChannelID, message.MessageID, profile.TelegramChatID)
-			if mapImage, ok, err := listingSearchAreaMapImage(ctx, store, mapRenderer, result.Record); err != nil {
-				fmt.Fprintf(a.Err, "Telegram map skipped for %s/%d: %v\n", message.ChannelID, message.MessageID, err)
+			notificationText := evaluation.NotificationText(result.Record)
+			var botMessageID int
+			var err error
+			if mapImage, ok, mapErr := listingSearchAreaMapImage(ctx, store, mapRenderer, result.Record); mapErr != nil {
+				fmt.Fprintf(a.Err, "Telegram map skipped for %s/%d: %v\n", message.ChannelID, message.MessageID, mapErr)
 			} else if ok {
-				if err := telegram.SendPhotoBytes(ctx, botToken, profile.TelegramChatID, "search-area-map.png", mapImage, "Гео: квартира и зеленая зона поиска"); err != nil {
-					fmt.Fprintf(a.Err, "Telegram map send failed for %s/%d: %v\n", message.ChannelID, message.MessageID, err)
+				if telegramCaptionFits(notificationText) {
+					botMessageID, err = telegram.SendPhotoBytesMessageID(ctx, botToken, profile.TelegramChatID, "search-area-map.png", mapImage, notificationText)
+					if err != nil {
+						fmt.Fprintf(a.Err, "Telegram map notification failed for %s/%d: %v\n", message.ChannelID, message.MessageID, err)
+					}
+				} else {
+					if err := telegram.SendPhotoBytes(ctx, botToken, profile.TelegramChatID, "search-area-map.png", mapImage, "Гео: квартира и зеленая зона поиска"); err != nil {
+						fmt.Fprintf(a.Err, "Telegram map send failed for %s/%d: %v\n", message.ChannelID, message.MessageID, err)
+					}
 				}
 			}
-			botMessageID, err := telegram.SendTextMessageID(ctx, botToken, profile.TelegramChatID, evaluation.NotificationText(result.Record))
-			if err != nil {
-				logPipelineEvent(ctx, pipelineLog, result.Record, "notification_sent", "failed", err.Error())
-				return err
+			if botMessageID == 0 {
+				botMessageID, err = telegram.SendTextMessageID(ctx, botToken, profile.TelegramChatID, notificationText)
+				if err != nil {
+					logPipelineEvent(ctx, pipelineLog, result.Record, "notification_sent", "failed", err.Error())
+					return err
+				}
 			}
 			if err := store.UpdateEvaluationNotificationMessageID(ctx, result.Record.Listing.ID, botMessageID); err != nil {
 				logPipelineEvent(ctx, pipelineLog, result.Record, "notification_saved", "failed", err.Error())
@@ -287,6 +302,10 @@ func (a App) telegramProcessWithContext(ctx context.Context, profileID string, r
 		return err
 	}
 	return reader.Listen(ctx, handleMessage)
+}
+
+func telegramCaptionFits(text string) bool {
+	return len([]rune(text)) <= telegramPhotoCaptionMaxRunes
 }
 
 func (a App) catchUpTelegramHistory(ctx context.Context, profileID string, reader *telegramuserbot.Client, store *pgstore.Repository, handler telegramuserbot.MessageHandler) error {
@@ -361,6 +380,9 @@ func subscriptionName(sub profiles.ChannelSubscription) string {
 }
 
 func shouldSendTelegramNotification(profile profiles.Profile, record domain.ListingEvaluationRecord) bool {
+	if record.Status == "rejected_non_listing" {
+		return false
+	}
 	return profiles.DebugModeEnabled(profile) || record.Status == "passed"
 }
 

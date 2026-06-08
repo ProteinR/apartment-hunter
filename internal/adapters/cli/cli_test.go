@@ -18,6 +18,9 @@ func TestShouldSendTelegramNotificationHonorsDebugMode(t *testing.T) {
 	if !shouldSendTelegramNotification(profiles.Profile{DebugMode: &enabled}, domain.ListingEvaluationRecord{Status: "rejected_basic"}) {
 		t.Fatal("expected rejected listing to be sent when debug mode is enabled")
 	}
+	if shouldSendTelegramNotification(profiles.Profile{DebugMode: &enabled}, domain.ListingEvaluationRecord{Status: "rejected_non_listing"}) {
+		t.Fatal("expected non-listing rejection to be skipped when debug mode is enabled")
+	}
 	if shouldSendTelegramNotification(profiles.Profile{DebugMode: &disabled}, domain.ListingEvaluationRecord{Status: "rejected_basic"}) {
 		t.Fatal("expected rejected listing to be skipped when debug mode is disabled")
 	}

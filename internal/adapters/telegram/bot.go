@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"apartment-hunter/internal/adapters/googlemaps"
 	"apartment-hunter/internal/domain"
 	"apartment-hunter/internal/preferenceparser"
 	"apartment-hunter/internal/profiles"
@@ -20,13 +21,14 @@ import (
 )
 
 type Bot struct {
-	token    string
-	client   *http.Client
-	sessions map[int64]*preferenceSession
-	store    ProfileStore
-	parser   preferenceparser.Service
-	geometry preferenceparser.GeometryBuilder
-	mu       sync.Mutex
+	token       string
+	client      *http.Client
+	sessions    map[int64]*preferenceSession
+	store       ProfileStore
+	parser      preferenceparser.Service
+	geometry    preferenceparser.GeometryBuilder
+	mapRenderer googlemaps.StaticMapRenderer
+	mu          sync.Mutex
 }
 
 type ProfileStore interface {
@@ -39,8 +41,9 @@ type ProfileStore interface {
 }
 
 type preferenceSession struct {
-	State string
-	Draft preferenceparser.Draft
+	State      string
+	Draft      preferenceparser.Draft
+	SearchArea *domain.GeoSearchArea
 }
 
 type Option func(*Bot)
@@ -66,6 +69,12 @@ func WithProfileStore(store ProfileStore) Option {
 func WithGeometryBuilder(builder preferenceparser.GeometryBuilder) Option {
 	return func(bot *Bot) {
 		bot.geometry = builder
+	}
+}
+
+func WithSearchAreaMapRenderer(renderer googlemaps.StaticMapRenderer) Option {
+	return func(bot *Bot) {
+		bot.mapRenderer = renderer
 	}
 }
 
@@ -137,6 +146,9 @@ func (b *Bot) handleMessage(ctx context.Context, api *telegrambot.Bot, chatID in
 	if err != nil {
 		return err
 	}
+	if len(response.PhotoBytes) > 0 {
+		return sendPhotoBytesWithMarkup(ctx, api, chatID, response.PhotoFilename, response.PhotoBytes, response.Text, response.ReplyMarkup)
+	}
 	return sendMessageWithMarkup(ctx, api, chatID, response.Text, response.ReplyMarkup)
 }
 
@@ -146,8 +158,10 @@ func (b *Bot) handleText(chatID int64, text string) (string, error) {
 }
 
 type textResponse struct {
-	Text        string
-	ReplyMarkup models.ReplyMarkup
+	Text          string
+	ReplyMarkup   models.ReplyMarkup
+	PhotoFilename string
+	PhotoBytes    []byte
 }
 
 func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error) {
@@ -193,18 +207,29 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 		if err != nil {
 			return textResponse{}, err
 		}
+		searchArea, err := b.prepareDraftGeometry(context.Background(), &draft)
+		if err != nil {
+			return textResponse{}, err
+		}
 		session.State = "awaiting_confirmation"
 		session.Draft = draft
+		session.SearchArea = searchArea
 		b.setSession(chatID, session)
-		return textResponse{
-			Text:        buildPreferencesPreview(draft),
-			ReplyMarkup: confirmationKeyboard(),
-		}, nil
+		return b.preferencesPreviewResponse(context.Background(), draft, searchArea), nil
 	case "awaiting_confirmation":
+		if looksLikeSearchAreaGeoJSON(text) {
+			area, err := searchAreaFromGeoJSON(text)
+			if err != nil {
+				return textResponse{Text: "Не смог разобрать GeoJSON: " + err.Error() + "\n\nОткрой карту Батуми, нарисуй Polygon/MultiPolygon, скопируй GeoJSON и пришли его сюда:\n" + batumiGeoJSONEditorURL, ReplyMarkup: confirmationKeyboard()}, nil
+			}
+			session.SearchArea = area
+			b.setSession(chatID, session)
+			return b.preferencesPreviewResponse(context.Background(), session.Draft, session.SearchArea), nil
+		}
 		switch normalizeConfirmation(text) {
 		case "save":
 			b.deleteSession(chatID)
-			if err := b.saveDraft(context.Background(), chatID, session.Draft); err != nil {
+			if err := b.saveDraft(context.Background(), chatID, session.Draft, session.SearchArea); err != nil {
 				return textResponse{}, err
 			}
 			reply, err := b.afterPreferencesSavedMessage(context.Background(), chatID)
@@ -213,11 +238,13 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 			session.State = "awaiting_query"
 			b.setSession(chatID, session)
 			return textResponse{Text: "Отправь исправленный запрос одним сообщением.", ReplyMarkup: mainCommandKeyboard()}, nil
+		case "edit_area":
+			return textResponse{Text: "Открой карту Батуми, нарисуй или поправь зону, скопируй GeoJSON из правой панели и пришли его сюда.\n\n" + batumiGeoJSONEditorURL + "\n\nПоддерживаются GeoJSON Polygon, MultiPolygon, Feature и FeatureCollection.", ReplyMarkup: confirmationKeyboard()}, nil
 		case "cancel":
 			b.deleteSession(chatID)
 			return textResponse{Text: "Настройка отменена.", ReplyMarkup: mainCommandKeyboard()}, nil
 		default:
-			return textResponse{Text: "Выбери Save, Edit или Cancel.", ReplyMarkup: confirmationKeyboard()}, nil
+			return textResponse{Text: "Выбери Save, Edit, Edit area или Cancel. Можно также прислать GeoJSON с Polygon/MultiPolygon.", ReplyMarkup: confirmationKeyboard()}, nil
 		}
 	default:
 		b.deleteSession(chatID)
@@ -375,7 +402,7 @@ func (b *Bot) debugMode(ctx context.Context, chatID int64, text string) (string,
 			return "", err
 		}
 		if !ok {
-			return "Debug mode: on\n\nВ этом режиме я пересылаю отчет по каждому обработанному объявлению. Выключить: /debug off", nil
+			return "Debug mode: on\n\nВ этом режиме я пересылаю отчеты по обработанным объявлениям, кроме сообщений, которые не похожи на объявления о квартире. Выключить: /debug off", nil
 		}
 		return debugModeStatusMessage(profiles.DebugModeEnabled(profile)), nil
 	}
@@ -425,7 +452,7 @@ func (b *Bot) saveReplyFeedback(ctx context.Context, message *models.Message) (s
 
 func debugModeStatusMessage(enabled bool) string {
 	if enabled {
-		return "Debug mode: on\n\nЯ пересылаю отчет по каждому обработанному объявлению: прошедшему, отклоненному, дубликату или ошибке. Выключить: /debug off"
+		return "Debug mode: on\n\nЯ пересылаю отчеты по обработанным объявлениям: прошедшим, отклоненным, дубликатам или ошибкам. Сообщения со статусом «не объявление о квартире» в чат не отправляю. Выключить: /debug off"
 	}
 	return "Debug mode: off\n\nЯ пересылаю только объявления, которые прошли фильтры. Включить все отчеты: /debug on"
 }
@@ -506,6 +533,35 @@ func unsupportedChannelRefMessage(value string) string {
 	return "Пока я могу подключать только public Telegram-источники по @username или t.me/name.\n\nЕсли это invite-ссылка вида t.me/+..., вступи вручную, но для чтения мне все равно нужен public username канала/группы. Автоматическое вступление не выполняю."
 }
 
+func (b *Bot) prepareDraftGeometry(ctx context.Context, draft *preferenceparser.Draft) (*domain.GeoSearchArea, error) {
+	if b.geometry == nil || draft == nil {
+		return nil, nil
+	}
+	area, err := b.geometry.BuildSearchGeometry(ctx, draft.Preferences.LocationPreferences)
+	if err != nil {
+		return nil, err
+	}
+	if area != nil {
+		draft.Preferences.UnresolvedLocationRules = append(draft.Preferences.UnresolvedLocationRules, area.UnresolvedRules...)
+	}
+	return area, nil
+}
+
+func (b *Bot) preferencesPreviewResponse(ctx context.Context, draft preferenceparser.Draft, area *domain.GeoSearchArea) textResponse {
+	response := textResponse{Text: buildPreferencesPreview(draft), ReplyMarkup: confirmationKeyboard()}
+	if area == nil || strings.TrimSpace(area.GeoJSON) == "" {
+		return response
+	}
+	mapImage, err := b.mapRenderer.SearchAreaImage(ctx, area.GeoJSON)
+	if err != nil || len(mapImage) == 0 {
+		return response
+	}
+	response.Text = buildPreferencesMapCaption(draft)
+	response.PhotoFilename = "search-area-map.png"
+	response.PhotoBytes = mapImage
+	return response
+}
+
 func (b *Bot) saveProfile(ctx context.Context, chatID int64, prefs domain.UserPreferences) error {
 	return b.store.UpsertProfile(ctx, profiles.Profile{
 		ID:             profiles.IDForTelegramChat(chatID),
@@ -514,16 +570,14 @@ func (b *Bot) saveProfile(ctx context.Context, chatID int64, prefs domain.UserPr
 	})
 }
 
-func (b *Bot) saveDraft(ctx context.Context, chatID int64, draft preferenceparser.Draft) error {
+func (b *Bot) saveDraft(ctx context.Context, chatID int64, draft preferenceparser.Draft, area *domain.GeoSearchArea) error {
 	userID := profiles.IDForTelegramChat(chatID)
-	var area *domain.GeoSearchArea
-	if b.geometry != nil {
-		built, err := b.geometry.BuildSearchGeometry(ctx, draft.Preferences.LocationPreferences)
+	if area == nil && b.geometry != nil {
+		built, err := b.prepareDraftGeometry(ctx, &draft)
 		if err != nil {
 			return err
 		}
 		area = built
-		draft.Preferences.UnresolvedLocationRules = append(draft.Preferences.UnresolvedLocationRules, built.UnresolvedRules...)
 	}
 	if err := b.store.SaveSearchProfile(ctx, domain.UserSearchProfile{
 		UserID:          userID,
@@ -568,6 +622,22 @@ func sendMessageWithMarkup(ctx context.Context, api *telegrambot.Bot, chatID int
 	return err
 }
 
+func sendPhotoBytesWithMarkup(ctx context.Context, api *telegrambot.Bot, chatID int64, filename string, data []byte, caption string, markup models.ReplyMarkup) error {
+	if strings.TrimSpace(filename) == "" {
+		filename = "image.png"
+	}
+	_, err := api.SendPhoto(ctx, &telegrambot.SendPhotoParams{
+		ChatID: chatID,
+		Photo: &models.InputFileUpload{
+			Filename: filename,
+			Data:     bytes.NewReader(data),
+		},
+		Caption:     caption,
+		ReplyMarkup: markup,
+	})
+	return err
+}
+
 func sendMessageWithReply(ctx context.Context, api *telegrambot.Bot, chatID int64, replyToMessageID int, text string) error {
 	_, err := api.SendMessage(ctx, &telegrambot.SendMessageParams{
 		ChatID: chatID,
@@ -600,11 +670,16 @@ func SendTextMessageID(ctx context.Context, token string, chatID int64, text str
 }
 
 func SendPhotoBytes(ctx context.Context, token string, chatID int64, filename string, data []byte, caption string) error {
+	_, err := SendPhotoBytesMessageID(ctx, token, chatID, filename, data, caption)
+	return err
+}
+
+func SendPhotoBytesMessageID(ctx context.Context, token string, chatID int64, filename string, data []byte, caption string) (int, error) {
 	api, err := telegrambot.New(token, telegrambot.WithHTTPClient(20*time.Second, &http.Client{Timeout: 20 * time.Second}))
 	if err != nil {
-		return err
+		return 0, err
 	}
-	_, err = api.SendPhoto(ctx, &telegrambot.SendPhotoParams{
+	message, err := api.SendPhoto(ctx, &telegrambot.SendPhotoParams{
 		ChatID: chatID,
 		Photo: &models.InputFileUpload{
 			Filename: filename,
@@ -612,5 +687,8 @@ func SendPhotoBytes(ctx context.Context, token string, chatID int64, filename st
 		},
 		Caption: caption,
 	})
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return message.ID, nil
 }

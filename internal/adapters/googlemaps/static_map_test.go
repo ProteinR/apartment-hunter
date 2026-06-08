@@ -46,6 +46,30 @@ func TestStaticMapRendererBuildsSearchAreaMapURL(t *testing.T) {
 	}
 }
 
+func TestStaticMapRendererBuildsAreaOnlyMapURL(t *testing.T) {
+	renderer := StaticMapRenderer{APIKey: "test-key"}
+
+	rawURL := renderer.SearchAreaURL(testSearchAreaGeoJSON)
+	if rawURL == "" {
+		t.Fatal("expected static map URL")
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := parsed.Query()
+	if query.Get("markers") != "" {
+		t.Fatalf("expected no listing marker, got %q", query.Get("markers"))
+	}
+	paths := query["path"]
+	if len(paths) != 1 {
+		t.Fatalf("expected one path, got %d", len(paths))
+	}
+	if !strings.Contains(paths[0], "41.640000,41.620000") {
+		t.Fatalf("path missing polygon coordinate: %q", paths[0])
+	}
+}
+
 func TestStaticMapRendererReturnsEmptyWithoutInputs(t *testing.T) {
 	renderer := StaticMapRenderer{APIKey: "test-key"}
 	listing := domain.ApartmentListing{Latitude: 41.6466, Longitude: 41.6266}
@@ -57,6 +81,9 @@ func TestStaticMapRendererReturnsEmptyWithoutInputs(t *testing.T) {
 		t.Fatalf("expected no map without listing coordinates, got %q", got)
 	}
 	if got := renderer.ListingSearchAreaURL(listing, ""); got != "" {
+		t.Fatalf("expected no map without search area, got %q", got)
+	}
+	if got := renderer.SearchAreaURL(""); got != "" {
 		t.Fatalf("expected no map without search area, got %q", got)
 	}
 	if got := renderer.ListingSearchAreaURL(listing, `{"type":"Point","coordinates":[41.62,41.64]}`); got != "" {

@@ -16,11 +16,29 @@ const preferencesStartMessage = `Опиши, какую квартиру ище�
 Ищу квартиру в аренду в Батуми на долгий срок. Бюджет 400-650$, площадь от 50 м2. Обязательно нужна посудомойка и духовка. Хочу свежий светлый ремонт в нейтральных или пастельных тонах, без глянцевых потолков. Важно, чтобы окна не смотрели вплотную в соседний дом. Район: около парка 6 мая в радиусе 1 км, но не дальше улицы Пушкина, либо Новый бульвар до 1 км от моря.`
 
 func buildPreferencesPreview(draft preferenceparser.Draft) string {
+	return buildPreferencesPreviewWithOptions(draft, true)
+}
+
+func buildPreferencesMapCaption(draft preferenceparser.Draft) string {
+	caption := buildPreferencesPreviewWithOptions(draft, true)
+	if telegramCaptionFits(caption) {
+		return caption
+	}
+	caption = buildPreferencesPreviewWithOptions(draft, false)
+	if telegramCaptionFits(caption) {
+		return caption
+	}
+	return "Распознанные фильтры и область поиска на карте.\n\nСохранить?"
+}
+
+func buildPreferencesPreviewWithOptions(draft preferenceparser.Draft, includeQuery bool) string {
 	prefs := draft.Preferences
 	lang := previewLanguage(draft.RawQuery + "\n" + draft.NormalizedQuery)
 	var b strings.Builder
-	fmt.Fprintf(&b, "Ваш запрос:\n\n%s\n\n", draft.RawQuery)
-	fmt.Fprintf(&b, "Нормализованное описание:\n\n%s\n\n", displayFreeText(draft.NormalizedQuery, lang))
+	if includeQuery {
+		fmt.Fprintf(&b, "Ваш запрос:\n\n%s\n\n", draft.RawQuery)
+		fmt.Fprintf(&b, "Нормализованное описание:\n\n%s\n\n", displayFreeText(draft.NormalizedQuery, lang))
+	}
 	b.WriteString("Распознанные фильтры:\n\n")
 	if prefs.BudgetMin != nil || prefs.BudgetMax != nil {
 		b.WriteString("Бюджет: ")
@@ -52,8 +70,13 @@ func buildPreferencesPreview(draft preferenceparser.Draft) string {
 	appendList(&b, "Исключить", rejects, lang)
 	appendLocations(&b, prefs.LocationPreferences, lang)
 	appendList(&b, "Неразобранные гео-правила", prefs.UnresolvedLocationRules, lang)
+	fmt.Fprintf(&b, "\nКарту можно поправить вручную: %s\n", batumiGeoJSONEditorURL)
 	b.WriteString("\nСохранить?")
 	return b.String()
+}
+
+func telegramCaptionFits(text string) bool {
+	return len([]rune(text)) <= 1024
 }
 
 func appendList(b *strings.Builder, title string, values []string, lang string) {
@@ -256,6 +279,7 @@ func confirmationKeyboard() models.ReplyMarkup {
 		Keyboard: [][]models.KeyboardButton{{
 			{Text: "Сохранить"},
 			{Text: "Изменить"},
+			{Text: "Изменить зону"},
 			{Text: "Отмена"},
 		}},
 		ResizeKeyboard:  true,
@@ -290,6 +314,8 @@ func normalizeConfirmation(text string) string {
 		return "save"
 	case "edit", "редактировать", "изменить":
 		return "edit"
+	case "edit area", "изменить зону", "зона":
+		return "edit_area"
 	case "cancel", "отмена", "отменить":
 		return "cancel"
 	default:
