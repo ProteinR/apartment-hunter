@@ -250,8 +250,8 @@ func (p Processor) geocodeListing(ctx context.Context, listing domain.ApartmentL
 	if p.Geocoder == nil || listing.Latitude != 0 || listing.Longitude != 0 {
 		return listing
 	}
-	for _, query := range geocodeListingQueries(listing) {
-		loc, err := p.Geocoder.Resolve(ctx, query, 0)
+	for _, candidate := range geocodeListingQueries(listing) {
+		loc, err := p.Geocoder.Resolve(ctx, candidate.Query, candidate.MaxDistanceMeters)
 		if err != nil || loc.Latitude == 0 || loc.Longitude == 0 {
 			continue
 		}
@@ -265,18 +265,36 @@ func (p Processor) geocodeListing(ctx context.Context, listing domain.ApartmentL
 	return listing
 }
 
-var addressLinePattern = regexp.MustCompile(`(?i)(^|[\s,])(?:ул\.?|улица|street|st\.?|avenue|ave\.?|проспект|пр-т|переулок|пер\.?|road|rd\.?|lane|ln\.?)\s+`)
+var addressLinePattern = regexp.MustCompile(`(?i)(^|[\s,])(?:ул\.?|улиц[аеуы]?|street|st\.?|avenue|ave\.?|проспект|пр-т|переулок|пер\.?|road|rd\.?|lane|ln\.?)\s+`)
+var addressLabelPattern = regexp.MustCompile(`(?i)^\s*(?:address|адрес)\s*:\s*`)
+var streetCasePattern = regexp.MustCompile(`(?i)^улиц[еуы]`)
 
-func geocodeListingQueries(listing domain.ApartmentListing) []string {
-	var queries []string
+const listingAddressSearchRadiusMeters = 15000
+
+type geocodeListingQuery struct {
+	Query             string
+	MaxDistanceMeters int
+}
+
+func geocodeListingQueries(listing domain.ApartmentListing) []geocodeListingQuery {
+	var queries []geocodeListingQuery
 	seen := map[string]bool{}
-	add := func(query string) {
+	addressFound := false
+	add := func(query string, maxDistanceMeters int) {
 		query = cleanGeocodeQuery(query)
 		if query == "" || seen[query] {
 			return
 		}
 		seen[query] = true
-		queries = append(queries, query)
+		queries = append(queries, geocodeListingQuery{Query: query, MaxDistanceMeters: maxDistanceMeters})
+	}
+	addAddress := func(query string) {
+		query = cleanGeocodeQuery(query)
+		if query == "" {
+			return
+		}
+		addressFound = true
+		add(query+", Batumi, Georgia", listingAddressSearchRadiusMeters)
 	}
 
 	for _, line := range strings.Split(listing.Description, "\n") {
@@ -285,21 +303,34 @@ func geocodeListingQueries(listing domain.ApartmentListing) []string {
 			continue
 		}
 		if strings.Contains(line, "📍") {
-			add(strings.TrimSpace(line[strings.LastIndex(line, "📍")+len("📍"):]))
+			addAddress(strings.TrimSpace(line[strings.LastIndex(line, "📍")+len("📍"):]))
 			continue
 		}
-		if addressLinePattern.MatchString(line) {
-			add(line)
+		if address := addressFromLine(line); address != "" {
+			addAddress(address)
 		}
 	}
-	add(listing.Description)
-	add(listing.Title)
+	if !addressFound {
+		add(listing.Description, 0)
+		add(listing.Title, 0)
+	}
 	return queries
+}
+
+func addressFromLine(line string) string {
+	match := addressLinePattern.FindStringIndex(line)
+	if match == nil {
+		return ""
+	}
+	address := strings.TrimSpace(line[match[0]:])
+	address = streetCasePattern.ReplaceAllString(address, "улица")
+	return address
 }
 
 func cleanGeocodeQuery(query string) string {
 	query = strings.TrimSpace(query)
 	query = strings.TrimLeft(query, " \t-–—•*✔️✅🔶⚜️")
+	query = addressLabelPattern.ReplaceAllString(query, "")
 	query = strings.TrimSpace(query)
 	return query
 }

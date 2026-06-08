@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -60,6 +61,14 @@ func (g *Geocoder) Resolve(ctx context.Context, query string, maxDistanceMeters 
 	}
 
 	result := response.Results[0]
+	if maxDistanceMeters > 0 {
+		if centerLat, centerLng, ok := defaultRegionCenter(g.DefaultRegion); ok {
+			distance := haversineMeters(result.Geometry.Location.Lat, result.Geometry.Location.Lng, centerLat, centerLng)
+			if distance > float64(maxDistanceMeters) {
+				return domain.LocationPreference{}, nil
+			}
+		}
+	}
 	name := strings.TrimSpace(result.FormattedAddress)
 	if name == "" {
 		name = query
@@ -106,6 +115,25 @@ func (g *Geocoder) queryWithRegion(query string) string {
 		return query
 	}
 	return query + ", " + g.DefaultRegion
+}
+
+func defaultRegionCenter(region string) (float64, float64, bool) {
+	switch strings.ToLower(strings.TrimSpace(region)) {
+	case "batumi, georgia", "batumi":
+		return 41.64610, 41.64049, true
+	default:
+		return 0, 0, false
+	}
+}
+
+func haversineMeters(lat1, lon1, lat2, lon2 float64) float64 {
+	const earthRadius = 6371000
+	toRad := func(deg float64) float64 { return deg * math.Pi / 180 }
+	dLat := toRad(lat2 - lat1)
+	dLon := toRad(lon2 - lon1)
+	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
+		math.Cos(toRad(lat1))*math.Cos(toRad(lat2))*math.Sin(dLon/2)*math.Sin(dLon/2)
+	return earthRadius * 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
 }
 
 func (g *Geocoder) geocode(ctx context.Context, query string) (geocodeResponse, error) {

@@ -17,8 +17,9 @@ type fakeAnalyzer struct {
 }
 
 type fakeGeocoder struct {
-	calls   int
-	queries []string
+	calls        int
+	queries      []string
+	maxDistances []int
 }
 
 type fakeLocationMatcher struct {
@@ -30,6 +31,7 @@ type fakeLocationMatcher struct {
 func (g *fakeGeocoder) Resolve(ctx context.Context, query string, maxDistanceMeters int) (domain.LocationPreference, error) {
 	g.calls++
 	g.queries = append(g.queries, query)
+	g.maxDistances = append(g.maxDistances, maxDistanceMeters)
 	return domain.LocationPreference{Name: "Europe Square, Batumi", Latitude: 41.6511, Longitude: 41.6367}, nil
 }
 
@@ -88,8 +90,125 @@ func TestProcessMessageGeocodesExplicitAddressBeforeFullListingText(t *testing.T
 	if geocoder.calls != 1 {
 		t.Fatalf("expected geocoder to stop after first successful address query, got %d calls", geocoder.calls)
 	}
-	if len(geocoder.queries) != 1 || geocoder.queries[0] != "ул. Горгиладзе, 45" {
+	if len(geocoder.queries) != 1 || geocoder.queries[0] != "ул. Горгиладзе, 45, Batumi, Georgia" {
 		t.Fatalf("expected explicit address query first, got %+v", geocoder.queries)
+	}
+	if len(geocoder.maxDistances) != 1 || geocoder.maxDistances[0] != 15000 {
+		t.Fatalf("expected explicit address search radius 15000, got %+v", geocoder.maxDistances)
+	}
+}
+
+func TestProcessMessageGeocodesLabeledPinAddress(t *testing.T) {
+	geocoder := &fakeGeocoder{}
+	processor := Processor{
+		Prefs:    domain.UserPreferences{MaxBudget: 800, MinAreaM2: 40},
+		Geocoder: geocoder,
+	}
+
+	result, err := processor.ProcessMessage(context.Background(), domain.ListingSourceRef{}, sources.ChannelMessage{
+		Text: "🏢 Сдаётся квартира 1+1 (с 1 июля)\n" +
+			"700 $\n" +
+			"💵 Оплата за первый и последний месяц !\n\n" +
+			"📍 Адрес: Улица Леха и Марии Качиньских, 19\n" +
+			"Площадь: 44 м² / Этаж:** 12/15\n\n" +
+			"• балкон с видом на море\n" +
+			"• тёплые полы\n" +
+			"• центральное отопление\n" +
+			"• духовка\n\n" +
+			"WhatsApp +995555000101\n\n" +
+			"ID: 2640AK",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Record.Listing.Price != 700 {
+		t.Fatalf("expected price 700, got %d", result.Record.Listing.Price)
+	}
+	if result.Record.Listing.AreaM2 != 44 {
+		t.Fatalf("expected area 44, got %.1f", result.Record.Listing.AreaM2)
+	}
+	if geocoder.calls != 1 {
+		t.Fatalf("expected geocoder to be called once, got %d", geocoder.calls)
+	}
+	if len(geocoder.queries) != 1 || geocoder.queries[0] != "Улица Леха и Марии Качиньских, 19, Batumi, Georgia" {
+		t.Fatalf("expected labeled address to be cleaned before geocoding, got %+v", geocoder.queries)
+	}
+}
+
+func TestProcessMessageGeocodesLermontovaAddressInBatumiRadius(t *testing.T) {
+	geocoder := &fakeGeocoder{}
+	processor := Processor{
+		Prefs:    domain.UserPreferences{MaxBudget: 800},
+		Geocoder: geocoder,
+	}
+
+	_, err := processor.ProcessMessage(context.Background(), domain.ListingSourceRef{}, sources.ChannelMessage{
+		Text: "#сдам #батуми\n" +
+			"Квартира после ремонта\n" +
+			"📍ул. Лермонтова, 14\n" +
+			"✔️55 м2\n" +
+			"💸 650$",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if geocoder.calls != 1 {
+		t.Fatalf("expected geocoder to stop after first successful address query, got %d calls", geocoder.calls)
+	}
+	if len(geocoder.queries) != 1 || geocoder.queries[0] != "ул. Лермонтова, 14, Batumi, Georgia" {
+		t.Fatalf("expected Batumi-scoped Lermontova address query first, got %+v", geocoder.queries)
+	}
+	if len(geocoder.maxDistances) != 1 || geocoder.maxDistances[0] != 15000 {
+		t.Fatalf("expected Batumi search radius 15000, got %+v", geocoder.maxDistances)
+	}
+}
+
+func TestProcessMessageGeocodesInflectedStreetAddressFromSentence(t *testing.T) {
+	geocoder := &fakeGeocoder{}
+	processor := Processor{
+		Prefs:    domain.UserPreferences{MaxBudget: 800, MinAreaM2: 50},
+		Geocoder: geocoder,
+	}
+
+	_, err := processor.ProcessMessage(context.Background(), domain.ListingSourceRef{}, sources.ChannelMessage{
+		Text: "#сдам квартиру 1+1 по улице Грибоедова,21\n" +
+			"✅56 м2\n" +
+			"✅5 этаж\n" +
+			"✅газ\n" +
+			"✅духовка\n" +
+			"✅посудомойка\n" +
+			"Цена 700$ аренда на год, в сезон +100$",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if geocoder.calls != 1 {
+		t.Fatalf("expected geocoder to stop after first successful address query, got %d calls", geocoder.calls)
+	}
+	if len(geocoder.queries) != 1 || geocoder.queries[0] != "улица Грибоедова,21, Batumi, Georgia" {
+		t.Fatalf("expected inflected street address to be extracted and scoped, got %+v", geocoder.queries)
+	}
+	if len(geocoder.maxDistances) != 1 || geocoder.maxDistances[0] != 15000 {
+		t.Fatalf("expected Batumi search radius 15000, got %+v", geocoder.maxDistances)
+	}
+}
+
+func TestGeocodeListingQueriesAvoidsFullTextFallbackWhenAddressFound(t *testing.T) {
+	queries := geocodeListingQueries(domain.ApartmentListing{
+		Title: "Telegram listing",
+		Description: "#сдам квартиру 1+1 по улице Грибоедова,21\n" +
+			"✅56 м2\n" +
+			"Цена 700$ аренда на год",
+	})
+
+	if len(queries) != 1 {
+		t.Fatalf("expected only explicit address query, got %+v", queries)
+	}
+	if queries[0].Query != "улица Грибоедова,21, Batumi, Georgia" {
+		t.Fatalf("unexpected query %q", queries[0].Query)
+	}
+	if queries[0].MaxDistanceMeters != 15000 {
+		t.Fatalf("expected Batumi search radius 15000, got %d", queries[0].MaxDistanceMeters)
 	}
 }
 

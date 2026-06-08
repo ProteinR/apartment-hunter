@@ -51,6 +51,34 @@ func TestGeocoderResolvesFirstResult(t *testing.T) {
 	}
 }
 
+func TestGeocoderRejectsResultOutsideDefaultRegionRadius(t *testing.T) {
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body := `{
+			"status": "OK",
+			"results": [{
+				"formatted_address": "Lermontov Street 14, Tbilisi, Georgia",
+				"geometry": {"location": {"lat": 41.7151, "lng": 44.8271}}
+			}]
+		}`
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+		}, nil
+	})
+
+	geocoder := NewGeocoder("test-key", "Batumi, Georgia")
+	geocoder.Client = &http.Client{Transport: transport}
+
+	loc, err := geocoder.Resolve(context.Background(), "ул. Лермонтова, 14, Batumi, Georgia", 15000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loc.Latitude != 0 || loc.Longitude != 0 || loc.Name != "" {
+		t.Fatalf("expected out-of-radius result to be ignored, got %+v", loc)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
