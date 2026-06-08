@@ -22,6 +22,14 @@ type fakeGeocoder struct {
 	maxDistances []int
 }
 
+type fakeGeocodeLogger struct {
+	events []GeocodeLogEvent
+}
+
+type fakePipelineLogger struct {
+	events []PipelineLogEvent
+}
+
 type fakeLocationMatcher struct {
 	calls   int
 	matches bool
@@ -33,6 +41,16 @@ func (g *fakeGeocoder) Resolve(ctx context.Context, query string, maxDistanceMet
 	g.queries = append(g.queries, query)
 	g.maxDistances = append(g.maxDistances, maxDistanceMeters)
 	return domain.LocationPreference{Name: "Europe Square, Batumi", Latitude: 41.6511, Longitude: 41.6367}, nil
+}
+
+func (l *fakeGeocodeLogger) LogGeocodeAttempt(ctx context.Context, event GeocodeLogEvent) error {
+	l.events = append(l.events, event)
+	return nil
+}
+
+func (l *fakePipelineLogger) LogPipelineEvent(ctx context.Context, event PipelineLogEvent) error {
+	l.events = append(l.events, event)
+	return nil
 }
 
 func (m *fakeLocationMatcher) MatchesListingLocation(ctx context.Context, profileID string, listing domain.ApartmentListing) (bool, string, error) {
@@ -67,6 +85,98 @@ func TestProcessMessageGeocodesListingAfterBasicFilters(t *testing.T) {
 	}
 	if result.Record.Listing.Latitude != 41.6511 || result.Record.Listing.Longitude != 41.6367 {
 		t.Fatalf("unexpected coordinates %.6f %.6f", result.Record.Listing.Latitude, result.Record.Listing.Longitude)
+	}
+}
+
+func TestProcessMessageLogsGeocodeAttemptWithSourceContext(t *testing.T) {
+	geocoder := &fakeGeocoder{}
+	logger := &fakeGeocodeLogger{}
+	processor := Processor{
+		Prefs:      domain.UserPreferences{MaxBudget: 800},
+		Geocoder:   geocoder,
+		GeocodeLog: logger,
+	}
+
+	_, err := processor.ProcessMessage(context.Background(), domain.ListingSourceRef{
+		Source:         "telegram",
+		ProfileID:      "telegram_42",
+		TelegramChatID: 42,
+	}, sources.ChannelMessage{
+		ChannelID:       "2967368875",
+		ChannelName:     "Rentals",
+		ChannelUsername: "example",
+		MessageID:       3764,
+		Link:            "https://t.me/example/3764",
+		GroupedID:       123,
+		Text:            "Flat near Europe Square\n650 USD\n50 m2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logger.events) != 1 {
+		t.Fatalf("expected one geocode log event, got %+v", logger.events)
+	}
+	event := logger.events[0]
+	if event.Source.ProfileID != "telegram_42" || event.Source.TelegramChatID != 42 {
+		t.Fatalf("missing profile context: %+v", event.Source)
+	}
+	if event.Source.ChannelID != "2967368875" || event.Source.ChannelUsername != "example" || event.Source.MessageID != 3764 || event.Source.GroupedID != 123 {
+		t.Fatalf("missing message context: %+v", event.Source)
+	}
+	if event.Query != "Flat near Europe Square\n650 USD\n50 m2" {
+		t.Fatalf("unexpected query %q", event.Query)
+	}
+	if !event.Success || event.ResultLatitude != 41.6511 || event.ResultLongitude != 41.6367 {
+		t.Fatalf("unexpected geocode result in event %+v", event)
+	}
+}
+
+func TestProcessMessageLogsPipelineStagesWithSourceContext(t *testing.T) {
+	geocoder := &fakeGeocoder{}
+	logger := &fakePipelineLogger{}
+	processor := Processor{
+		Prefs:       domain.UserPreferences{MaxBudget: 800},
+		Geocoder:    geocoder,
+		PipelineLog: logger,
+	}
+
+	result, err := processor.ProcessMessage(context.Background(), domain.ListingSourceRef{
+		Source:         "telegram",
+		ProfileID:      "telegram_42",
+		TelegramChatID: 42,
+	}, sources.ChannelMessage{
+		ChannelID:       "2967368875",
+		ChannelName:     "Rentals",
+		ChannelUsername: "example",
+		MessageID:       3764,
+		Link:            "https://t.me/example/3764",
+		Text:            "Flat near Europe Square\n650 USD\n50 m2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Record.Status != "failed" || result.Record.FailureReason != "AI analyzer is not configured" {
+		t.Fatalf("expected processing to continue until missing analyzer, got status=%s failure=%q", result.Record.Status, result.Record.FailureReason)
+	}
+
+	stages := map[string]PipelineLogEvent{}
+	for _, event := range logger.events {
+		stages[event.Stage] = event
+	}
+	for _, stage := range []string{"received", "parsed", "basic_filter", "geocoded", "vision_called", "saved"} {
+		if _, ok := stages[stage]; !ok {
+			t.Fatalf("expected stage %q in events %+v", stage, logger.events)
+		}
+	}
+	event := stages["geocoded"]
+	if event.Source.ProfileID != "telegram_42" || event.Source.ChannelID != "2967368875" || event.Source.ChannelUsername != "example" || event.Source.MessageID != 3764 {
+		t.Fatalf("missing source context: %+v", event.Source)
+	}
+	if event.Status != "resolved" || event.Latitude != 41.6511 || event.Longitude != 41.6367 {
+		t.Fatalf("unexpected geocoded event %+v", event)
+	}
+	if stages["vision_called"].Status != "failed" || stages["vision_called"].Reason != "AI analyzer is not configured" {
+		t.Fatalf("unexpected vision event %+v", stages["vision_called"])
 	}
 }
 

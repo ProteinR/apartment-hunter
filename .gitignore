@@ -1,6 +1,7 @@
 .gocache/
 .gomodcache/
 .cache/
+.logs/
 .telegram/
 preferences/
 .env

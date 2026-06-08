@@ -6,6 +6,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"apartment-hunter/internal/dedup"
 	"apartment-hunter/internal/domain"
@@ -30,6 +31,46 @@ type PhotoLoader interface {
 	LoadPhotos(ctx context.Context, message sources.ChannelMessage, listing domain.ApartmentListing) (domain.ApartmentListing, error)
 }
 
+type GeocodeLogger interface {
+	LogGeocodeAttempt(ctx context.Context, event GeocodeLogEvent) error
+}
+
+type PipelineLogger interface {
+	LogPipelineEvent(ctx context.Context, event PipelineLogEvent) error
+}
+
+type GeocodeLogEvent struct {
+	Time              time.Time               `json:"time"`
+	Source            domain.ListingSourceRef `json:"source"`
+	ListingID         string                  `json:"listing_id,omitempty"`
+	ListingTitle      string                  `json:"listing_title,omitempty"`
+	Query             string                  `json:"query"`
+	MaxDistanceMeters int                     `json:"max_distance_meters,omitempty"`
+	ResultName        string                  `json:"result_name,omitempty"`
+	ResultLatitude    float64                 `json:"result_latitude,omitempty"`
+	ResultLongitude   float64                 `json:"result_longitude,omitempty"`
+	Success           bool                    `json:"success"`
+	Error             string                  `json:"error,omitempty"`
+}
+
+type PipelineLogEvent struct {
+	Time               time.Time               `json:"time"`
+	Source             domain.ListingSourceRef `json:"source"`
+	ListingID          string                  `json:"listing_id,omitempty"`
+	ListingTitle       string                  `json:"listing_title,omitempty"`
+	Stage              string                  `json:"stage"`
+	Status             string                  `json:"status,omitempty"`
+	Reason             string                  `json:"reason,omitempty"`
+	Price              int                     `json:"price,omitempty"`
+	AreaM2             float64                 `json:"area_m2,omitempty"`
+	Latitude           float64                 `json:"latitude,omitempty"`
+	Longitude          float64                 `json:"longitude,omitempty"`
+	PhotoCount         int                     `json:"photo_count,omitempty"`
+	HashablePhotoCount int                     `json:"hashable_photo_count,omitempty"`
+	DurationMS         int64                   `json:"duration_ms,omitempty"`
+	Error              string                  `json:"error,omitempty"`
+}
+
 type Processor struct {
 	Prefs        domain.UserPreferences
 	Deduplicator dedup.ListingDeduplicator
@@ -37,6 +78,8 @@ type Processor struct {
 	Analyzer     AnalyzerWithUsage
 	PhotoLoader  PhotoLoader
 	Geocoder     ListingGeocoder
+	GeocodeLog   GeocodeLogger
+	PipelineLog  PipelineLogger
 	Location     LocationMatcher
 }
 
@@ -44,14 +87,20 @@ type ListingGeocoder interface {
 	Resolve(ctx context.Context, query string, maxDistanceMeters int) (domain.LocationPreference, error)
 }
 
+type geocodeRequestQueryFormatter interface {
+	RequestQuery(query string) string
+}
+
 type Result struct {
 	Record domain.ListingEvaluationRecord
 }
 
 func (p Processor) ProcessMessage(ctx context.Context, source domain.ListingSourceRef, message sources.ChannelMessage) (Result, error) {
+	started := time.Now()
 	listing := listingparser.FromChannelMessage(message)
 	source.ChannelID = message.ChannelID
 	source.ChannelName = message.ChannelName
+	source.ChannelUsername = message.ChannelUsername
 	source.MessageID = message.MessageID
 	source.MessageLink = message.Link
 	source.GroupedID = message.GroupedID
@@ -61,6 +110,8 @@ func (p Processor) ProcessMessage(ctx context.Context, source domain.ListingSour
 		Source:  source,
 		Status:  "received",
 	}
+	p.logPipeline(ctx, pipelineEvent(started, source, listing, "received", "received", ""))
+	p.logPipeline(ctx, pipelineEvent(started, source, listing, "parsed", "parsed", ""))
 
 	if !looksLikeApartmentListing(message, listing) {
 		record.Score = &domain.ListingScore{
@@ -71,8 +122,10 @@ func (p Processor) ProcessMessage(ctx context.Context, source domain.ListingSour
 			ShortSummary:      listing.Title + " rejected: message is not an apartment listing.",
 		}
 		record.Status = "rejected_non_listing"
-		return p.finish(ctx, record)
+		p.logPipeline(ctx, pipelineEvent(started, source, listing, "non_listing_filter", record.Status, "message is not an apartment listing"))
+		return p.finish(ctx, started, record)
 	}
+	p.logPipeline(ctx, pipelineEvent(started, source, listing, "non_listing_filter", "passed", ""))
 
 	basicReasons := scoring.BasicFilterReasons(listing, p.Prefs)
 	if len(basicReasons) > 0 {
@@ -84,18 +137,26 @@ func (p Processor) ProcessMessage(ctx context.Context, source domain.ListingSour
 			ShortSummary:      listing.Title + " rejected: " + strings.Join(basicReasons, "; ") + ".",
 		}
 		record.Status = "rejected_basic"
-		return p.finish(ctx, record)
+		p.logPipeline(ctx, pipelineEvent(started, source, listing, "basic_filter", record.Status, strings.Join(basicReasons, "; ")))
+		return p.finish(ctx, started, record)
 	}
+	p.logPipeline(ctx, pipelineEvent(started, source, listing, "basic_filter", "passed", ""))
 
-	listing = p.geocodeListing(ctx, listing)
+	listing = p.geocodeListing(ctx, source, listing)
 	record.Listing = listing
+	if listing.Latitude == 0 && listing.Longitude == 0 {
+		p.logPipeline(ctx, pipelineEvent(started, source, listing, "geocoded", "unresolved", "listing location is unresolved"))
+	} else {
+		p.logPipeline(ctx, pipelineEvent(started, source, listing, "geocoded", "resolved", listing.District))
+	}
 
 	if p.Location != nil {
 		ok, reason, err := p.Location.MatchesListingLocation(ctx, source.ProfileID, listing)
 		if err != nil {
 			record.Status = "failed"
 			record.FailureReason = err.Error()
-			return p.finish(ctx, record)
+			p.logPipeline(ctx, pipelineEventWithError(started, source, listing, "location_checked", record.Status, "", err))
+			return p.finish(ctx, started, record)
 		}
 		if !ok {
 			if strings.TrimSpace(reason) == "" {
@@ -109,8 +170,10 @@ func (p Processor) ProcessMessage(ctx context.Context, source domain.ListingSour
 				ShortSummary:      listing.Title + " rejected: " + reason + ".",
 			}
 			record.Status = "rejected_location"
-			return p.finish(ctx, record)
+			p.logPipeline(ctx, pipelineEvent(started, source, listing, "location_checked", record.Status, reason))
+			return p.finish(ctx, started, record)
 		}
+		p.logPipeline(ctx, pipelineEvent(started, source, listing, "location_checked", "passed", ""))
 	}
 
 	if p.PhotoLoader != nil && len(message.Photos) > 0 {
@@ -118,10 +181,12 @@ func (p Processor) ProcessMessage(ctx context.Context, source domain.ListingSour
 		if err != nil {
 			record.Status = "failed"
 			record.FailureReason = err.Error()
-			return p.finish(ctx, record)
+			p.logPipeline(ctx, pipelineEventWithError(started, source, listing, "photos_loaded", record.Status, "", err))
+			return p.finish(ctx, started, record)
 		}
 		listing = loaded
 		record.Listing = listing
+		p.logPipeline(ctx, pipelineEvent(started, source, listing, "photos_loaded", "loaded", ""))
 	}
 	defer cleanupLocalPhotoFiles(listing.Photos)
 
@@ -131,19 +196,29 @@ func (p Processor) ProcessMessage(ctx context.Context, source domain.ListingSour
 		if err != nil {
 			record.Status = "failed"
 			record.FailureReason = err.Error()
-			return p.finish(ctx, record)
+			event := pipelineEventWithError(started, source, listing, "dedup_checked", record.Status, "", err)
+			event.HashablePhotoCount = len(hashable.Photos)
+			p.logPipeline(ctx, event)
+			return p.finish(ctx, started, record)
 		}
 		if duplicate != nil {
 			record.Duplicate = duplicate
 			record.Status = "duplicate"
-			return p.finish(ctx, record)
+			event := pipelineEvent(started, source, listing, "dedup_checked", record.Status, "duplicate listing image fingerprint")
+			event.HashablePhotoCount = len(hashable.Photos)
+			p.logPipeline(ctx, event)
+			return p.finish(ctx, started, record)
 		}
+		event := pipelineEvent(started, source, listing, "dedup_checked", "passed", "")
+		event.HashablePhotoCount = len(hashable.Photos)
+		p.logPipeline(ctx, event)
 	}
 
 	if p.Analyzer == nil {
 		record.Status = "failed"
 		record.FailureReason = "AI analyzer is not configured"
-		return p.finish(ctx, record)
+		p.logPipeline(ctx, pipelineEvent(started, source, listing, "vision_called", record.Status, record.FailureReason))
+		return p.finish(ctx, started, record)
 	}
 
 	insights, usage, err := p.Analyzer.AnalyzeWithUsage(ctx, listing)
@@ -151,8 +226,10 @@ func (p Processor) ProcessMessage(ctx context.Context, source domain.ListingSour
 		record.Status = "failed"
 		record.FailureReason = err.Error()
 		record.AIUsage = &usage
-		return p.finish(ctx, record)
+		p.logPipeline(ctx, pipelineEventWithError(started, source, listing, "vision_called", record.Status, "", err))
+		return p.finish(ctx, started, record)
 	}
+	p.logPipeline(ctx, pipelineEvent(started, source, listing, "vision_called", "passed", ""))
 	record.Insights = &insights
 	record.AIUsage = &usage
 	listing = scoringListingWithInsights(listing, insights)
@@ -164,15 +241,20 @@ func (p Processor) ProcessMessage(ctx context.Context, source domain.ListingSour
 	} else {
 		record.Status = "rejected_ai"
 	}
+	p.logPipeline(ctx, pipelineEvent(started, source, listing, "scored", record.Status, strings.Join(score.RejectionReasons, "; ")))
 
 	if p.Deduplicator != nil && len(hashable.Photos) > 0 {
 		if err := p.Deduplicator.SaveFingerprint(ctx, listing.ID, hashable.Photos); err != nil {
 			record.Status = "failed"
 			record.FailureReason = err.Error()
-			return p.finish(ctx, record)
+			p.logPipeline(ctx, pipelineEventWithError(started, source, listing, "dedup_saved", record.Status, "", err))
+			return p.finish(ctx, started, record)
 		}
+		event := pipelineEvent(started, source, listing, "dedup_saved", "saved", "")
+		event.HashablePhotoCount = len(hashable.Photos)
+		p.logPipeline(ctx, event)
 	}
-	return p.finish(ctx, record)
+	return p.finish(ctx, started, record)
 }
 
 func scoringListingWithInsights(listing domain.ApartmentListing, insights domain.ListingInsights) domain.ApartmentListing {
@@ -246,12 +328,25 @@ func containsAnySubstring(text string, needles ...string) bool {
 	return false
 }
 
-func (p Processor) geocodeListing(ctx context.Context, listing domain.ApartmentListing) domain.ApartmentListing {
+func (p Processor) geocodeListing(ctx context.Context, source domain.ListingSourceRef, listing domain.ApartmentListing) domain.ApartmentListing {
 	if p.Geocoder == nil || listing.Latitude != 0 || listing.Longitude != 0 {
 		return listing
 	}
 	for _, candidate := range geocodeListingQueries(listing) {
 		loc, err := p.Geocoder.Resolve(ctx, candidate.Query, candidate.MaxDistanceMeters)
+		p.logGeocodeAttempt(ctx, GeocodeLogEvent{
+			Time:              time.Now().UTC(),
+			Source:            source,
+			ListingID:         listing.ID,
+			ListingTitle:      listing.Title,
+			Query:             p.geocodeRequestQuery(candidate.Query),
+			MaxDistanceMeters: candidate.MaxDistanceMeters,
+			ResultName:        loc.Name,
+			ResultLatitude:    loc.Latitude,
+			ResultLongitude:   loc.Longitude,
+			Success:           err == nil && loc.Latitude != 0 && loc.Longitude != 0,
+			Error:             errorString(err),
+		})
 		if err != nil || loc.Latitude == 0 || loc.Longitude == 0 {
 			continue
 		}
@@ -263,6 +358,63 @@ func (p Processor) geocodeListing(ctx context.Context, listing domain.ApartmentL
 		return listing
 	}
 	return listing
+}
+
+func (p Processor) geocodeRequestQuery(query string) string {
+	formatter, ok := p.Geocoder.(geocodeRequestQueryFormatter)
+	if !ok {
+		return query
+	}
+	formatted := strings.TrimSpace(formatter.RequestQuery(query))
+	if formatted == "" {
+		return query
+	}
+	return formatted
+}
+
+func (p Processor) logGeocodeAttempt(ctx context.Context, event GeocodeLogEvent) {
+	if p.GeocodeLog == nil {
+		return
+	}
+	_ = p.GeocodeLog.LogGeocodeAttempt(ctx, event)
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func pipelineEvent(started time.Time, source domain.ListingSourceRef, listing domain.ApartmentListing, stage, status, reason string) PipelineLogEvent {
+	return PipelineLogEvent{
+		Time:         time.Now().UTC(),
+		Source:       source,
+		ListingID:    listing.ID,
+		ListingTitle: listing.Title,
+		Stage:        stage,
+		Status:       status,
+		Reason:       strings.TrimSpace(reason),
+		Price:        listing.Price,
+		AreaM2:       listing.AreaM2,
+		Latitude:     listing.Latitude,
+		Longitude:    listing.Longitude,
+		PhotoCount:   len(listing.Photos),
+		DurationMS:   time.Since(started).Milliseconds(),
+	}
+}
+
+func pipelineEventWithError(started time.Time, source domain.ListingSourceRef, listing domain.ApartmentListing, stage, status, reason string, err error) PipelineLogEvent {
+	event := pipelineEvent(started, source, listing, stage, status, reason)
+	event.Error = errorString(err)
+	return event
+}
+
+func (p Processor) logPipeline(ctx context.Context, event PipelineLogEvent) {
+	if p.PipelineLog == nil {
+		return
+	}
+	_ = p.PipelineLog.LogPipelineEvent(ctx, event)
 }
 
 var addressLinePattern = regexp.MustCompile(`(?i)(^|[\s,])(?:ул\.?|улиц[аеуы]?|street|st\.?|avenue|ave\.?|проспект|пр-т|переулок|пер\.?|road|rd\.?|lane|ln\.?)\s+`)
@@ -357,10 +509,16 @@ func cleanupLocalPhotoFiles(photos []domain.ApartmentPhoto) {
 	}
 }
 
-func (p Processor) finish(ctx context.Context, record domain.ListingEvaluationRecord) (Result, error) {
+func (p Processor) finish(ctx context.Context, started time.Time, record domain.ListingEvaluationRecord) (Result, error) {
 	record.Listing = listingWithoutLocalPhotoFiles(record.Listing)
 	record.Report = BuildReport(record, p.Prefs)
-	return Result{Record: record}, p.save(ctx, record)
+	err := p.save(ctx, record)
+	if err != nil {
+		p.logPipeline(ctx, pipelineEventWithError(started, record.Source, record.Listing, "saved", "failed", "", err))
+	} else {
+		p.logPipeline(ctx, pipelineEvent(started, record.Source, record.Listing, "saved", record.Status, ""))
+	}
+	return Result{Record: record}, err
 }
 
 func listingWithoutLocalPhotoFiles(listing domain.ApartmentListing) domain.ApartmentListing {

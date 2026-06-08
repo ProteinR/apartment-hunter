@@ -118,14 +118,15 @@ type ApartmentListing struct {
 }
 
 type ListingSourceRef struct {
-	Source         string `json:"source,omitempty"`
-	ChannelID      string `json:"channel_id,omitempty"`
-	ChannelName    string `json:"channel_name,omitempty"`
-	MessageID      int    `json:"message_id,omitempty"`
-	MessageLink    string `json:"message_link,omitempty"`
-	GroupedID      int64  `json:"grouped_id,omitempty"`
-	ProfileID      string `json:"profile_id,omitempty"`
-	TelegramChatID int64  `json:"telegram_chat_id,omitempty"`
+	Source          string `json:"source,omitempty"`
+	ChannelID       string `json:"channel_id,omitempty"`
+	ChannelName     string `json:"channel_name,omitempty"`
+	ChannelUsername string `json:"channel_username,omitempty"`
+	MessageID       int    `json:"message_id,omitempty"`
+	MessageLink     string `json:"message_link,omitempty"`
+	GroupedID       int64  `json:"grouped_id,omitempty"`
+	ProfileID       string `json:"profile_id,omitempty"`
+	TelegramChatID  int64  `json:"telegram_chat_id,omitempty"`
 }
 
 type ApartmentPhoto struct {

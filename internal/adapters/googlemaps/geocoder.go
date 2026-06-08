@@ -117,6 +117,10 @@ func (g *Geocoder) queryWithRegion(query string) string {
 	return query + ", " + g.DefaultRegion
 }
 
+func (g *Geocoder) RequestQuery(query string) string {
+	return g.queryWithRegion(query)
+}
+
 func defaultRegionCenter(region string) (float64, float64, bool) {
 	switch strings.ToLower(strings.TrimSpace(region)) {
 	case "batumi, georgia", "batumi":

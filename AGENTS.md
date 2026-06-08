@@ -85,6 +85,33 @@ Debug mode controls notification volume:
 - debug on: send reports for every processed message;
 - debug off: send only `passed` listings.
 
+## Runtime JSONL Logs
+
+`telegram-process` writes short-lived text logs under `.logs/` by default. The directory is gitignored. Logs are JSONL: one JSON object per line, so use `tail`, `rg`, `jq`, or filter by `listing_id`, `message_id`, `profile_id`, `telegram_chat_id`, `channel_id`, or `channel_username`.
+
+Retention defaults to 3 days. Override with:
+
+- `APARTMENT_HUNTER_PIPELINE_LOG_DIR`
+- `APARTMENT_HUNTER_PIPELINE_LOG_RETENTION_DAYS`
+- `APARTMENT_HUNTER_GEOCODING_LOG_DIR`
+- `APARTMENT_HUNTER_GEOCODING_LOG_RETENTION_DAYS`
+
+Pipeline logs live at `.logs/pipeline/pipeline-YYYY-MM-DD.jsonl`.
+
+They record processing decisions for each listing, including source context and listing summary fields: `profile_id`, `telegram_chat_id`, `channel_id`, `channel_username`, `channel_name`, `message_id`, `message_link`, `grouped_id`, `listing_id`, `listing_title`, `stage`, `status`, `reason`, `price`, `area_m2`, coordinates, `photo_count`, `hashable_photo_count`, `duration_ms`, and `error`.
+
+Important stages include:
+
+- `received`, `parsed`, `non_listing_filter`, `basic_filter`;
+- `geocoded`, `location_checked`;
+- `photos_loaded`, `dedup_checked`, `dedup_saved`;
+- `vision_called`, `scored`, `saved`;
+- `notification_sent`, `notification_saved`.
+
+Geocoding logs live at `.logs/geocoding/geocoding-YYYY-MM-DD.jsonl`.
+
+They record every listing geocoder attempt after basic filters pass, with the same source/listing context plus `query`, `max_distance_meters`, `result_name`, result coordinates, `success`, and `error`. For the Google adapter, `query` is the actual address string sent to Google after default-region expansion, which is useful for spotting Batumi/Tbilisi mixups.
+
 ## Geometry And Location Matching
 
 Preference geometry is built in `internal/preferenceparser/geometry.go` by `PostGISGeometryBuilder`.
@@ -112,6 +139,7 @@ Search-area map rendering uses the latest GeoJSON via `LatestSearchAreaGeoJSON`.
 
 For subscription or offset issues:
 
+- Check `.logs/pipeline/pipeline-YYYY-MM-DD.jsonl` for `received`, skip-adjacent stages, final `saved` status, and notification stages.
 - Confirm `profiles.id = telegram_<chat_id>` exists and has `preferences`.
 - Inspect `profile_channels` for username, numeric `channel_id`, `cursor`, and `limit_count`.
 - For `telegram-process`, inspect `listing_evaluations` rather than only `profile_channels.cursor`.
@@ -120,6 +148,8 @@ For subscription or offset issues:
 
 For geo issues:
 
+- Check `.logs/geocoding/geocoding-YYYY-MM-DD.jsonl` to see the exact query sent to Google and the returned coordinates/name.
+- Check `.logs/pipeline/pipeline-YYYY-MM-DD.jsonl` for `geocoded` and `location_checked` stages.
 - Inspect the latest row in `user_search_profiles` for `preferences_json`, `search_area`, and unresolved rules.
 - Check whether the listing has coordinates before PostGIS matching.
 - If rejected by location, compare listing point against `LatestSearchAreaGeoJSON` or `ST_Covers` manually.

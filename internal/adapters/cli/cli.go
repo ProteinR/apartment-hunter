@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -210,6 +211,7 @@ func (a App) telegramProcessWithContext(ctx context.Context, profileID string, r
 	if err != nil {
 		return err
 	}
+	pipelineLog := newPipelineLogger()
 	processor := evaluation.Processor{
 		Prefs:        *profile.Preferences,
 		Deduplicator: dedup.NewService(dedup.NewImageHasher(), store),
@@ -217,6 +219,8 @@ func (a App) telegramProcessWithContext(ctx context.Context, profileID string, r
 		Analyzer:     analyzer,
 		PhotoLoader:  reader,
 		Geocoder:     newGoogleGeocoder(),
+		GeocodeLog:   newGeocodeLogger(),
+		PipelineLog:  pipelineLog,
 		Location:     store,
 	}
 
@@ -267,11 +271,15 @@ func (a App) telegramProcessWithContext(ctx context.Context, profileID string, r
 			}
 			botMessageID, err := telegram.SendTextMessageID(ctx, botToken, profile.TelegramChatID, evaluation.NotificationText(result.Record))
 			if err != nil {
+				logPipelineEvent(ctx, pipelineLog, result.Record, "notification_sent", "failed", err.Error())
 				return err
 			}
 			if err := store.UpdateEvaluationNotificationMessageID(ctx, result.Record.Listing.ID, botMessageID); err != nil {
+				logPipelineEvent(ctx, pipelineLog, result.Record, "notification_saved", "failed", err.Error())
 				return err
 			}
+			logPipelineEvent(ctx, pipelineLog, result.Record, "notification_sent", "sent", "")
+			logPipelineEvent(ctx, pipelineLog, result.Record, "notification_saved", "saved", "")
 		}
 		return nil
 	}
@@ -546,6 +554,62 @@ func newGoogleGeocoder() *googlemaps.Geocoder {
 		geocoder.Language = language
 	}
 	return geocoder
+}
+
+func newGeocodeLogger() *evaluation.FileGeocodeLogger {
+	dir := strings.TrimSpace(os.Getenv("APARTMENT_HUNTER_GEOCODING_LOG_DIR"))
+	if dir == "" {
+		dir = ".logs/geocoding"
+	}
+	retentionDays := 3
+	if raw := strings.TrimSpace(os.Getenv("APARTMENT_HUNTER_GEOCODING_LOG_RETENTION_DAYS")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err == nil && parsed > 0 {
+			retentionDays = parsed
+		}
+	}
+	return &evaluation.FileGeocodeLogger{
+		Dir:       dir,
+		Retention: time.Duration(retentionDays) * 24 * time.Hour,
+	}
+}
+
+func newPipelineLogger() *evaluation.FilePipelineLogger {
+	dir := strings.TrimSpace(os.Getenv("APARTMENT_HUNTER_PIPELINE_LOG_DIR"))
+	if dir == "" {
+		dir = ".logs/pipeline"
+	}
+	retentionDays := 3
+	if raw := strings.TrimSpace(os.Getenv("APARTMENT_HUNTER_PIPELINE_LOG_RETENTION_DAYS")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err == nil && parsed > 0 {
+			retentionDays = parsed
+		}
+	}
+	return &evaluation.FilePipelineLogger{
+		Dir:       dir,
+		Retention: time.Duration(retentionDays) * 24 * time.Hour,
+	}
+}
+
+func logPipelineEvent(ctx context.Context, logger evaluation.PipelineLogger, record domain.ListingEvaluationRecord, stage, status, reason string) {
+	if logger == nil {
+		return
+	}
+	_ = logger.LogPipelineEvent(ctx, evaluation.PipelineLogEvent{
+		Time:         time.Now().UTC(),
+		Source:       record.Source,
+		ListingID:    record.Listing.ID,
+		ListingTitle: record.Listing.Title,
+		Stage:        stage,
+		Status:       status,
+		Reason:       strings.TrimSpace(reason),
+		Price:        record.Listing.Price,
+		AreaM2:       record.Listing.AreaM2,
+		Latitude:     record.Listing.Latitude,
+		Longitude:    record.Listing.Longitude,
+		PhotoCount:   len(record.Listing.Photos),
+	})
 }
 
 func geocodeListingPreview(ctx context.Context, listing domain.ApartmentListing, resolver geocoding.Resolver) domain.ApartmentListing {
