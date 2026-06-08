@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -34,6 +35,7 @@ type ProfileStore interface {
 	SaveSearchProfile(ctx context.Context, profile domain.UserSearchProfile) error
 	UpsertProfileChannel(ctx context.Context, profileID string, sub profiles.ChannelSubscription) (bool, error)
 	RemoveProfileChannel(ctx context.Context, profileID, channel string) (bool, error)
+	SaveListingFeedback(ctx context.Context, feedback domain.ListingFeedback) (string, bool, error)
 }
 
 type preferenceSession struct {
@@ -116,6 +118,15 @@ func (b *Bot) handleUpdate(ctx context.Context, api *telegrambot.Bot, update *mo
 	}
 
 	chatID := update.Message.Chat.ID
+	if update.Message.ReplyToMessage != nil && b.getSession(chatID) == nil && !strings.HasPrefix(strings.TrimSpace(update.Message.Text), "/") {
+		reply, err := b.saveReplyFeedback(ctx, update.Message)
+		if err != nil {
+			_ = sendMessage(ctx, api, chatID, "Error: "+err.Error())
+			return
+		}
+		_ = sendMessageWithReply(ctx, api, chatID, update.Message.ID, reply)
+		return
+	}
 	if err := b.handleMessage(ctx, api, chatID, update.Message.Text); err != nil {
 		_ = sendMessage(ctx, api, chatID, "Error: "+err.Error())
 	}
@@ -386,6 +397,32 @@ func (b *Bot) debugMode(ctx context.Context, chatID int64, text string) (string,
 	}
 }
 
+func (b *Bot) saveReplyFeedback(ctx context.Context, message *models.Message) (string, error) {
+	if b.store == nil {
+		return "", fmt.Errorf("profile store is required")
+	}
+	if message.ReplyToMessage == nil {
+		return "Ответь на сообщение с отчетом по квартире и напиши отзыв.", nil
+	}
+	text := strings.TrimSpace(message.Text)
+	if text == "" {
+		return "Пустой отзыв не сохранен.", nil
+	}
+	id, ok, err := b.store.SaveListingFeedback(ctx, domain.ListingFeedback{
+		TelegramChatID:    message.Chat.ID,
+		FeedbackMessageID: message.ID,
+		RepliedMessageID:  message.ReplyToMessage.ID,
+		Text:              text,
+	})
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "Не нашел объявление для этого ответа. Ответь на сообщение с отчетом по квартире, например: «гео определено неверно».", nil
+	}
+	return "Отзыв сохранен: feedback #" + id, nil
+}
+
 func debugModeStatusMessage(enabled bool) string {
 	if enabled {
 		return "Debug mode: on\n\nЯ пересылаю отчет по каждому обработанному объявлению: прошедшему, отклоненному, дубликату или ошибке. Выключить: /debug off"
@@ -531,10 +568,49 @@ func sendMessageWithMarkup(ctx context.Context, api *telegrambot.Bot, chatID int
 	return err
 }
 
+func sendMessageWithReply(ctx context.Context, api *telegrambot.Bot, chatID int64, replyToMessageID int, text string) error {
+	_, err := api.SendMessage(ctx, &telegrambot.SendMessageParams{
+		ChatID: chatID,
+		Text:   text,
+		ReplyParameters: &models.ReplyParameters{
+			MessageID: replyToMessageID,
+		},
+	})
+	return err
+}
+
 func SendText(ctx context.Context, token string, chatID int64, text string) error {
+	_, err := SendTextMessageID(ctx, token, chatID, text)
+	return err
+}
+
+func SendTextMessageID(ctx context.Context, token string, chatID int64, text string) (int, error) {
+	api, err := telegrambot.New(token, telegrambot.WithHTTPClient(20*time.Second, &http.Client{Timeout: 20 * time.Second}))
+	if err != nil {
+		return 0, err
+	}
+	message, err := api.SendMessage(ctx, &telegrambot.SendMessageParams{
+		ChatID: chatID,
+		Text:   text,
+	})
+	if err != nil {
+		return 0, err
+	}
+	return message.ID, nil
+}
+
+func SendPhotoBytes(ctx context.Context, token string, chatID int64, filename string, data []byte, caption string) error {
 	api, err := telegrambot.New(token, telegrambot.WithHTTPClient(20*time.Second, &http.Client{Timeout: 20 * time.Second}))
 	if err != nil {
 		return err
 	}
-	return sendMessage(ctx, api, chatID, text)
+	_, err = api.SendPhoto(ctx, &telegrambot.SendPhotoParams{
+		ChatID: chatID,
+		Photo: &models.InputFileUpload{
+			Filename: filename,
+			Data:     bytes.NewReader(data),
+		},
+		Caption: caption,
+	})
+	return err
 }

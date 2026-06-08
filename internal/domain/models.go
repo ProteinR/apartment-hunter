@@ -180,3 +180,17 @@ type ListingEvaluationRecord struct {
 	Status        string           `json:"status"`
 	FailureReason string           `json:"failure_reason,omitempty"`
 }
+
+type ListingFeedback struct {
+	ID                string `json:"id,omitempty"`
+	EvaluationID      string `json:"evaluation_id,omitempty"`
+	ListingID         string `json:"listing_id,omitempty"`
+	ProfileID         string `json:"profile_id,omitempty"`
+	TelegramChatID    int64  `json:"telegram_chat_id,omitempty"`
+	FeedbackMessageID int    `json:"feedback_message_id,omitempty"`
+	RepliedMessageID  int    `json:"replied_message_id,omitempty"`
+	Text              string `json:"text"`
+	Status            string `json:"status,omitempty"`
+	ResolvedCommit    string `json:"resolved_commit,omitempty"`
+	ResolutionNote    string `json:"resolution_note,omitempty"`
+}

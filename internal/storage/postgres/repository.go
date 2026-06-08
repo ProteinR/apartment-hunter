@@ -121,6 +121,28 @@ func (r *Repository) SaveSearchProfile(ctx context.Context, profile domain.UserS
 	return err
 }
 
+func (r *Repository) LatestSearchAreaGeoJSON(ctx context.Context, profileID string) (string, bool, error) {
+	profileID = strings.TrimSpace(profileID)
+	if profileID == "" {
+		return "", false, nil
+	}
+	var geoJSON string
+	err := r.db.QueryRowContext(ctx, `
+		select ST_AsGeoJSON(search_area)
+		from user_search_profiles
+		where user_id = $1 and search_area is not null
+		order by created_at desc, id desc
+		limit 1
+	`, profileID).Scan(&geoJSON)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return geoJSON, strings.TrimSpace(geoJSON) != "", nil
+}
+
 func (r *Repository) MatchesListingLocation(ctx context.Context, profileID string, listing domain.ApartmentListing) (bool, string, error) {
 	profileID = strings.TrimSpace(profileID)
 	if profileID == "" {
@@ -218,6 +240,23 @@ func (r *Repository) UpdateProfileChannelCursor(ctx context.Context, profileID s
 		set cursor = $3, updated_at = now()
 		where profile_id = $1 and channel_id = $2
 	`, profileID, source.ID, cursorJSON)
+	return err
+}
+
+func (r *Repository) UpdateProfileChannelSource(ctx context.Context, profileID string, current, resolved sources.ChannelRef) error {
+	current = normalizeChannel(current)
+	resolved = normalizeChannel(resolved)
+	if strings.TrimSpace(profileID) == "" || current.ID == "" || resolved.ID == "" || current.ID == resolved.ID {
+		return nil
+	}
+	_, err := r.db.ExecContext(ctx, `
+		update profile_channels
+		set channel_id = $3,
+			username = coalesce($4, username),
+			title = coalesce($5, title),
+			updated_at = now()
+		where profile_id = $1 and channel_id = $2
+	`, profileID, current.ID, resolved.ID, nullString(resolved.Username), nullString(resolved.Title))
 	return err
 }
 
@@ -345,6 +384,103 @@ func (r *Repository) SaveEvaluation(ctx context.Context, record domain.ListingEv
 		usageFloat(record.AIUsage, func(u domain.AIUsage) float64 { return u.CachedInputPricePerMillionUSD }),
 		usageFloat(record.AIUsage, func(u domain.AIUsage) float64 { return u.OutputPricePerMillionUSD }),
 		usageFloat(record.AIUsage, func(u domain.AIUsage) float64 { return u.CostUSD }))
+	return err
+}
+
+func (r *Repository) SaveListingFeedback(ctx context.Context, feedback domain.ListingFeedback) (string, bool, error) {
+	feedback.Text = strings.TrimSpace(feedback.Text)
+	if feedback.Text == "" {
+		return "", false, fmt.Errorf("feedback text is required")
+	}
+	if feedback.TelegramChatID == 0 || feedback.FeedbackMessageID == 0 || feedback.RepliedMessageID == 0 {
+		return "", false, fmt.Errorf("telegram chat id, feedback message id and replied message id are required")
+	}
+
+	var evaluationID, listingID, profileID string
+	err := r.db.QueryRowContext(ctx, `
+		select id::text, listing_id, coalesce(profile_id, '')
+		from listing_evaluations
+		where telegram_chat_id = $1
+			and (bot_message_id = $2 or message_id = $2)
+		order by updated_at desc, id desc
+		limit 1
+	`, feedback.TelegramChatID, feedback.RepliedMessageID).Scan(&evaluationID, &listingID, &profileID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+
+	var id string
+	err = r.db.QueryRowContext(ctx, `
+		insert into listing_feedbacks (
+			evaluation_id, listing_id, profile_id, telegram_chat_id,
+			feedback_message_id, replied_message_id, feedback_text
+		) values ($1::bigint, $2, $3, $4, $5, $6, $7)
+		on conflict (telegram_chat_id, feedback_message_id) do update set
+			feedback_text = excluded.feedback_text,
+			updated_at = now()
+		returning id::text
+	`, evaluationID, listingID, nullString(profileID), feedback.TelegramChatID,
+		feedback.FeedbackMessageID, feedback.RepliedMessageID, feedback.Text).Scan(&id)
+	return id, true, err
+}
+
+func (r *Repository) UpdateEvaluationNotificationMessageID(ctx context.Context, listingID string, botMessageID int) error {
+	if strings.TrimSpace(listingID) == "" || botMessageID == 0 {
+		return nil
+	}
+	_, err := r.db.ExecContext(ctx, `
+		update listing_evaluations
+		set bot_message_id = $2, updated_at = now()
+		where listing_id = $1
+	`, listingID, botMessageID)
+	return err
+}
+
+func (r *Repository) ListOpenFeedbacks(ctx context.Context) ([]domain.ListingFeedback, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		select id::text, coalesce(evaluation_id::text, ''), coalesce(listing_id, ''),
+			coalesce(profile_id, ''), telegram_chat_id, feedback_message_id,
+			replied_message_id, feedback_text, status, coalesce(resolved_commit, ''),
+			coalesce(resolution_note, '')
+		from listing_feedbacks
+		where status = 'open'
+		order by created_at asc, id asc
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []domain.ListingFeedback
+	for rows.Next() {
+		var item domain.ListingFeedback
+		if err := rows.Scan(&item.ID, &item.EvaluationID, &item.ListingID, &item.ProfileID,
+			&item.TelegramChatID, &item.FeedbackMessageID, &item.RepliedMessageID,
+			&item.Text, &item.Status, &item.ResolvedCommit, &item.ResolutionNote); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (r *Repository) ResolveFeedback(ctx context.Context, id, commit, note string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("feedback id is required")
+	}
+	_, err := r.db.ExecContext(ctx, `
+		update listing_feedbacks
+		set status = 'resolved',
+			resolved_commit = $2,
+			resolution_note = $3,
+			resolved_at = now(),
+			updated_at = now()
+		where id = $1 and status = 'open'
+	`, id, nullString(commit), nullString(note))
 	return err
 }
 

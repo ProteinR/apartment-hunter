@@ -13,8 +13,10 @@ import (
 )
 
 type fakeProfileStore struct {
-	profiles       map[string]profiles.Profile
-	searchProfiles []domain.UserSearchProfile
+	profiles        map[string]profiles.Profile
+	searchProfiles  []domain.UserSearchProfile
+	feedbacks       []domain.ListingFeedback
+	feedbackMatched bool
 }
 
 func newFakeProfileStore() *fakeProfileStore {
@@ -74,6 +76,15 @@ func (s *fakeProfileStore) RemoveProfileChannel(ctx context.Context, profileID, 
 		}
 	}
 	return false, nil
+}
+
+func (s *fakeProfileStore) SaveListingFeedback(ctx context.Context, feedback domain.ListingFeedback) (string, bool, error) {
+	if !s.feedbackMatched {
+		return "", false, nil
+	}
+	feedback.ID = "7"
+	s.feedbacks = append(s.feedbacks, feedback)
+	return feedback.ID, true, nil
 }
 
 func TestHandleTextParsesPreviewsAndSavesPreferences(t *testing.T) {
@@ -308,6 +319,55 @@ func TestRepliesIncludeCommandKeyboard(t *testing.T) {
 	}
 	if _, ok := response.ReplyMarkup.(*models.ReplyKeyboardMarkup); !ok {
 		t.Fatalf("expected command keyboard after /channels, got %T", response.ReplyMarkup)
+	}
+}
+
+func TestSaveReplyFeedbackStoresFeedback(t *testing.T) {
+	store := newFakeProfileStore()
+	store.feedbackMatched = true
+	bot := New("test-token", t.TempDir(), WithProfileStore(store))
+
+	reply, err := bot.saveReplyFeedback(context.Background(), &models.Message{
+		ID:   101,
+		Text: "гео определено неверно",
+		Chat: models.Chat{ID: 42},
+		ReplyToMessage: &models.Message{
+			ID: 55,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != "Отзыв сохранен: feedback #7" {
+		t.Fatalf("unexpected reply %q", reply)
+	}
+	if len(store.feedbacks) != 1 {
+		t.Fatalf("expected feedback to be saved, got %d", len(store.feedbacks))
+	}
+	got := store.feedbacks[0]
+	if got.TelegramChatID != 42 || got.FeedbackMessageID != 101 || got.RepliedMessageID != 55 || got.Text != "гео определено неверно" {
+		t.Fatalf("unexpected feedback: %+v", got)
+	}
+}
+
+func TestSaveReplyFeedbackExplainsUnmatchedReply(t *testing.T) {
+	store := newFakeProfileStore()
+	bot := New("test-token", t.TempDir(), WithProfileStore(store))
+
+	reply, err := bot.saveReplyFeedback(context.Background(), &models.Message{
+		ID:             101,
+		Text:           "гео определено неверно",
+		Chat:           models.Chat{ID: 42},
+		ReplyToMessage: &models.Message{ID: 55},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reply, "Не нашел объявление") {
+		t.Fatalf("unexpected reply %q", reply)
+	}
+	if len(store.feedbacks) != 0 {
+		t.Fatalf("unexpected feedback saved: %+v", store.feedbacks)
 	}
 }
 

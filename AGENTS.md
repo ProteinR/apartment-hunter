@@ -1,0 +1,131 @@
+# Agent Orientation
+
+This is a short map for future agents. Treat it as a starting point, then verify details in code before changing behavior.
+
+## Big Picture
+
+`apartment-hunter` evaluates Batumi rental listings against a Telegram user's preferences.
+
+- `cmd/apartment-hunter/main.go` starts the CLI.
+- `internal/adapters/cli` wires commands, env vars, Postgres, Telegram, OpenAI, geocoding, and processing.
+- `internal/domain` defines preferences, listings, search geometry, evaluation records, and feedback.
+- `internal/storage/postgres` owns schema and persistence.
+- `internal/evaluation` is the main listing processing pipeline.
+
+## Telegram Profiles And Subscriptions
+
+Profiles are keyed as `telegram_<chat_id>` via `profiles.IDForTelegramChat`.
+
+Bot commands live in `internal/adapters/telegram/bot.go`:
+
+- `/start`, `/preferences`, `/restart` start preference collection.
+- A free-text query is parsed by `preferenceparser.Service` using the OpenAI preferences adapter.
+- On Save, `saveDraft` saves two things:
+  - latest preferences in `profiles.preferences`;
+  - a historical search profile in `user_search_profiles`, including `search_area` geometry when it can be built.
+- `/subscribe`, pasted `t.me/name`, and `@name` add rows to `profile_channels`.
+- `/unsubscribe` removes rows from `profile_channels`.
+- The bot never joins chats automatically. The Telegram userbot account must already have access.
+
+Postgres tables to inspect first:
+
+- `profiles`: Telegram chat id, current preferences, debug mode.
+- `profile_channels`: subscriptions, username/title, cursor JSON, history limit.
+- `user_search_profiles`: historical preference snapshots and latest PostGIS search area.
+- `listing_evaluations`: processed messages and notification ids.
+
+## Reading Telegram Messages
+
+There are two userbot paths in `internal/adapters/telegramuserbot/client.go`:
+
+- `Fetch`: reads recent channel history with `messages.getHistory`.
+- `Listen`: opens a live MTProto session and handles `UpdateNewMessage` / `UpdateNewChannelMessage`.
+
+`telegram-read` in `internal/adapters/cli/cli.go`:
+
+- reads each subscribed channel with `Fetch`;
+- uses the subscription cursor (`LastMessageID`);
+- writes the updated cursor with `UpdateProfileChannelCursor`;
+- prints JSON previews; it does not run the full evaluation pipeline.
+
+`telegram-process` in `internal/adapters/cli/cli.go`:
+
+- loads the profile, preferences, and channel subscriptions;
+- builds an `evaluation.Processor`;
+- first runs `catchUpTelegramHistory`, then starts `reader.Listen`.
+
+Important current behavior: `catchUpTelegramHistory` fetches recent messages from each subscription using an empty cursor and the subscription `Limit` (default 50). It skips already-processed messages via `EvaluationExists(profileID, channelID, messageID)`. It does not advance `profile_channels.cursor`. If a message seems "stuck", check `listing_evaluations` for that profile/channel/message and check whether `channel_id` changed from username to numeric Telegram id after resolve.
+
+Live messages are filtered by `profileSubscribedToMessage`, which matches subscriptions against both channel id and username after trimming `@` and lowercasing.
+
+Grouped Telegram albums are coalesced:
+
+- live updates wait `albumSettleDelay` before handling a grouped message;
+- fetched history merges messages with the same channel and grouped id.
+
+## Listing Processing Pipeline
+
+The main flow is `evaluation.Processor.ProcessMessage`:
+
+1. Parse `sources.ChannelMessage` into `domain.ApartmentListing`.
+2. Reject obvious non-listings.
+3. Apply basic filters from preferences: price, area, required amenities.
+4. Geocode the listing if coordinates are missing.
+5. Check location against the latest saved search area with PostGIS.
+6. Download Telegram photos only after the cheap filters pass.
+7. Check image deduplication.
+8. Call OpenAI Vision for interior/view/amenity insights.
+9. Score the listing and save `listing_evaluations`.
+10. Optionally send a Telegram report and search-area map.
+
+Statuses to know: `received`, `rejected_non_listing`, `rejected_basic`, `rejected_location`, `duplicate`, `rejected_ai`, `passed`, `failed`.
+
+Debug mode controls notification volume:
+
+- debug on: send reports for every processed message;
+- debug off: send only `passed` listings.
+
+## Geometry And Location Matching
+
+Preference geometry is built in `internal/preferenceparser/geometry.go` by `PostGISGeometryBuilder`.
+
+Input is `domain.LocationPreference` from the preference parser. For each location:
+
+- resolve center from explicit coordinates, known Batumi centers, or Google geocoder;
+- build a circle polygon from radius;
+- optionally clip by boundary street, currently with Pushkin support and a fallback hardcoded line;
+- optionally clip by the sea-distance corridor;
+- combine polygons into a WKT/GeoJSON `MultiPolygon`.
+
+`SaveSearchProfile` stores the WKT as `user_search_profiles.search_area` with SRID 4326.
+
+At evaluation time, `Repository.MatchesListingLocation`:
+
+- takes the latest non-null `search_area` for the profile;
+- rejects unresolved listing coordinates with `listing location is unresolved`;
+- checks `ST_Covers(search_area, ST_MakePoint(longitude, latitude))`;
+- rejects outside points with `listing location is outside preferred search area`.
+
+Search-area map rendering uses the latest GeoJSON via `LatestSearchAreaGeoJSON`.
+
+## Practical Debug Checklist
+
+For subscription or offset issues:
+
+- Confirm `profiles.id = telegram_<chat_id>` exists and has `preferences`.
+- Inspect `profile_channels` for username, numeric `channel_id`, `cursor`, and `limit_count`.
+- For `telegram-process`, inspect `listing_evaluations` rather than only `profile_channels.cursor`.
+- Compare subscription username/id with incoming `ChannelMessage.ChannelID` and `ChannelUsername`.
+- Remember `Fetch` resolves public username to numeric Telegram channel id.
+
+For geo issues:
+
+- Inspect the latest row in `user_search_profiles` for `preferences_json`, `search_area`, and unresolved rules.
+- Check whether the listing has coordinates before PostGIS matching.
+- If rejected by location, compare listing point against `LatestSearchAreaGeoJSON` or `ST_Covers` manually.
+
+For expensive pipeline issues:
+
+- Basic and location rejections happen before photo download and OpenAI Vision.
+- Local Telegram photos are downloaded under `TELEGRAM_MEDIA_DIR`, then redacted from saved records as `local-photo-redacted`.
+- AI usage/cost is stored in `listing_evaluations` when Vision runs.

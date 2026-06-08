@@ -221,6 +221,7 @@ func (a App) telegramProcessWithContext(ctx context.Context, profileID string, r
 	}
 
 	botToken := strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN"))
+	mapRenderer := googlemaps.StaticMapRenderer{APIKey: strings.TrimSpace(os.Getenv("APARTMENT_HUNTER_GOOGLE_MAPS_API_KEY"))}
 	fmt.Fprintf(a.Out, "Listening for new Telegram messages for %s\n", profileID)
 	if botToken == "" || profile.TelegramChatID == 0 {
 		fmt.Fprintf(a.Out, "Telegram notifications disabled: bot token set=%t, chat id=%d\n", botToken != "", profile.TelegramChatID)
@@ -257,7 +258,18 @@ func (a App) telegramProcessWithContext(ctx context.Context, profileID string, r
 		fmt.Fprintf(a.Out, "Processed %s/%d: %s\n", message.ChannelID, message.MessageID, result.Record.Status)
 		if botToken != "" && profile.TelegramChatID != 0 && shouldSendTelegramNotification(profile, result.Record) {
 			fmt.Fprintf(a.Out, "Sending notification for %s/%d to chat %d\n", message.ChannelID, message.MessageID, profile.TelegramChatID)
-			if err := telegram.SendText(ctx, botToken, profile.TelegramChatID, evaluation.NotificationText(result.Record)); err != nil {
+			if mapImage, ok, err := listingSearchAreaMapImage(ctx, store, mapRenderer, result.Record); err != nil {
+				fmt.Fprintf(a.Err, "Telegram map skipped for %s/%d: %v\n", message.ChannelID, message.MessageID, err)
+			} else if ok {
+				if err := telegram.SendPhotoBytes(ctx, botToken, profile.TelegramChatID, "search-area-map.png", mapImage, "Гео: квартира и зеленая зона поиска"); err != nil {
+					fmt.Fprintf(a.Err, "Telegram map send failed for %s/%d: %v\n", message.ChannelID, message.MessageID, err)
+				}
+			}
+			botMessageID, err := telegram.SendTextMessageID(ctx, botToken, profile.TelegramChatID, evaluation.NotificationText(result.Record))
+			if err != nil {
+				return err
+			}
+			if err := store.UpdateEvaluationNotificationMessageID(ctx, result.Record.Listing.ID, botMessageID); err != nil {
 				return err
 			}
 		}
@@ -291,6 +303,9 @@ func (a App) catchUpTelegramHistory(ctx context.Context, profileID string, reade
 		if err != nil {
 			return err
 		}
+		if err := store.UpdateProfileChannelSource(ctx, profileID, sub.Source, resolvedChannelSource(sub.Source, messages)); err != nil {
+			return err
+		}
 		for i := len(messages) - 1; i >= 0; i-- {
 			message := messages[i]
 			if strings.TrimSpace(message.Text) == "" && len(message.Photos) == 0 {
@@ -311,6 +326,25 @@ func (a App) catchUpTelegramHistory(ctx context.Context, profileID string, reade
 	return nil
 }
 
+func resolvedChannelSource(fallback sources.ChannelRef, messages []sources.ChannelMessage) sources.ChannelRef {
+	resolved := fallback
+	for _, message := range messages {
+		if strings.TrimSpace(message.ChannelID) != "" {
+			resolved.ID = message.ChannelID
+		}
+		if strings.TrimSpace(message.ChannelUsername) != "" {
+			resolved.Username = message.ChannelUsername
+		}
+		if strings.TrimSpace(message.ChannelName) != "" {
+			resolved.Title = message.ChannelName
+		}
+		if resolved.ID != "" && resolved.Username != "" {
+			return resolved
+		}
+	}
+	return resolved
+}
+
 func subscriptionName(sub profiles.ChannelSubscription) string {
 	if sub.Source.Username != "" {
 		return strings.TrimPrefix(sub.Source.Username, "@")
@@ -320,6 +354,52 @@ func subscriptionName(sub profiles.ChannelSubscription) string {
 
 func shouldSendTelegramNotification(profile profiles.Profile, record domain.ListingEvaluationRecord) bool {
 	return profiles.DebugModeEnabled(profile) || record.Status == "passed"
+}
+
+type latestSearchAreaStore interface {
+	LatestSearchAreaGeoJSON(ctx context.Context, profileID string) (string, bool, error)
+}
+
+func listingSearchAreaMapURL(ctx context.Context, store latestSearchAreaStore, renderer googlemaps.StaticMapRenderer, record domain.ListingEvaluationRecord) (string, bool, error) {
+	if !shouldSendListingSearchAreaMap(record) || store == nil {
+		return "", false, nil
+	}
+	geoJSON, ok, err := store.LatestSearchAreaGeoJSON(ctx, record.Source.ProfileID)
+	if err != nil || !ok {
+		return "", false, err
+	}
+	mapURL := renderer.ListingSearchAreaURL(record.Listing, geoJSON)
+	if mapURL == "" {
+		return "", false, nil
+	}
+	return mapURL, true, nil
+}
+
+func listingSearchAreaMapImage(ctx context.Context, store latestSearchAreaStore, renderer googlemaps.StaticMapRenderer, record domain.ListingEvaluationRecord) ([]byte, bool, error) {
+	if !shouldSendListingSearchAreaMap(record) || store == nil {
+		return nil, false, nil
+	}
+	geoJSON, ok, err := store.LatestSearchAreaGeoJSON(ctx, record.Source.ProfileID)
+	if err != nil || !ok {
+		return nil, false, err
+	}
+	image, err := renderer.ListingSearchAreaImage(ctx, record.Listing, geoJSON)
+	if err != nil || len(image) == 0 {
+		return nil, false, err
+	}
+	return image, true, nil
+}
+
+func shouldSendListingSearchAreaMap(record domain.ListingEvaluationRecord) bool {
+	if record.Listing.Latitude == 0 && record.Listing.Longitude == 0 {
+		return false
+	}
+	switch record.Status {
+	case "rejected_basic", "rejected_non_listing", "received", "failed":
+		return false
+	default:
+		return true
+	}
 }
 
 func profileSubscribedToMessage(profile profiles.Profile, message sources.ChannelMessage) bool {

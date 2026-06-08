@@ -98,6 +98,14 @@ func normalizeScoringPreferences(prefs domain.UserPreferences) domain.UserPrefer
 			prefs.RequireOven = true
 		}
 	}
+	if len(prefs.Locations) == 0 && len(prefs.LocationPreferences) > 0 {
+		prefs.Locations = prefs.LocationPreferences
+	}
+	for i := range prefs.Locations {
+		if prefs.Locations[i].MaxDistanceMeters == 0 && prefs.Locations[i].RadiusMeters != nil {
+			prefs.Locations[i].MaxDistanceMeters = *prefs.Locations[i].RadiusMeters
+		}
+	}
 	if prefs.Importance == (domain.ImportanceWeights{}) {
 		prefs.Importance = domain.ImportanceWeights{
 			Location:   prefs.Weights.Location,
@@ -193,6 +201,7 @@ func locationScore(listing domain.ApartmentListing, prefs domain.UserPreferences
 	}
 
 	best := 0.0
+	hasScorableLocation := false
 	for _, loc := range prefs.Locations {
 		if strings.EqualFold(strings.TrimSpace(listing.District), strings.TrimSpace(loc.Name)) {
 			best = math.Max(best, 1)
@@ -201,9 +210,13 @@ func locationScore(listing domain.ApartmentListing, prefs domain.UserPreferences
 		if loc.Latitude == 0 || loc.Longitude == 0 || listing.Latitude == 0 || listing.Longitude == 0 || loc.MaxDistanceMeters <= 0 {
 			continue
 		}
+		hasScorableLocation = true
 		distance := haversineMeters(listing.Latitude, listing.Longitude, loc.Latitude, loc.Longitude)
 		score := 1 - (distance / float64(loc.MaxDistanceMeters))
 		best = math.Max(best, clamp01(score))
+	}
+	if !hasScorableLocation && best == 0 {
+		return 0.5
 	}
 	return best
 }

@@ -12,6 +12,7 @@ create table if not exists listing_evaluations (
 	channel_id text,
 	channel_name text,
 	message_id integer,
+	bot_message_id integer,
 	message_link text,
 	listing jsonb not null,
 	score jsonb,
@@ -47,6 +48,12 @@ create index if not exists listing_evaluations_message_idx
 
 alter table listing_evaluations
 	add column if not exists report text;
+
+alter table listing_evaluations
+	add column if not exists bot_message_id integer;
+
+create index if not exists listing_evaluations_bot_message_idx
+	on listing_evaluations (telegram_chat_id, bot_message_id);
 
 alter table listing_evaluations
 	add column if not exists ai_provider text,
@@ -184,4 +191,28 @@ create table if not exists listing_duplicates (
 	reason text not null,
 	created_at timestamptz not null default now()
 );
+
+create table if not exists listing_feedbacks (
+	id bigserial primary key,
+	evaluation_id bigint references listing_evaluations(id) on delete set null,
+	listing_id text,
+	profile_id text,
+	telegram_chat_id bigint not null,
+	feedback_message_id integer not null,
+	replied_message_id integer not null,
+	feedback_text text not null,
+	status text not null default 'open',
+	resolved_commit text,
+	resolution_note text,
+	created_at timestamptz not null default now(),
+	resolved_at timestamptz,
+	updated_at timestamptz not null default now(),
+	unique (telegram_chat_id, feedback_message_id)
+);
+
+create index if not exists listing_feedbacks_status_created_idx
+	on listing_feedbacks (status, created_at asc);
+
+create index if not exists listing_feedbacks_listing_idx
+	on listing_feedbacks (listing_id);
 `
