@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -155,26 +156,52 @@ func (r *Repository) SaveSearchProfile(ctx context.Context, profile domain.UserS
 	if err != nil {
 		return err
 	}
-	var searchAreaWKT any
+
+	var latestPreferencesJSON []byte
+	var latestSearchAreaWKT sql.NullString
+	latestErr := r.db.QueryRowContext(ctx, `
+		select preferences_json, ST_AsText(search_area)
+		from user_search_profiles
+		where user_id = $1
+		order by created_at desc, id desc
+		limit 1
+	`, profile.UserID).Scan(&latestPreferencesJSON, &latestSearchAreaWKT)
+
+	var searchAreaWKT string
 	if profile.SearchArea != nil && strings.TrimSpace(profile.SearchArea.WKT) != "" {
 		searchAreaWKT = profile.SearchArea.WKT
-	} else {
-		var latestWKT sql.NullString
-		err := r.db.QueryRowContext(ctx, `
-			select ST_AsText(search_area)
-			from user_search_profiles
-			where user_id = $1 and search_area is not null
-			order by created_at desc, id desc
-			limit 1
-		`, profile.UserID).Scan(&latestWKT)
-		if err == nil && latestWKT.Valid {
-			searchAreaWKT = latestWKT.String
+	} else if latestErr == nil && latestSearchAreaWKT.Valid {
+		searchAreaWKT = latestSearchAreaWKT.String
+	}
+
+	if latestErr == nil {
+		var latestPrefs domain.UserPreferences
+		if unmarshalErr := json.Unmarshal(latestPreferencesJSON, &latestPrefs); unmarshalErr == nil {
+			wktMatches := false
+			if !latestSearchAreaWKT.Valid && searchAreaWKT == "" {
+				wktMatches = true
+			} else if latestSearchAreaWKT.Valid && searchAreaWKT != "" {
+				wktMatches = latestSearchAreaWKT.String == searchAreaWKT
+			}
+
+			if wktMatches && reflect.DeepEqual(latestPrefs, profile.Preferences) {
+				// Duplicate detected. Skip inserting.
+				return nil
+			}
 		}
 	}
+
+	var searchAreaWKTVal any
+	if searchAreaWKT != "" {
+		searchAreaWKTVal = searchAreaWKT
+	} else {
+		searchAreaWKTVal = nil
+	}
+
 	_, err = r.db.ExecContext(ctx, `
 		insert into user_search_profiles (user_id, raw_query, normalized_query, preferences_json, search_area)
 		values ($1, $2, $3, $4, case when $5::text is null then null else ST_GeomFromText($5, 4326) end)
-	`, profile.UserID, profile.RawQuery, profile.NormalizedQuery, preferencesJSON, searchAreaWKT)
+	`, profile.UserID, profile.RawQuery, profile.NormalizedQuery, preferencesJSON, searchAreaWKTVal)
 	return err
 }
 

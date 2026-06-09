@@ -167,3 +167,12 @@ For expensive pipeline issues:
 - Basic and location rejections happen before photo download and OpenAI Vision.
 - Local Telegram photos are downloaded under `TELEGRAM_MEDIA_DIR`, then redacted from saved records as `local-photo-redacted`.
 - AI usage/cost is stored in `listing_evaluations` when Vision runs.
+
+## Testing Changes via Telegram MCP
+
+When modifying the preference parser, bot logic, or database storage:
+- Refer to the [telegram-bot-communication skill](.agents/skills/telegram-bot-communication/SKILL.md) for detailed instructions on bot commands, modes (MCP/Debug/Regular), and how to configure/run the bot for testing.
+- Agents MUST spawn a specialized testing subagent to verify the changes interactively using the Telegram MCP bot interface.
+- Run the bot locally and use a test subagent to send messages, verify formatting, check database updates, and ensure the conversational flow works.
+- If the test subagent detects any errors, incorrect behavior, or crash logs, the agent must treat it as a failed validation and return the code for rework.
+- Once the validation passes successfully, agents MUST immediately commit all production and configuration changes.
