@@ -970,9 +970,16 @@ func SendTextMessageID(ctx context.Context, token string, chatID int64, text str
 		return 0, err
 	}
 	message, err := api.SendMessage(ctx, &telegrambot.SendMessageParams{
-		ChatID: chatID,
-		Text:   text,
+		ChatID:    chatID,
+		Text:      text,
+		ParseMode: models.ParseModeMarkdown,
 	})
+	if err != nil && strings.Contains(err.Error(), "can't parse entities") {
+		message, err = api.SendMessage(ctx, &telegrambot.SendMessageParams{
+			ChatID: chatID,
+			Text:   text,
+		})
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -995,8 +1002,19 @@ func SendPhotoBytesMessageID(ctx context.Context, token string, chatID int64, fi
 			Filename: filename,
 			Data:     bytes.NewReader(data),
 		},
-		Caption: caption,
+		Caption:   caption,
+		ParseMode: models.ParseModeMarkdown,
 	})
+	if err != nil && strings.Contains(err.Error(), "can't parse entities") {
+		message, err = api.SendPhoto(ctx, &telegrambot.SendPhotoParams{
+			ChatID: chatID,
+			Photo: &models.InputFileUpload{
+				Filename: filename,
+				Data:     bytes.NewReader(data),
+			},
+			Caption: caption,
+		})
+	}
 	if err != nil {
 		return 0, err
 	}
