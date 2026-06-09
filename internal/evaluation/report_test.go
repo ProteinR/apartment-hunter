@@ -34,12 +34,12 @@ func TestBuildReportShowsCriteriaStatusesForRejectedListing(t *testing.T) {
 
 	for _, expected := range []string{
 		"Статус: не прошло базовые фильтры",
-		"Метраж: удовлетворено",
-		"Цена: не удовлетворено",
-		"Техника: пропущено",
-		"Локация: пропущено",
-		"Ремонт: пропущено",
-		"Вид из окна: пропущено",
+		"✅ Метраж (45.0 м2 при минимуме 40.0)",
+		"❌ Цена (700 при лимите 600)",
+		"➖ Локация (требование не задано)",
+		"➖ Техника (не анализировалась по фото из-за базового фильтра)",
+		"➖ Ремонт (не анализировался)",
+		"➖ Вид из окна (не анализировался)",
 		"Причины отказа:",
 	} {
 		if !strings.Contains(report, expected) {
@@ -70,7 +70,7 @@ func TestBuildReportDoesNotRejectAppliancesWhenBasicFilterSkippedPhotos(t *testi
 	}, prefs)
 
 	for _, expected := range []string{
-		"Техника: пропущено (не анализировалась по фото из-за базового фильтра)",
+		"➖ Техника (не анализировалась по фото из-за базового фильтра)",
 		"цена 700 выше максимального бюджета 600",
 		"метраж не найден",
 	} {
@@ -154,7 +154,7 @@ func TestBuildReportLocalizesLocationRejectionReason(t *testing.T) {
 	})
 
 	for _, expected := range []string{
-		"Локация: не удовлетворено (Batumi, Georgia; координаты 41.65110, 41.63670)",
+		"❌ Локация (Batumi, Georgia; координаты 41.65110, 41.63670)",
 		"локация объявления вне выбранной зоны поиска",
 	} {
 		if !strings.Contains(report, expected) {
@@ -190,9 +190,9 @@ func TestBuildReportUsesEmojiForChecklistDecisions(t *testing.T) {
 	}, prefs)
 
 	for _, expected := range []string{
-		"✅ Метраж: удовлетворено",
-		"❌ Цена: не удовлетворено",
-		"✅ Техника: удовлетворено",
+		"✅ Метраж (55.0 м2 при минимуме 50.0)",
+		"❌ Цена (650 при лимите 600)",
+		"✅ Техника (обязательная техника есть)",
 	} {
 		if !strings.Contains(report, expected) {
 			t.Fatalf("expected report to contain %q:\n%s", expected, report)

@@ -94,7 +94,7 @@ func priceChecklistItem(record domain.ListingEvaluationRecord, prefs domain.User
 }
 
 func locationChecklistItem(record domain.ListingEvaluationRecord, prefs domain.UserPreferences) checklistItem {
-	if len(prefs.Locations) == 0 && len(prefs.LocationPreferences) == 0 {
+	if len(prefs.Locations) == 0 && len(prefs.LocationPreferences) == 0 && !prefs.HasSearchArea {
 		return checklistItem{Label: "Локация", Mark: "➖", Note: " (требование не задано)"}
 	}
 	if record.Status == "rejected_basic" {

@@ -146,14 +146,57 @@ func (a App) telegram(args []string) error {
 	}
 	geometry := preferenceparser.PostGISGeometryBuilder{Resolver: newGoogleGeocoder()}
 	mapRenderer := googlemaps.StaticMapRenderer{APIKey: strings.TrimSpace(os.Getenv("APARTMENT_HUNTER_GOOGLE_MAPS_API_KEY"))}
-	fmt.Fprintf(a.Out, "Telegram bot started. Saving profiles to Postgres\n")
-
 	mcpAgent, err := mcpagent.FromEnv(store)
 	if err != nil {
 		fmt.Fprintf(a.Err, "Failed to initialize MCP agent: %v\n", err)
 	}
+	fmt.Fprintf(a.Out, "Telegram bot started. Saving profiles to Postgres\n")
 
-	err = telegram.New(token, outputDir, telegram.WithPreferencesParser(prefsParser), telegram.WithGeometryBuilder(geometry), telegram.WithSearchAreaMapRenderer(mapRenderer), telegram.WithProfileStore(store), telegram.WithMCPAgent(mcpAgent)).Run(ctx.Done())
+	var allowedChatIDs []int64
+	if allowedEnv := strings.TrimSpace(os.Getenv("TELEGRAM_ALLOWED_CHAT_IDS")); allowedEnv != "" {
+		for _, part := range strings.Split(allowedEnv, ",") {
+			part = strings.TrimSpace(part)
+			if id, err := strconv.ParseInt(part, 10, 64); err == nil {
+				allowedChatIDs = append(allowedChatIDs, id)
+			}
+		}
+	}
+	if profileID := strings.TrimSpace(os.Getenv("APARTMENT_HUNTER_PROFILE_ID")); profileID != "" {
+		if strings.HasPrefix(profileID, "telegram_") {
+			if id, err := strconv.ParseInt(strings.TrimPrefix(profileID, "telegram_"), 10, 64); err == nil {
+				exists := false
+				for _, existing := range allowedChatIDs {
+					if existing == id {
+						exists = true
+						break
+					}
+				}
+				if !exists {
+					allowedChatIDs = append(allowedChatIDs, id)
+				}
+			}
+		}
+	}
+
+	var allowedUsernames []string
+	if allowedUsernamesEnv := strings.TrimSpace(os.Getenv("TELEGRAM_ALLOWED_USERNAMES")); allowedUsernamesEnv != "" {
+		for _, part := range strings.Split(allowedUsernamesEnv, ",") {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				allowedUsernames = append(allowedUsernames, part)
+			}
+		}
+	}
+
+	err = telegram.New(token, outputDir,
+		telegram.WithPreferencesParser(prefsParser),
+		telegram.WithGeometryBuilder(geometry),
+		telegram.WithSearchAreaMapRenderer(mapRenderer),
+		telegram.WithProfileStore(store),
+		telegram.WithMCPAgent(mcpAgent),
+		telegram.WithAllowedChats(allowedChatIDs),
+		telegram.WithAllowedUsernames(allowedUsernames),
+	).Run(ctx.Done())
 	stop()
 	return err
 }

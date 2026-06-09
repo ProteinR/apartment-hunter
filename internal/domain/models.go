@@ -22,6 +22,7 @@ type UserPreferences struct {
 	LocationPreferences     []LocationPreference `json:"location_preferences"`
 	Weights                 PreferenceWeights    `json:"weights"`
 	UnresolvedLocationRules []string             `json:"unresolved_location_rules"`
+	HasSearchArea           bool                 `json:"has_search_area,omitempty"`
 }
 
 type LocationPreference struct {

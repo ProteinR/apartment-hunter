@@ -111,9 +111,24 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 		return "Профиль не найден", nil, nil
 	}
 
+	var searchAreaJSON any
+	if saStore, ok := a.store.(interface {
+		LatestSearchAreaGeoJSON(ctx context.Context, profileID string) (string, bool, error)
+	}); ok {
+		if geoJSON, ok, err := saStore.LatestSearchAreaGeoJSON(ctx, profileID); err == nil && ok {
+			var parsed any
+			if err := json.Unmarshal([]byte(geoJSON), &parsed); err == nil {
+				searchAreaJSON = parsed
+			} else {
+				searchAreaJSON = geoJSON
+			}
+		}
+	}
+
 	state, err := json.MarshalIndent(map[string]any{
 		"FilterDisabled": profiles.FilterDisabled(profile),
 		"Preferences":    profile.Preferences,
+		"SearchArea":     searchAreaJSON,
 	}, "", "  ")
 	if err != nil {
 		return "", nil, err
@@ -195,6 +210,15 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 	}
 
 	if len(respMsg.ToolCalls) == 0 {
+		now := time.Now()
+		profile.MCPHistory = append(profile.MCPHistory, profiles.MCPMessage{Role: "user", Content: text, CreatedAt: now})
+		profile.MCPHistory = append(profile.MCPHistory, profiles.MCPMessage{Role: "assistant", Content: respMsg.Content, CreatedAt: now})
+		if len(profile.MCPHistory) > 10 {
+			profile.MCPHistory = profile.MCPHistory[len(profile.MCPHistory)-10:]
+		}
+		if err := a.store.UpsertProfile(ctx, profile); err != nil {
+			return "", nil, fmt.Errorf("failed to save mcp history: %w", err)
+		}
 		return respMsg.Content, nil, nil
 	}
 

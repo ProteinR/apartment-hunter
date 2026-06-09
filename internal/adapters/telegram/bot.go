@@ -31,6 +31,8 @@ type Bot struct {
 	mapRenderer googlemaps.StaticMapRenderer
 	mcpAgent    *mcpagent.Agent
 	mu          sync.Mutex
+	allowedChats []int64
+	allowedUsernames []string
 }
 
 type ProfileStore interface {
@@ -86,6 +88,18 @@ func WithSearchAreaMapRenderer(renderer googlemaps.StaticMapRenderer) Option {
 	}
 }
 
+func WithAllowedChats(ids []int64) Option {
+	return func(bot *Bot) {
+		bot.allowedChats = ids
+	}
+}
+
+func WithAllowedUsernames(usernames []string) Option {
+	return func(bot *Bot) {
+		bot.allowedUsernames = usernames
+	}
+}
+
 func New(token, outputDir string, opts ...Option) *Bot {
 	bot := &Bot{
 		token:    token,
@@ -135,6 +149,30 @@ func (b *Bot) handleUpdate(ctx context.Context, api *telegrambot.Bot, update *mo
 	}
 
 	chatID := update.Message.Chat.ID
+	isAllowed := false
+	if len(b.allowedChats) == 0 && len(b.allowedUsernames) == 0 {
+		isAllowed = true
+	} else {
+		for _, id := range b.allowedChats {
+			if id == chatID {
+				isAllowed = true
+				break
+			}
+		}
+		if !isAllowed && update.Message.From != nil && update.Message.From.Username != "" {
+			senderUsername := strings.TrimPrefix(update.Message.From.Username, "@")
+			for _, username := range b.allowedUsernames {
+				cleaned := strings.TrimPrefix(username, "@")
+				if strings.EqualFold(cleaned, senderUsername) {
+					isAllowed = true
+					break
+				}
+			}
+		}
+	}
+	if !isAllowed {
+		return
+	}
 	if update.Message.ReplyToMessage != nil && b.getSession(chatID) == nil && !strings.HasPrefix(strings.TrimSpace(update.Message.Text), "/") {
 		reply, err := b.saveReplyFeedback(ctx, update.Message)
 		if err != nil {
@@ -229,10 +267,34 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 				return textResponse{Text: "Ошибка сохранения новых фильтров: " + err.Error()}, nil
 			}
 		}
-		return textResponse{
+		resp := textResponse{
 			Text:        reply,
 			ReplyMarkup: mainCommandKeyboard(),
-		}, nil
+		}
+		shouldAttachMap := prefsChanged != nil
+		if !shouldAttachMap {
+			lowerText := strings.ToLower(text)
+			lowerReply := strings.ToLower(reply)
+			shouldAttachMap = strings.Contains(lowerText, "фильтр") ||
+				strings.Contains(lowerText, "настройк") ||
+				strings.Contains(lowerText, "локаци") ||
+				strings.Contains(lowerReply, "фильтр") ||
+				strings.Contains(lowerReply, "настройк") ||
+				strings.Contains(lowerReply, "локаци")
+		}
+		if shouldAttachMap && len([]rune(reply)) <= 1024 {
+			if saStore, ok := b.store.(interface {
+				LatestSearchAreaGeoJSON(ctx context.Context, profileID string) (string, bool, error)
+			}); ok {
+				if geoJSON, ok, err := saStore.LatestSearchAreaGeoJSON(context.Background(), profile.ID); err == nil && ok {
+					if mapImage, err := b.mapRenderer.SearchAreaImage(context.Background(), geoJSON); err == nil && len(mapImage) > 0 {
+						resp.PhotoFilename = "search-area-map.png"
+						resp.PhotoBytes = mapImage
+					}
+				}
+			}
+		}
+		return resp, nil
 	}
 
 	session := b.getSession(chatID)

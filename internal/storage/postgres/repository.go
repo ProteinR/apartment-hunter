@@ -122,6 +122,17 @@ func (r *Repository) GetProfile(ctx context.Context, id string) (profiles.Profil
 		if err := json.Unmarshal(preferencesJSON, &prefs); err != nil {
 			return profiles.Profile{}, false, err
 		}
+		var hasArea bool
+		err := r.db.QueryRowContext(ctx, `
+			select search_area is not null
+			from user_search_profiles
+			where user_id = $1
+			order by created_at desc, id desc
+			limit 1
+		`, id).Scan(&hasArea)
+		if err == nil && hasArea {
+			prefs.HasSearchArea = true
+		}
 		profile.Preferences = &prefs
 	}
 	if len(mcpHistoryJSON) > 0 {
@@ -160,11 +171,11 @@ func (r *Repository) LatestSearchAreaGeoJSON(ctx context.Context, profileID stri
 	if profileID == "" {
 		return "", false, nil
 	}
-	var geoJSON string
+	var geoJSON sql.NullString
 	err := r.db.QueryRowContext(ctx, `
 		select ST_AsGeoJSON(search_area)
 		from user_search_profiles
-		where user_id = $1 and search_area is not null
+		where user_id = $1
 		order by created_at desc, id desc
 		limit 1
 	`, profileID).Scan(&geoJSON)
@@ -174,7 +185,7 @@ func (r *Repository) LatestSearchAreaGeoJSON(ctx context.Context, profileID stri
 		}
 		return "", false, err
 	}
-	return geoJSON, strings.TrimSpace(geoJSON) != "", nil
+	return geoJSON.String, geoJSON.Valid && strings.TrimSpace(geoJSON.String) != "", nil
 }
 
 func (r *Repository) MatchesListingLocation(ctx context.Context, profileID string, listing domain.ApartmentListing) (bool, string, error) {
@@ -185,13 +196,16 @@ func (r *Repository) MatchesListingLocation(ctx context.Context, profileID strin
 
 	var hasArea bool
 	err := r.db.QueryRowContext(ctx, `
-		select exists (
-			select 1
-			from user_search_profiles
-			where user_id = $1 and search_area is not null
-		)
+		select search_area is not null
+		from user_search_profiles
+		where user_id = $1
+		order by created_at desc, id desc
+		limit 1
 	`, profileID).Scan(&hasArea)
 	if err != nil {
+		if err == sql.ErrNoRows {
+			return true, "", nil
+		}
 		return false, "", err
 	}
 	if !hasArea {
@@ -206,7 +220,7 @@ func (r *Repository) MatchesListingLocation(ctx context.Context, profileID strin
 		with latest as (
 			select search_area
 			from user_search_profiles
-			where user_id = $1 and search_area is not null
+			where user_id = $1
 			order by created_at desc, id desc
 			limit 1
 		)

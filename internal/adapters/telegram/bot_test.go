@@ -451,11 +451,12 @@ func TestDebugModeCanBeToggled(t *testing.T) {
 	store := newFakeProfileStore()
 	bot := New("test-token", t.TempDir(), WithProfileStore(store))
 
+	// Default is true, so first toggle turns it off
 	reply, err := bot.HandleText(42, "/debug")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(reply, "Debug mode: on") {
+	if !strings.Contains(reply, "Debug mode: off") {
 		t.Fatalf("unexpected default debug reply %q", reply)
 	}
 
@@ -499,7 +500,7 @@ func TestRepliesIncludeCommandKeyboard(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected command keyboard, got %T", response.ReplyMarkup)
 	}
-	for _, expected := range []string{"/preferences", "/channels", "/subscribe", "/unsubscribe", "/debug", "/debug on", "/debug off"} {
+	for _, expected := range []string{"/preferences", "/channels", "/subscribe", "/unsubscribe", "/debug", "/mcp"} {
 		if !keyboardHasButton(keyboard, expected) {
 			t.Fatalf("expected keyboard to contain %q: %+v", expected, keyboard.Keyboard)
 		}
@@ -614,4 +615,94 @@ func floatPtr(value float64) *float64 {
 
 func stringPtr(value string) *string {
 	return &value
+}
+
+func TestAllowedChatsFilter(t *testing.T) {
+	store := newFakeProfileStore()
+	bot := New("test-token", t.TempDir(),
+		WithAllowedChats([]int64{123}),
+		WithAllowedUsernames([]string{"spy_bots"}),
+		WithProfileStore(store),
+	)
+
+	// 1. Chat ID not in allowed list, username not in allowed list
+	{
+		update := &models.Update{
+			Message: &models.Message{
+				Chat: models.Chat{ID: 456},
+				From: &models.User{Username: "other_user"},
+				Text: "/start",
+			},
+		}
+		// If it's not allowed, it should return early without panic.
+		bot.handleUpdate(context.Background(), nil, update)
+	}
+
+	// 2. Chat ID in allowed list
+	{
+		update := &models.Update{
+			Message: &models.Message{
+				Chat: models.Chat{ID: 123},
+				From: &models.User{Username: "other_user"},
+				Text: "/start",
+			},
+		}
+		if bot.getSession(123) != nil {
+			t.Fatal("session should be nil")
+		}
+
+		// Since we pass nil for api, the bot should proceed past the allowed filter and panic when trying to send a message.
+		var panicked bool
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					panicked = true
+				}
+			}()
+			bot.handleUpdate(context.Background(), nil, update)
+		}()
+
+		if !panicked {
+			t.Fatal("expected update processing to proceed and panic due to nil api, but it did not panic")
+		}
+
+		session := bot.getSession(123)
+		if session == nil || session.State != "awaiting_query" {
+			t.Fatalf("expected session to be created for allowed chat, got: %v", session)
+		}
+	}
+
+	// 3. Username in allowed list
+	{
+		update := &models.Update{
+			Message: &models.Message{
+				Chat: models.Chat{ID: 999},
+				From: &models.User{Username: "spy_bots"},
+				Text: "/start",
+			},
+		}
+		if bot.getSession(999) != nil {
+			t.Fatal("session should be nil")
+		}
+
+		// Since we pass nil for api, the bot should proceed past the allowed filter and panic when trying to send a message.
+		var panicked bool
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					panicked = true
+				}
+			}()
+			bot.handleUpdate(context.Background(), nil, update)
+		}()
+
+		if !panicked {
+			t.Fatal("expected update processing to proceed and panic due to nil api, but it did not panic")
+		}
+
+		session := bot.getSession(999)
+		if session == nil || session.State != "awaiting_query" {
+			t.Fatalf("expected session to be created for allowed username, got: %v", session)
+		}
+	}
 }
