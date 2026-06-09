@@ -175,7 +175,10 @@ When modifying the preference parser, bot logic, or database storage:
 - Refer to the [telegram-bot-communication skill](.agents/skills/telegram-bot-communication/SKILL.md) for detailed instructions on bot commands, modes (MCP/Debug/Regular), and how to configure/run the bot for testing.
 - Agents MUST verify the changes interactively using the Telegram MCP bot interface.
 - **CRITICAL:** Do NOT use browser tools or open web browsers (such as `browser_subagent` or navigating to `web.telegram.org` in a browser) for testing. Browser scraping is unreliable, and browser authentication is locked.
-- **HOW TO TEST:** Write and execute a programmatic Python script in the `scratch/` directory using the `telethon` library (using the virtual environment `/Users/dmemruk/development/go/telegram-mcp-app/.venv` and account session credentials from the local `.env` file). The script must act as a test user client, sending commands/messages to the bot (e.g., `@Apartmenthuner_bot`), sleeping to wait for responses, reading the responses, and verifying the conversational flow and formatting.
-- If the test script/subagent detects any errors, incorrect behavior, or crash logs, the agent must treat it as a failed validation and return the code for rework.
+- **HOW TO TEST:** Use the prepared Python script [scripts/test_bot.py](file:///Users/dmemruk/development/go/apartment-hunter/scripts/test_bot.py). Run it using the virtual environment `/Users/dmemruk/development/go/telegram-mcp-app/.venv` and account session credentials from the local `.env` file:
+  - To test a single command/message: `/Users/dmemruk/development/go/telegram-mcp-app/.venv/bin/python scripts/test_bot.py --message "/preferences"`
+  - To test the full conversational search setup flow: `/Users/dmemruk/development/go/telegram-mcp-app/.venv/bin/python scripts/test_bot.py --flow`
+  - If you need a custom interaction sequence, you can copy or modify this script in the `scratch/` directory.
+- If the test script detects any errors, incorrect behavior, or crash logs, the agent must treat it as a failed validation and return the code for rework.
 - Once the validation passes successfully, agents MUST immediately commit all production and configuration changes.
 
