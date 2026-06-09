@@ -93,12 +93,16 @@ create table if not exists profiles (
 	telegram_chat_id bigint unique,
 	preferences jsonb,
 	debug_mode boolean not null default true,
+	mcp_mode boolean not null default false,
+	filter_disabled boolean not null default false,
 	created_at timestamptz not null default now(),
 	updated_at timestamptz not null default now()
 );
 
 alter table profiles
-	add column if not exists debug_mode boolean not null default true;
+	add column if not exists debug_mode boolean not null default true,
+	add column if not exists mcp_mode boolean not null default false,
+	add column if not exists filter_disabled boolean not null default false;
 
 create table if not exists user_search_profiles (
 	id bigserial primary key,

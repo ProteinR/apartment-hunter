@@ -15,6 +15,15 @@ const preferencesStartMessage = `Опиши, какую квартиру ище�
 Например:
 Ищу квартиру в аренду в Батуми на долгий срок. Бюджет 400-650$, площадь от 50 м2. Обязательно нужна посудомойка и духовка. Хочу свежий светлый ремонт в нейтральных или пастельных тонах, без глянцевых потолков. Важно, чтобы окна не смотрели вплотную в соседний дом. Район: около парка 6 мая в радиусе 1 км, но не дальше улицы Пушкина, либо Новый бульвар до 1 км от моря.`
 
+const searchAreaEditInstructions = `Если зона на карте неправильная:
+1. Нажми "Изменить зону".
+2. Я пришлю текущий GeoJSON зоны.
+3. Открой geojson.io: https://geojson.io/#map=13/41.6461/41.6405
+4. Вставь полученный GeoJSON в правую панель JSON и поправь Polygon, Rectangle или Circle.
+5. Скопируй весь обновленный GeoJSON из правой панели JSON.
+6. Вернись в этот чат и отправь GeoJSON одним сообщением.
+7. Я обновлю карту, после этого нажми "Сохранить".`
+
 func buildPreferencesPreview(draft preferenceparser.Draft) string {
 	return buildPreferencesPreviewWithOptions(draft, true)
 }
@@ -28,7 +37,7 @@ func buildPreferencesMapCaption(draft preferenceparser.Draft) string {
 	if telegramCaptionFits(caption) {
 		return caption
 	}
-	return "Распознанные фильтры и область поиска на карте.\n\nСохранить?"
+	return "Распознанные фильтры и область поиска на карте.\n\nЕсли зона неверная, нажми \"Изменить зону\": я дам ссылку на редактор и приму GeoJSON обратно в этот чат.\n\nСохранить?"
 }
 
 func buildPreferencesPreviewWithOptions(draft preferenceparser.Draft, includeQuery bool) string {
@@ -70,7 +79,7 @@ func buildPreferencesPreviewWithOptions(draft preferenceparser.Draft, includeQue
 	appendList(&b, "Исключить", rejects, lang)
 	appendLocations(&b, prefs.LocationPreferences, lang)
 	appendList(&b, "Неразобранные гео-правила", prefs.UnresolvedLocationRules, lang)
-	fmt.Fprintf(&b, "\nКарту можно поправить вручную: %s\n", batumiGeoJSONEditorURL)
+	fmt.Fprintf(&b, "\n%s\n", searchAreaEditInstructions)
 	b.WriteString("\nСохранить?")
 	return b.String()
 }
@@ -300,8 +309,7 @@ func mainCommandKeyboard() models.ReplyMarkup {
 			},
 			{
 				{Text: "/debug"},
-				{Text: "/debug on"},
-				{Text: "/debug off"},
+				{Text: "/mcp"},
 			},
 		},
 		ResizeKeyboard: true,

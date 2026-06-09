@@ -125,9 +125,13 @@ func normalizePreferences(prefs domain.UserPreferences) domain.UserPreferences {
 	}
 	if prefs.LocationPreferences == nil {
 		prefs.LocationPreferences = []domain.LocationPreference{}
+	} else if len(prefs.LocationPreferences) > 1 {
+		prefs.LocationPreferences = prefs.LocationPreferences[:1]
 	}
 	if prefs.Locations == nil {
 		prefs.Locations = []domain.LocationPreference{}
+	} else if len(prefs.Locations) > 1 {
+		prefs.Locations = prefs.Locations[:1]
 	}
 	if prefs.UnresolvedLocationRules == nil {
 		prefs.UnresolvedLocationRules = []string{}

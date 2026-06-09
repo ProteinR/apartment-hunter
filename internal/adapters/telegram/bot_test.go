@@ -302,7 +302,7 @@ func TestAwaitingConfirmationAcceptsGeoJSONSearchArea(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(reply, "Карту можно поправить вручную") || !strings.Contains(reply, batumiGeoJSONEditorURL) {
+	if !strings.Contains(reply, "Если зона на карте неправильная") || !strings.Contains(reply, batumiGeoJSONEditorURL) {
 		t.Fatalf("expected updated preview with editor link, got %q", reply)
 	}
 
@@ -325,6 +325,65 @@ func TestAwaitingConfirmationAcceptsGeoJSONSearchArea(t *testing.T) {
 	}
 	if !strings.Contains(area.GeoJSON, `"MultiPolygon"`) {
 		t.Fatalf("unexpected GeoJSON %q", area.GeoJSON)
+	}
+}
+
+func TestEditAreaReturnsCurrentGeoJSON(t *testing.T) {
+	store := newFakeProfileStore()
+	parser := preferenceparser.Service{
+		Normalizer: fakeNormalizer{normalized: "Ищу квартиру около парка 6 мая"},
+		Extractor: fakeExtractor{prefs: domain.UserPreferences{
+			BudgetMax: intPtr(650),
+			LocationPreferences: []domain.LocationPreference{{
+				CenterName:   "6 May Park",
+				RadiusMeters: intPtr(1000),
+				RawText:      "около парка 6 мая",
+			}},
+		}},
+	}
+	bot := New(
+		"test-token",
+		t.TempDir(),
+		WithProfileStore(store),
+		WithPreferencesParser(parser),
+		WithGeometryBuilder(fakeGeometryBuilder{geoJSON: testSearchAreaGeoJSON}),
+	)
+
+	if _, err := bot.handleTextResponse(42, "/preferences"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bot.handleTextResponse(42, "Ищу квартиру до 650 около парка 6 мая"); err != nil {
+		t.Fatal(err)
+	}
+	response, err := bot.handleTextResponse(42, "Изменить зону")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(response.Text, "Текущий GeoJSON зоны") ||
+		!strings.Contains(response.Text, `"type": "MultiPolygon"`) ||
+		!strings.Contains(response.Text, batumiGeoJSONEditorURL) {
+		t.Fatalf("expected current GeoJSON edit instructions, got %q", response.Text)
+	}
+	if len(response.DocumentBytes) != 0 {
+		t.Fatalf("short GeoJSON should be sent as text, got document %q", response.DocumentFilename)
+	}
+}
+
+func TestEditAreaReturnsLargeCurrentGeoJSONAsDocument(t *testing.T) {
+	area := &domain.GeoSearchArea{
+		SRID:    4326,
+		GeoJSON: `{"type":"MultiPolygon","coordinates":[[[[41.620000,41.640000],[41.621000,41.640000],[41.621000,41.641000],[41.620000,41.641000],[41.620000,41.640000]]]]}`,
+	}
+	for len(area.GeoJSON) < 5000 {
+		area.GeoJSON = strings.Replace(area.GeoJSON, "]]]]}", "],[[[41.622000,41.642000],[41.623000,41.642000],[41.623000,41.643000],[41.622000,41.643000],[41.622000,41.642000]]]]}", 1)
+	}
+
+	response := searchAreaEditResponse(area)
+	if response.DocumentFilename != "search-area.geojson" || len(response.DocumentBytes) == 0 {
+		t.Fatalf("expected large GeoJSON document, got filename=%q bytes=%d", response.DocumentFilename, len(response.DocumentBytes))
+	}
+	if !strings.Contains(response.Text, "во вложении search-area.geojson") || !strings.Contains(response.Text, batumiGeoJSONEditorURL) {
+		t.Fatalf("unexpected document caption %q", response.Text)
 	}
 }
 

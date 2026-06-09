@@ -1,0 +1,308 @@
+package mcpagent
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+
+	"apartment-hunter/internal/domain"
+	"apartment-hunter/internal/profiles"
+)
+
+type ProfileStore interface {
+	GetProfile(ctx context.Context, id string) (profiles.Profile, bool, error)
+	UpsertProfile(ctx context.Context, profile profiles.Profile) error
+}
+
+type Agent struct {
+	apiKey string
+	model  string
+	apiURL string
+	client *http.Client
+	store  ProfileStore
+}
+
+func New(apiKey string, store ProfileStore) *Agent {
+	apiURL := strings.TrimSpace(os.Getenv("OPENAI_BASE_URL"))
+	if apiURL == "" {
+		apiURL = "https://api.openai.com/v1/chat/completions"
+	} else {
+		apiURL = strings.TrimRight(apiURL, "/") + "/chat/completions"
+	}
+	model := strings.TrimSpace(os.Getenv("OPENAI_PREFERENCES_MODEL"))
+	if model == "" {
+		model = "gpt-4o"
+	}
+	return &Agent{
+		apiKey: apiKey,
+		model:  model,
+		apiURL: apiURL,
+		client: &http.Client{Timeout: 60 * time.Second},
+		store:  store,
+	}
+}
+
+func FromEnv(store ProfileStore) (*Agent, error) {
+	apiKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+	if apiKey == "" {
+		return nil, fmt.Errorf("OPENAI_API_KEY is required for MCP agent")
+	}
+	return New(apiKey, store), nil
+}
+
+type chatRequest struct {
+	Model    string        `json:"model"`
+	Messages []chatMessage `json:"messages"`
+	Tools    []chatTool    `json:"tools,omitempty"`
+}
+
+type chatMessage struct {
+	Role       string    `json:"role"`
+	Content    string    `json:"content"`
+	Name       string    `json:"name,omitempty"`
+	ToolCallID string    `json:"tool_call_id,omitempty"`
+	ToolCalls  []toolCall `json:"tool_calls,omitempty"`
+}
+
+type chatTool struct {
+	Type     string       `json:"type"`
+	Function chatFunction `json:"function"`
+}
+
+type chatFunction struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Parameters  map[string]any `json:"parameters"`
+}
+
+type toolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text string) (string, error) {
+	profile, ok, err := a.store.GetProfile(ctx, profileID)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "Профиль не найден", nil
+	}
+
+	state, err := json.MarshalIndent(map[string]any{
+		"FilterDisabled": profiles.FilterDisabled(profile),
+		"Preferences":    profile.Preferences,
+	}, "", "  ")
+	if err != nil {
+		return "", err
+	}
+
+	systemPrompt := fmt.Sprintf(`Ты - интеллектуальный ассистент (MCP Agent), помогающий пользователю настраивать параметры поиска квартир. 
+Твоя задача — понимать текстовые команды пользователя и вызывать соответствующие инструменты (tools), чтобы изменять фильтры, добавлять стоп-слова, включать или выключать фильтрацию объявлений.
+Текущее состояние настроек:
+%s
+
+Отвечай кратко, подтверждая выполненные действия.`, string(state))
+
+	messages := []chatMessage{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: text},
+	}
+
+	tools := []chatTool{
+		{
+			Type: "function",
+			Function: chatFunction{
+				Name:        "set_filtering_status",
+				Description: "Включает или выключает общую фильтрацию объявлений. Если фильтрация выключена, все объявления будут проходить независимо от правил.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"enabled": map[string]any{
+							"type":        "boolean",
+							"description": "true - включить фильтрацию (обычный режим), false - выключить (пропускать все объявления)",
+						},
+					},
+					"required": []string{"enabled"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: chatFunction{
+				Name:        "add_stop_word",
+				Description: "Добавляет слово или фразу в список стоп-слов (RejectRules). Если в объявлении встретится это слово, оно будет отклонено.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"word": map[string]any{
+							"type": "string",
+						},
+					},
+					"required": []string{"word"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: chatFunction{
+				Name:        "update_budget",
+				Description: "Обновляет минимальный и максимальный бюджет в долларах.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"min_budget": map[string]any{"type": "integer"},
+						"max_budget": map[string]any{"type": "integer"},
+					},
+					"required": []string{"min_budget", "max_budget"},
+				},
+			},
+		},
+	}
+
+	reqBody := chatRequest{
+		Model:    a.model,
+		Messages: messages,
+		Tools:    tools,
+	}
+
+	respMsg, err := a.makeChatRequest(ctx, reqBody)
+	if err != nil {
+		return "", err
+	}
+
+	if len(respMsg.ToolCalls) == 0 {
+		return respMsg.Content, nil
+	}
+
+	// Apply tool calls
+	messages = append(messages, respMsg)
+	for _, tc := range respMsg.ToolCalls {
+		var toolResult string
+		switch tc.Function.Name {
+		case "set_filtering_status":
+			var args struct {
+				Enabled bool `json:"enabled"`
+			}
+			json.Unmarshal([]byte(tc.Function.Arguments), &args)
+			disabled := !args.Enabled
+			profile.FilterDisabled = &disabled
+			err = a.store.UpsertProfile(ctx, profile)
+			if err == nil {
+				toolResult = "success"
+			} else {
+				toolResult = err.Error()
+			}
+		case "add_stop_word":
+			var args struct {
+				Word string `json:"word"`
+			}
+			json.Unmarshal([]byte(tc.Function.Arguments), &args)
+			if profile.Preferences == nil {
+				profile.Preferences = &domain.UserPreferences{}
+			}
+			profile.Preferences.RejectRules = append(profile.Preferences.RejectRules, args.Word)
+			err = a.store.UpsertProfile(ctx, profile)
+			if err == nil {
+				toolResult = "success"
+			} else {
+				toolResult = err.Error()
+			}
+		case "update_budget":
+			var args struct {
+				MinBudget int `json:"min_budget"`
+				MaxBudget int `json:"max_budget"`
+			}
+			json.Unmarshal([]byte(tc.Function.Arguments), &args)
+			if profile.Preferences == nil {
+				profile.Preferences = &domain.UserPreferences{}
+			}
+			minB := args.MinBudget
+			maxB := args.MaxBudget
+			profile.Preferences.BudgetMin = &minB
+			profile.Preferences.BudgetMax = &maxB
+			err = a.store.UpsertProfile(ctx, profile)
+			if err == nil {
+				toolResult = "success"
+			} else {
+				toolResult = err.Error()
+			}
+		default:
+			toolResult = "unknown function"
+		}
+
+		messages = append(messages, chatMessage{
+			Role:       "tool",
+			ToolCallID: tc.ID,
+			Name:       tc.Function.Name,
+			Content:    toolResult,
+		})
+	}
+
+	// Final request to get summary
+	reqBody.Messages = messages
+	reqBody.Tools = nil
+
+	respMsg, err = a.makeChatRequest(ctx, reqBody)
+	if err != nil {
+		return "", err
+	}
+
+	return respMsg.Content, nil
+}
+
+func (a *Agent) makeChatRequest(ctx context.Context, reqBody chatRequest) (chatMessage, error) {
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return chatMessage{}, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.apiURL, bytes.NewReader(body))
+	if err != nil {
+		return chatMessage{}, err
+	}
+
+	req.Header.Set("Authorization", "Bearer "+a.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return chatMessage{}, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return chatMessage{}, err
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return chatMessage{}, fmt.Errorf("openai chat api status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Choices []struct {
+			Message chatMessage `json:"message"`
+		} `json:"choices"`
+	}
+
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return chatMessage{}, err
+	}
+
+	if len(result.Choices) == 0 {
+		return chatMessage{}, fmt.Errorf("empty choices in response")
+	}
+
+	return result.Choices[0].Message, nil
+}

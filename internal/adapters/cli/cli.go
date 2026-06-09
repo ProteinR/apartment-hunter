@@ -14,6 +14,7 @@ import (
 
 	"apartment-hunter/internal/adapters/geocodingmock"
 	"apartment-hunter/internal/adapters/googlemaps"
+	"apartment-hunter/internal/adapters/mcpagent"
 	"apartment-hunter/internal/adapters/openaipreferences"
 	"apartment-hunter/internal/adapters/openaivision"
 	"apartment-hunter/internal/adapters/telegram"
@@ -147,7 +148,12 @@ func (a App) telegram(args []string) error {
 	mapRenderer := googlemaps.StaticMapRenderer{APIKey: strings.TrimSpace(os.Getenv("APARTMENT_HUNTER_GOOGLE_MAPS_API_KEY"))}
 	fmt.Fprintf(a.Out, "Telegram bot started. Saving profiles to Postgres\n")
 
-	err = telegram.New(token, outputDir, telegram.WithPreferencesParser(prefsParser), telegram.WithGeometryBuilder(geometry), telegram.WithSearchAreaMapRenderer(mapRenderer), telegram.WithProfileStore(store)).Run(ctx.Done())
+	mcpAgent, err := mcpagent.FromEnv(store)
+	if err != nil {
+		fmt.Fprintf(a.Err, "Failed to initialize MCP agent: %v\n", err)
+	}
+
+	err = telegram.New(token, outputDir, telegram.WithPreferencesParser(prefsParser), telegram.WithGeometryBuilder(geometry), telegram.WithSearchAreaMapRenderer(mapRenderer), telegram.WithProfileStore(store), telegram.WithMCPAgent(mcpAgent)).Run(ctx.Done())
 	stop()
 	return err
 }
@@ -253,6 +259,7 @@ func (a App) telegramProcessWithContext(ctx context.Context, profileID string, r
 			return nil
 		}
 		processor.Prefs = *profile.Preferences
+		processor.FilterDisabled = profiles.FilterDisabled(profile)
 		source := domain.ListingSourceRef{
 			Source:         "telegram",
 			ProfileID:      profileID,

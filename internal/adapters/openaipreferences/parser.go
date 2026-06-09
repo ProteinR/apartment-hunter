@@ -169,7 +169,8 @@ Coordinates and Google place IDs must remain empty unless present in the input.
 Human-readable text fields must preserve the input language: name, center_name, boundary_street_name, raw_text, and unresolved_location_rules.
 If the input is Russian, keep those human-readable text fields in Russian and do not translate them into English.
 Use stable English slugs only for machine-readable enum/list fields such as required_amenities, preferred_amenities, interior_preferences.style, interior_preferences.reject, reject_rules, type, and boundary_rule.
-Ambiguous location phrases must be preserved in unresolved_location_rules in the original input language.`
+Ambiguous location phrases must be preserved in unresolved_location_rules in the original input language.
+CRITICAL: Only one location or city is allowed per user. If the input specifies multiple locations, choose the primary one and include only one object in the location_preferences array.`
 
 func normalizationSchema() map[string]any {
 	return map[string]any{

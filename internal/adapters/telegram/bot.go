@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"apartment-hunter/internal/adapters/googlemaps"
+	"apartment-hunter/internal/adapters/mcpagent"
 	"apartment-hunter/internal/domain"
 	"apartment-hunter/internal/preferenceparser"
 	"apartment-hunter/internal/profiles"
@@ -28,6 +29,7 @@ type Bot struct {
 	parser      preferenceparser.Service
 	geometry    preferenceparser.GeometryBuilder
 	mapRenderer googlemaps.StaticMapRenderer
+	mcpAgent    *mcpagent.Agent
 	mu          sync.Mutex
 }
 
@@ -57,6 +59,12 @@ func WithHTTPClient(client *http.Client) Option {
 func WithPreferencesParser(parser preferenceparser.Service) Option {
 	return func(bot *Bot) {
 		bot.parser = parser
+	}
+}
+
+func WithMCPAgent(agent *mcpagent.Agent) Option {
+	return func(bot *Bot) {
+		bot.mcpAgent = agent
 	}
 }
 
@@ -146,6 +154,9 @@ func (b *Bot) handleMessage(ctx context.Context, api *telegrambot.Bot, chatID in
 	if err != nil {
 		return err
 	}
+	if len(response.DocumentBytes) > 0 {
+		return sendDocumentBytesWithMarkup(ctx, api, chatID, response.DocumentFilename, response.DocumentBytes, response.Text, response.ReplyMarkup)
+	}
 	if len(response.PhotoBytes) > 0 {
 		return sendPhotoBytesWithMarkup(ctx, api, chatID, response.PhotoFilename, response.PhotoBytes, response.Text, response.ReplyMarkup)
 	}
@@ -158,10 +169,12 @@ func (b *Bot) handleText(chatID int64, text string) (string, error) {
 }
 
 type textResponse struct {
-	Text          string
-	ReplyMarkup   models.ReplyMarkup
-	PhotoFilename string
-	PhotoBytes    []byte
+	Text             string
+	ReplyMarkup      models.ReplyMarkup
+	PhotoFilename    string
+	PhotoBytes       []byte
+	DocumentFilename string
+	DocumentBytes    []byte
 }
 
 func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error) {
@@ -185,6 +198,10 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 		reply, err := b.debugMode(context.Background(), chatID, text)
 		return textResponse{Text: reply, ReplyMarkup: mainCommandKeyboard()}, err
 	}
+	if strings.HasPrefix(text, "/mcp") {
+		reply, err := b.mcpMode(context.Background(), chatID, text)
+		return textResponse{Text: reply, ReplyMarkup: mainCommandKeyboard()}, err
+	}
 	if looksLikeChannelSubscription(text) {
 		reply, err := b.subscribeChannelsFromText(context.Background(), chatID, text)
 		return textResponse{Text: reply, ReplyMarkup: mainCommandKeyboard()}, err
@@ -192,6 +209,21 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 	if text == "/start" || text == "/preferences" || text == "/restart" {
 		b.setSession(chatID, &preferenceSession{State: "awaiting_query"})
 		return textResponse{Text: preferencesStartMessage, ReplyMarkup: mainCommandKeyboard()}, nil
+	}
+
+	profile, ok, err := b.store.GetProfile(context.Background(), profiles.IDForTelegramChat(chatID))
+	if err == nil && ok && profiles.MCPModeEnabled(profile) {
+		if b.mcpAgent == nil {
+			return textResponse{Text: "Агент MCP не настроен."}, nil
+		}
+		reply, err := b.mcpAgent.ProcessCommand(context.Background(), profile.ID, text)
+		if err != nil {
+			return textResponse{Text: "Ошибка агента: " + err.Error()}, nil
+		}
+		return textResponse{
+			Text:        reply,
+			ReplyMarkup: mainCommandKeyboard(),
+		}, nil
 	}
 
 	session := b.getSession(chatID)
@@ -220,7 +252,7 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 		if looksLikeSearchAreaGeoJSON(text) {
 			area, err := searchAreaFromGeoJSON(text)
 			if err != nil {
-				return textResponse{Text: "Не смог разобрать GeoJSON: " + err.Error() + "\n\nОткрой карту Батуми, нарисуй Polygon/MultiPolygon, скопируй GeoJSON и пришли его сюда:\n" + batumiGeoJSONEditorURL, ReplyMarkup: confirmationKeyboard()}, nil
+				return textResponse{Text: "Не смог разобрать GeoJSON: " + err.Error() + "\n\n" + searchAreaEditInstructions, ReplyMarkup: confirmationKeyboard()}, nil
 			}
 			session.SearchArea = area
 			b.setSession(chatID, session)
@@ -239,12 +271,12 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 			b.setSession(chatID, session)
 			return textResponse{Text: "Отправь исправленный запрос одним сообщением.", ReplyMarkup: mainCommandKeyboard()}, nil
 		case "edit_area":
-			return textResponse{Text: "Открой карту Батуми, нарисуй или поправь зону, скопируй GeoJSON из правой панели и пришли его сюда.\n\n" + batumiGeoJSONEditorURL + "\n\nПоддерживаются GeoJSON Polygon, MultiPolygon, Feature и FeatureCollection.", ReplyMarkup: confirmationKeyboard()}, nil
+			return searchAreaEditResponse(session.SearchArea), nil
 		case "cancel":
 			b.deleteSession(chatID)
 			return textResponse{Text: "Настройка отменена.", ReplyMarkup: mainCommandKeyboard()}, nil
 		default:
-			return textResponse{Text: "Выбери Save, Edit, Edit area или Cancel. Можно также прислать GeoJSON с Polygon/MultiPolygon.", ReplyMarkup: confirmationKeyboard()}, nil
+			return textResponse{Text: "Выбери Save, Edit, Edit area или Cancel. Можно также отправить GeoJSON прямо сюда одним сообщением.", ReplyMarkup: confirmationKeyboard()}, nil
 		}
 	default:
 		b.deleteSession(chatID)
@@ -396,7 +428,25 @@ func (b *Bot) unsubscribeChannel(ctx context.Context, chatID int64, text string)
 func (b *Bot) debugMode(ctx context.Context, chatID int64, text string) (string, error) {
 	parts := strings.Fields(strings.TrimSpace(text))
 	profileID := profiles.IDForTelegramChat(chatID)
-	if len(parts) == 1 || strings.EqualFold(parts[1], "status") {
+	
+	if len(parts) == 1 {
+		profile, ok, err := b.store.GetProfile(ctx, profileID)
+		if err != nil {
+			return "", err
+		}
+		enabled := true
+		if ok {
+			enabled = !profiles.DebugModeEnabled(profile)
+		} else {
+			enabled = false // default is true, so toggle is false
+		}
+		if err := b.store.UpsertProfile(ctx, profiles.Profile{ID: profileID, TelegramChatID: chatID, DebugMode: &enabled}); err != nil {
+			return "", err
+		}
+		return debugModeStatusMessage(enabled), nil
+	}
+
+	if strings.EqualFold(parts[1], "status") {
 		profile, ok, err := b.store.GetProfile(ctx, profileID)
 		if err != nil {
 			return "", err
@@ -420,7 +470,54 @@ func (b *Bot) debugMode(ctx context.Context, chatID int64, text string) (string,
 		}
 		return debugModeStatusMessage(false), nil
 	default:
-		return "Использование: /debug, /debug on или /debug off", nil
+		return "Использование: /debug (переключение), /debug on или /debug off", nil
+	}
+}
+
+func (b *Bot) mcpMode(ctx context.Context, chatID int64, text string) (string, error) {
+	parts := strings.Fields(strings.TrimSpace(text))
+	profileID := profiles.IDForTelegramChat(chatID)
+	
+	if len(parts) == 1 {
+		profile, ok, err := b.store.GetProfile(ctx, profileID)
+		if err != nil {
+			return "", err
+		}
+		enabled := true
+		if ok {
+			enabled = !profiles.MCPModeEnabled(profile)
+		}
+		if err := b.store.UpsertProfile(ctx, profiles.Profile{ID: profileID, TelegramChatID: chatID, MCPMode: &enabled}); err != nil {
+			return "", err
+		}
+		return mcpModeStatusMessage(enabled), nil
+	}
+
+	if strings.EqualFold(parts[1], "status") {
+		profile, ok, err := b.store.GetProfile(ctx, profileID)
+		if err != nil {
+			return "", err
+		}
+		if !ok {
+			return "MCP mode: off", nil
+		}
+		return mcpModeStatusMessage(profiles.MCPModeEnabled(profile)), nil
+	}
+	switch strings.ToLower(parts[1]) {
+	case "on", "вкл", "enable", "enabled":
+		enabled := true
+		if err := b.store.UpsertProfile(ctx, profiles.Profile{ID: profileID, TelegramChatID: chatID, MCPMode: &enabled}); err != nil {
+			return "", err
+		}
+		return mcpModeStatusMessage(true), nil
+	case "off", "выкл", "disable", "disabled":
+		enabled := false
+		if err := b.store.UpsertProfile(ctx, profiles.Profile{ID: profileID, TelegramChatID: chatID, MCPMode: &enabled}); err != nil {
+			return "", err
+		}
+		return mcpModeStatusMessage(false), nil
+	default:
+		return "Использование: /mcp (переключение), /mcp on или /mcp off", nil
 	}
 }
 
@@ -455,6 +552,13 @@ func debugModeStatusMessage(enabled bool) string {
 		return "Debug mode: on\n\nЯ пересылаю отчеты по обработанным объявлениям: прошедшим, отклоненным, дубликатам или ошибкам. Сообщения со статусом «не объявление о квартире» в чат не отправляю. Выключить: /debug off"
 	}
 	return "Debug mode: off\n\nЯ пересылаю только объявления, которые прошли фильтры. Включить все отчеты: /debug on"
+}
+
+func mcpModeStatusMessage(enabled bool) string {
+	if enabled {
+		return "MCP mode: on\n\nТеперь я работаю в режиме гибкого агента. Напиши мне текстовую команду (например, 'Пришли мне GeoJSON зоны'), и я постараюсь ее выполнить."
+	}
+	return "MCP mode: off\n\nРежим агента выключен. Текстовые сообщения снова воспринимаются как фильтры для поиска квартиры."
 }
 
 func looksLikeChannelSubscription(text string) bool {
@@ -562,6 +666,28 @@ func (b *Bot) preferencesPreviewResponse(ctx context.Context, draft preferencepa
 	return response
 }
 
+func searchAreaEditResponse(area *domain.GeoSearchArea) textResponse {
+	if area == nil || strings.TrimSpace(area.GeoJSON) == "" {
+		return textResponse{
+			Text:        "Текущая зона пока не построена автоматически.\n\nОткрой geojson.io, нарисуй Polygon/MultiPolygon, скопируй весь GeoJSON из правой панели JSON и отправь его сюда одним сообщением.\n\n" + batumiGeoJSONEditorURL,
+			ReplyMarkup: confirmationKeyboard(),
+		}
+	}
+	geoJSON := prettyGeoJSON(area.GeoJSON)
+	header := "Текущий GeoJSON зоны:\n\n"
+	footer := "\n\nОткрой geojson.io, вставь этот JSON в правую панель JSON, поправь зону, затем скопируй весь обновленный GeoJSON и отправь его сюда одним сообщением.\n\n" + batumiGeoJSONEditorURL
+	text := header + "```json\n" + geoJSON + "\n```" + footer
+	if len([]rune(text)) <= 3900 {
+		return textResponse{Text: text, ReplyMarkup: confirmationKeyboard()}
+	}
+	return textResponse{
+		Text:             "Текущий GeoJSON зоны во вложении search-area.geojson.\n\nОткрой geojson.io, загрузи файл через Open > File или скопируй содержимое файла в правую панель JSON, поправь зону, затем отправь обновленный GeoJSON сюда одним сообщением.\n\n" + batumiGeoJSONEditorURL,
+		ReplyMarkup:      confirmationKeyboard(),
+		DocumentFilename: "search-area.geojson",
+		DocumentBytes:    []byte(geoJSON),
+	}
+}
+
 func (b *Bot) saveProfile(ctx context.Context, chatID int64, prefs domain.UserPreferences) error {
 	return b.store.UpsertProfile(ctx, profiles.Profile{
 		ID:             profiles.IDForTelegramChat(chatID),
@@ -629,6 +755,22 @@ func sendPhotoBytesWithMarkup(ctx context.Context, api *telegrambot.Bot, chatID 
 	_, err := api.SendPhoto(ctx, &telegrambot.SendPhotoParams{
 		ChatID: chatID,
 		Photo: &models.InputFileUpload{
+			Filename: filename,
+			Data:     bytes.NewReader(data),
+		},
+		Caption:     caption,
+		ReplyMarkup: markup,
+	})
+	return err
+}
+
+func sendDocumentBytesWithMarkup(ctx context.Context, api *telegrambot.Bot, chatID int64, filename string, data []byte, caption string, markup models.ReplyMarkup) error {
+	if strings.TrimSpace(filename) == "" {
+		filename = "document.txt"
+	}
+	_, err := api.SendDocument(ctx, &telegrambot.SendDocumentParams{
+		ChatID: chatID,
+		Document: &models.InputFileUpload{
 			Filename: filename,
 			Data:     bytes.NewReader(data),
 		},

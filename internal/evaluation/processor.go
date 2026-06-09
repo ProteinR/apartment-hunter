@@ -81,6 +81,7 @@ type Processor struct {
 	GeocodeLog   GeocodeLogger
 	PipelineLog  PipelineLogger
 	Location     LocationMatcher
+	FilterDisabled bool
 }
 
 type ListingGeocoder interface {
@@ -127,18 +128,20 @@ func (p Processor) ProcessMessage(ctx context.Context, source domain.ListingSour
 	}
 	p.logPipeline(ctx, pipelineEvent(started, source, listing, "non_listing_filter", "passed", ""))
 
-	basicReasons := scoring.BasicFilterReasons(listing, p.Prefs)
-	if len(basicReasons) > 0 {
-		record.Score = &domain.ListingScore{
-			PassedHardFilters: false,
-			RejectionReasons:  basicReasons,
-			ScoreTotal:        0,
-			ScoreBreakdown:    scoring.BasicScoreBreakdown(listing, p.Prefs),
-			ShortSummary:      listing.Title + " rejected: " + strings.Join(basicReasons, "; ") + ".",
+	if !p.FilterDisabled {
+		basicReasons := scoring.BasicFilterReasons(listing, p.Prefs)
+		if len(basicReasons) > 0 {
+			record.Score = &domain.ListingScore{
+				PassedHardFilters: false,
+				RejectionReasons:  basicReasons,
+				ScoreTotal:        0,
+				ScoreBreakdown:    scoring.BasicScoreBreakdown(listing, p.Prefs),
+				ShortSummary:      listing.Title + " rejected: " + strings.Join(basicReasons, "; ") + ".",
+			}
+			record.Status = "rejected_basic"
+			p.logPipeline(ctx, pipelineEvent(started, source, listing, "basic_filter", record.Status, strings.Join(basicReasons, "; ")))
+			return p.finish(ctx, started, record)
 		}
-		record.Status = "rejected_basic"
-		p.logPipeline(ctx, pipelineEvent(started, source, listing, "basic_filter", record.Status, strings.Join(basicReasons, "; ")))
-		return p.finish(ctx, started, record)
 	}
 	p.logPipeline(ctx, pipelineEvent(started, source, listing, "basic_filter", "passed", ""))
 
@@ -150,7 +153,7 @@ func (p Processor) ProcessMessage(ctx context.Context, source domain.ListingSour
 		p.logPipeline(ctx, pipelineEvent(started, source, listing, "geocoded", "resolved", listing.District))
 	}
 
-	if p.Location != nil {
+	if p.Location != nil && !p.FilterDisabled {
 		ok, reason, err := p.Location.MatchesListingLocation(ctx, source.ProfileID, listing)
 		if err != nil {
 			record.Status = "failed"
@@ -174,6 +177,8 @@ func (p Processor) ProcessMessage(ctx context.Context, source domain.ListingSour
 			return p.finish(ctx, started, record)
 		}
 		p.logPipeline(ctx, pipelineEvent(started, source, listing, "location_checked", "passed", ""))
+	} else if p.Location != nil {
+		p.logPipeline(ctx, pipelineEvent(started, source, listing, "location_checked", "passed_disabled", ""))
 	}
 
 	if p.PhotoLoader != nil && len(message.Photos) > 0 {
@@ -236,7 +241,7 @@ func (p Processor) ProcessMessage(ctx context.Context, source domain.ListingSour
 	record.Listing = listing
 	score := scoring.ScoreWithInsights(listing, p.Prefs, insights)
 	record.Score = &score
-	if score.PassedHardFilters {
+	if score.PassedHardFilters || p.FilterDisabled {
 		record.Status = "passed"
 	} else {
 		record.Status = "rejected_ai"

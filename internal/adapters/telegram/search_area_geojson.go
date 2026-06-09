@@ -53,6 +53,18 @@ func searchAreaFromGeoJSON(text string) (*domain.GeoSearchArea, error) {
 	}, nil
 }
 
+func prettyGeoJSON(text string) string {
+	var data any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(text)), &data); err != nil {
+		return strings.TrimSpace(text)
+	}
+	formatted, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return strings.TrimSpace(text)
+	}
+	return string(formatted)
+}
+
 func geoJSONMultiPolygonCoordinates(data []byte) ([][][][]float64, error) {
 	var typed struct {
 		Type string `json:"type"`

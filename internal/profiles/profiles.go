@@ -23,6 +23,8 @@ type Profile struct {
 	Preferences     *domain.UserPreferences `json:"preferences,omitempty"`
 	Channels        []ChannelSubscription   `json:"channels"`
 	DebugMode       *bool                   `json:"debug_mode,omitempty"`
+	MCPMode         *bool                   `json:"mcp_mode,omitempty"`
+	FilterDisabled  *bool                   `json:"filter_disabled,omitempty"`
 }
 
 type ChannelSubscription struct {
@@ -78,6 +80,12 @@ func (c *Config) Upsert(profile Profile) {
 			}
 			if profile.DebugMode != nil {
 				c.Profiles[i].DebugMode = profile.DebugMode
+			}
+			if profile.MCPMode != nil {
+				c.Profiles[i].MCPMode = profile.MCPMode
+			}
+			if profile.FilterDisabled != nil {
+				c.Profiles[i].FilterDisabled = profile.FilterDisabled
 			}
 			return
 		}
@@ -158,4 +166,18 @@ func DebugModeEnabled(profile Profile) bool {
 		return true
 	}
 	return *profile.DebugMode
+}
+
+func MCPModeEnabled(profile Profile) bool {
+	if profile.MCPMode == nil {
+		return false
+	}
+	return *profile.MCPMode
+}
+
+func FilterDisabled(profile Profile) bool {
+	if profile.FilterDisabled == nil {
+		return false
+	}
+	return *profile.FilterDisabled
 }
