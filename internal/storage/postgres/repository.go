@@ -158,6 +158,18 @@ func (r *Repository) SaveSearchProfile(ctx context.Context, profile domain.UserS
 	var searchAreaWKT any
 	if profile.SearchArea != nil && strings.TrimSpace(profile.SearchArea.WKT) != "" {
 		searchAreaWKT = profile.SearchArea.WKT
+	} else {
+		var latestWKT sql.NullString
+		err := r.db.QueryRowContext(ctx, `
+			select ST_AsText(search_area)
+			from user_search_profiles
+			where user_id = $1 and search_area is not null
+			order by created_at desc, id desc
+			limit 1
+		`, profile.UserID).Scan(&latestWKT)
+		if err == nil && latestWKT.Valid {
+			searchAreaWKT = latestWKT.String
+		}
 	}
 	_, err = r.db.ExecContext(ctx, `
 		insert into user_search_profiles (user_id, raw_query, normalized_query, preferences_json, search_area)
