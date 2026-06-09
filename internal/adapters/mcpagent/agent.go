@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -20,6 +21,11 @@ import (
 type ProfileStore interface {
 	GetProfile(ctx context.Context, id string) (profiles.Profile, bool, error)
 	UpsertProfile(ctx context.Context, profile profiles.Profile) error
+	SearchEvaluations(ctx context.Context, profileID string, filter domain.EvaluationSearchFilter) ([]domain.ListingEvaluationRecord, error)
+}
+
+type Geocoder interface {
+	Resolve(ctx context.Context, query string, maxDistanceMeters int) (domain.LocationPreference, error)
 }
 
 type Agent struct {
@@ -29,6 +35,7 @@ type Agent struct {
 	ttlHours int
 	client   *http.Client
 	store    ProfileStore
+	geocoder Geocoder
 }
 
 func New(apiKey string, store ProfileStore) *Agent {
@@ -68,6 +75,10 @@ func New(apiKey string, store ProfileStore) *Agent {
 		client:   &http.Client{Timeout: 60 * time.Second},
 		store:    store,
 	}
+}
+
+func (a *Agent) SetGeocoder(geocoder Geocoder) {
+	a.geocoder = geocoder
 }
 
 func FromEnv(store ProfileStore) (*Agent, error) {
@@ -115,13 +126,13 @@ type toolCall struct {
 	} `json:"function"`
 }
 
-func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text string) (string, *domain.UserPreferences, error) {
+func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text string) (string, *domain.UserPreferences, *domain.GeoSearchArea, error) {
 	profile, ok, err := a.store.GetProfile(ctx, profileID)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	if !ok {
-		return "Профиль не найден", nil, nil
+		return "Профиль не найден", nil, nil, nil
 	}
 
 	var searchAreaJSON any
@@ -144,7 +155,7 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 		"SearchArea":     searchAreaJSON,
 	}, "", "  ")
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	systemPrompt := fmt.Sprintf(`Ты - персональный ассистент по поиску квартир (MCP Agent). Твоя цель — помочь пользователю сформировать идеальные фильтры для поиска жилья.
@@ -153,6 +164,7 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 2. Обсуждать желаемый ремонт, район, бюджет, удобства и помогать сформулировать четкие критерии.
 3. Изменять фильтры с помощью инструмента update_preferences, НО только после того, как согласуешь изменения с пользователем, или если пользователь прямо попросил обновить фильтр.
 4. Включать/выключать фильтрацию с помощью set_filtering_status.
+5. Работать с географией: находить координаты по адресу (resolve_address), вычислять расстояние в метрах (calculate_distance) и обновлять зону поиска напрямую с помощью GeoJSON (update_search_area).
 
 Веди диалог живо, эмпатично и профессионально. Задавай уточняющие вопросы, если пожелания размыты (например, "хочу бабушкин вариант" -> предложи добавить "soviet" в reject_rules).
 
@@ -213,6 +225,93 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 				Parameters: openaipreferences.PreferencesSchema(),
 			},
 		},
+		{
+			Type: "function",
+			Function: chatFunction{
+				Name:        "resolve_address",
+				Description: "Находит географические координаты (latitude, longitude) и имя места для текстового адреса или названия объекта (например, 'Батуми, проспект Руставели 10').",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"address": map[string]any{
+							"type":        "string",
+							"description": "Адрес или название места",
+						},
+					},
+					"required": []string{"address"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: chatFunction{
+				Name:        "calculate_distance",
+				Description: "Вычисляет расстояние в метрах по прямой между двумя точками на Земле по их координатам.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"lat1": map[string]any{"type": "number", "description": "Широта первой точки"},
+						"lon1": map[string]any{"type": "number", "description": "Долгота первой точки"},
+						"lat2": map[string]any{"type": "number", "description": "Широта второй точки"},
+						"lon2": map[string]any{"type": "number", "description": "Долгота второй точки"},
+					},
+					"required": []string{"lat1", "lon1", "lat2", "lon2"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: chatFunction{
+				Name:        "update_search_area",
+				Description: "Устанавливает или обновляет полигон зоны поиска (search area) напрямую, используя предоставленный GeoJSON (Polygon или MultiPolygon). Используй это, если пользователь нарисовал зону или прислал валидный GeoJSON.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"geojson": map[string]any{
+							"type":        "string",
+							"description": "Валидная GeoJSON-строка с объектом Polygon или MultiPolygon",
+						},
+					},
+					"required": []string{"geojson"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: chatFunction{
+				Name:        "search_local_listings",
+				Description: "Ищет объявления по локальной истории (проверенным квартирам) по различным фильтрам: статус, текстовый поисковый запрос (включая описание, особенности ремонта, детали фото), диапазон цен и район/локация.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"status": map[string]any{
+							"type":        "string",
+							"description": "Фильтр по статусу (например: 'passed', 'rejected_ai', 'rejected_location', 'rejected_basic', 'duplicate'). Если не указан, ищутся все объявления.",
+						},
+						"query": map[string]any{
+							"type":        "string",
+							"description": "Поисковый запрос для текстового поиска по описанию, заголовку, району или деталям ремонта/дизайна (сравнивается с текстом объявления и отчетом).",
+						},
+						"min_price": map[string]any{
+							"type":        "integer",
+							"description": "Минимальная цена в USD.",
+						},
+						"max_price": map[string]any{
+							"type":        "integer",
+							"description": "Максимальная цена в USD.",
+						},
+						"location": map[string]any{
+							"type":        "string",
+							"description": "Название района или адрес для поиска по локации.",
+						},
+						"limit": map[string]any{
+							"type":        "integer",
+							"description": "Максимальное количество возвращаемых результатов (по умолчанию 10).",
+						},
+					},
+				},
+			},
+		},
 	}
 
 	reqBody := chatRequest{
@@ -223,7 +322,7 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 
 	respMsg, err := a.makeChatRequest(ctx, reqBody)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	if len(respMsg.ToolCalls) == 0 {
@@ -234,12 +333,13 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 			profile.MCPHistory = profile.MCPHistory[len(profile.MCPHistory)-50:]
 		}
 		if err := a.store.UpsertProfile(ctx, profile); err != nil {
-			return "", nil, fmt.Errorf("failed to save mcp history: %w", err)
+			return "", nil, nil, fmt.Errorf("failed to save mcp history: %w", err)
 		}
-		return respMsg.Content, nil, nil
+		return respMsg.Content, nil, nil, nil
 	}
 
 	var prefsChanged *domain.UserPreferences
+	var areaChanged *domain.GeoSearchArea
 
 	// Apply tool calls
 	messages = append(messages, respMsg)
@@ -274,6 +374,78 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 					toolResult = err.Error()
 				}
 			}
+		case "resolve_address":
+			var args struct {
+				Address string `json:"address"`
+			}
+			json.Unmarshal([]byte(tc.Function.Arguments), &args)
+			if a.geocoder == nil {
+				toolResult = "error: geocoder is not configured"
+			} else {
+				loc, err := a.geocoder.Resolve(ctx, args.Address, 0)
+				if err != nil {
+					toolResult = "error: " + err.Error()
+				} else if loc.Latitude == 0 && loc.Longitude == 0 {
+					toolResult = "error: address not found"
+				} else {
+					resBytes, _ := json.Marshal(map[string]any{
+						"name":      loc.Name,
+						"latitude":  loc.Latitude,
+						"longitude": loc.Longitude,
+					})
+					toolResult = string(resBytes)
+				}
+			}
+		case "calculate_distance":
+			var args struct {
+				Lat1 float64 `json:"lat1"`
+				Lon1 float64 `json:"lon1"`
+				Lat2 float64 `json:"lat2"`
+				Lon2 float64 `json:"lon2"`
+			}
+			json.Unmarshal([]byte(tc.Function.Arguments), &args)
+			dist := haversineDistance(args.Lat1, args.Lon1, args.Lat2, args.Lon2)
+			resBytes, _ := json.Marshal(map[string]any{
+				"distance_meters": int(dist),
+			})
+			toolResult = string(resBytes)
+		case "update_search_area":
+			var args struct {
+				GeoJSON string `json:"geojson"`
+			}
+			json.Unmarshal([]byte(tc.Function.Arguments), &args)
+			area, err := parseGeoJSONArea(args.GeoJSON)
+			if err != nil {
+				toolResult = "error: " + err.Error()
+			} else {
+				areaChanged = area
+				toolResult = "success"
+			}
+		case "search_local_listings":
+			var args struct {
+				Status   string `json:"status"`
+				Query    string `json:"query"`
+				MinPrice int    `json:"min_price"`
+				MaxPrice int    `json:"max_price"`
+				Location string `json:"location"`
+				Limit    int    `json:"limit"`
+			}
+			json.Unmarshal([]byte(tc.Function.Arguments), &args)
+			filter := domain.EvaluationSearchFilter{
+				Status:   args.Status,
+				Query:    args.Query,
+				MinPrice: args.MinPrice,
+				MaxPrice: args.MaxPrice,
+				Location: args.Location,
+				Limit:    args.Limit,
+			}
+			records, err := a.store.SearchEvaluations(ctx, profileID, filter)
+			if err != nil {
+				toolResult = "error: " + err.Error()
+			} else {
+				resBytes, _ := json.Marshal(records)
+				toolResult = string(resBytes)
+			}
 		default:
 			toolResult = "unknown function"
 		}
@@ -292,7 +464,7 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 
 	respMsg, err = a.makeChatRequest(ctx, reqBody)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	// Update sliding window history
@@ -304,19 +476,19 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 	}
 	
 	if err := a.store.UpsertProfile(ctx, profile); err != nil {
-		return "", nil, fmt.Errorf("failed to save mcp history: %w", err)
+		return "", nil, nil, fmt.Errorf("failed to save mcp history: %w", err)
 	}
 
-	return respMsg.Content, prefsChanged, nil
+	return respMsg.Content, prefsChanged, areaChanged, nil
 }
 
-func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing domain.ApartmentListing, feedbackText string) (string, *domain.UserPreferences, error) {
+func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing domain.ApartmentListing, feedbackText string) (string, *domain.UserPreferences, *domain.GeoSearchArea, error) {
 	profile, ok, err := a.store.GetProfile(ctx, profileID)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	if !ok {
-		return "Профиль не найден", nil, nil
+		return "Профиль не найден", nil, nil, nil
 	}
 
 	var searchAreaJSON any
@@ -339,7 +511,7 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 		"SearchArea":     searchAreaJSON,
 	}, "", "  ")
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	systemPrompt := fmt.Sprintf(`Ты - персональный ассистент по поиску квартир (MCP Agent). Пользователь ответил на отчет об объявлении о квартире с отзывом. Твоя цель — помочь пользователю уточнить фильтры, основываясь на его отзыве и данных объявления.
@@ -348,6 +520,7 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 2. Обсуждать желаемый ремонт, район, бюджет, удобства и помогать сформулировать четкие критерии.
 3. Изменять фильтры с помощью инструмента update_preferences, НО только после того, как согласуешь изменения с пользователем, или если пользователь прямо попросил обновить фильтр.
 4. Включать/выключать фильтрацию с помощью set_filtering_status.
+5. Работать с географией: находить координаты по адресу (resolve_address), вычислять расстояние в метрах (calculate_distance) и обновлять зону поиска напрямую с помощью GeoJSON (update_search_area).
 
 Веди диалог живо, эмпатично и профессионально. Задавай уточняющие вопросы, если пожелания размыты (например, "хочу бабушкин вариант" -> предложи добавить "soviet" в reject_rules).
 
@@ -410,6 +583,93 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 				Parameters: openaipreferences.PreferencesSchema(),
 			},
 		},
+		{
+			Type: "function",
+			Function: chatFunction{
+				Name:        "resolve_address",
+				Description: "Находит географические координаты (latitude, longitude) и имя места для текстового адреса или названия объекта (например, 'Батуми, проспект Руставели 10').",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"address": map[string]any{
+							"type":        "string",
+							"description": "Адрес или название места",
+						},
+					},
+					"required": []string{"address"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: chatFunction{
+				Name:        "calculate_distance",
+				Description: "Вычисляет расстояние в метрах по прямой между двумя точками на Земле по их координатам.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"lat1": map[string]any{"type": "number", "description": "Широта первой точки"},
+						"lon1": map[string]any{"type": "number", "description": "Долгота первой точки"},
+						"lat2": map[string]any{"type": "number", "description": "Широта второй точки"},
+						"lon2": map[string]any{"type": "number", "description": "Долгота второй точки"},
+					},
+					"required": []string{"lat1", "lon1", "lat2", "lon2"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: chatFunction{
+				Name:        "update_search_area",
+				Description: "Устанавливает или обновляет полигон зоны поиска (search area) напрямую, используя предоставленный GeoJSON (Polygon или MultiPolygon). Используй это, если пользователь нарисовал зону или прислал валидный GeoJSON.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"geojson": map[string]any{
+							"type":        "string",
+							"description": "Валидная GeoJSON-строка с объектом Polygon или MultiPolygon",
+						},
+					},
+					"required": []string{"geojson"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: chatFunction{
+				Name:        "search_local_listings",
+				Description: "Ищет объявления по локальной истории (проверенным квартирам) по различным фильтрам: статус, текстовый поисковый запрос (включая описание, особенности ремонта, детали фото), диапазон цен и район/локация.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"status": map[string]any{
+							"type":        "string",
+							"description": "Фильтр по статусу (например: 'passed', 'rejected_ai', 'rejected_location', 'rejected_basic', 'duplicate'). Если не указан, ищутся все объявления.",
+						},
+						"query": map[string]any{
+							"type":        "string",
+							"description": "Поисковый запрос для текстового поиска по описанию, заголовку, району или деталям ремонта/дизайна (сравнивается с текстом объявления и отчетом).",
+						},
+						"min_price": map[string]any{
+							"type":        "integer",
+							"description": "Минимальная цена в USD.",
+						},
+						"max_price": map[string]any{
+							"type":        "integer",
+							"description": "Максимальная цена в USD.",
+						},
+						"location": map[string]any{
+							"type":        "string",
+							"description": "Название района или адрес для поиска по локации.",
+						},
+						"limit": map[string]any{
+							"type":        "integer",
+							"description": "Максимальное количество возвращаемых результатов (по умолчанию 10).",
+						},
+					},
+				},
+			},
+		},
 	}
 
 	reqBody := chatRequest{
@@ -420,7 +680,7 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 
 	respMsg, err := a.makeChatRequest(ctx, reqBody)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	if len(respMsg.ToolCalls) == 0 {
@@ -431,12 +691,13 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 			profile.MCPHistory = profile.MCPHistory[len(profile.MCPHistory)-50:]
 		}
 		if err := a.store.UpsertProfile(ctx, profile); err != nil {
-			return "", nil, fmt.Errorf("failed to save mcp history: %w", err)
+			return "", nil, nil, fmt.Errorf("failed to save mcp history: %w", err)
 		}
-		return respMsg.Content, nil, nil
+		return respMsg.Content, nil, nil, nil
 	}
 
 	var prefsChanged *domain.UserPreferences
+	var areaChanged *domain.GeoSearchArea
 
 	// Apply tool calls
 	messages = append(messages, respMsg)
@@ -471,6 +732,78 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 					toolResult = err.Error()
 				}
 			}
+		case "resolve_address":
+			var args struct {
+				Address string `json:"address"`
+			}
+			json.Unmarshal([]byte(tc.Function.Arguments), &args)
+			if a.geocoder == nil {
+				toolResult = "error: geocoder is not configured"
+			} else {
+				loc, err := a.geocoder.Resolve(ctx, args.Address, 0)
+				if err != nil {
+					toolResult = "error: " + err.Error()
+				} else if loc.Latitude == 0 && loc.Longitude == 0 {
+					toolResult = "error: address not found"
+				} else {
+					resBytes, _ := json.Marshal(map[string]any{
+						"name":      loc.Name,
+						"latitude":  loc.Latitude,
+						"longitude": loc.Longitude,
+					})
+					toolResult = string(resBytes)
+				}
+			}
+		case "calculate_distance":
+			var args struct {
+				Lat1 float64 `json:"lat1"`
+				Lon1 float64 `json:"lon1"`
+				Lat2 float64 `json:"lat2"`
+				Lon2 float64 `json:"lon2"`
+			}
+			json.Unmarshal([]byte(tc.Function.Arguments), &args)
+			dist := haversineDistance(args.Lat1, args.Lon1, args.Lat2, args.Lon2)
+			resBytes, _ := json.Marshal(map[string]any{
+				"distance_meters": int(dist),
+			})
+			toolResult = string(resBytes)
+		case "update_search_area":
+			var args struct {
+				GeoJSON string `json:"geojson"`
+			}
+			json.Unmarshal([]byte(tc.Function.Arguments), &args)
+			area, err := parseGeoJSONArea(args.GeoJSON)
+			if err != nil {
+				toolResult = "error: " + err.Error()
+			} else {
+				areaChanged = area
+				toolResult = "success"
+			}
+		case "search_local_listings":
+			var args struct {
+				Status   string `json:"status"`
+				Query    string `json:"query"`
+				MinPrice int    `json:"min_price"`
+				MaxPrice int    `json:"max_price"`
+				Location string `json:"location"`
+				Limit    int    `json:"limit"`
+			}
+			json.Unmarshal([]byte(tc.Function.Arguments), &args)
+			filter := domain.EvaluationSearchFilter{
+				Status:   args.Status,
+				Query:    args.Query,
+				MinPrice: args.MinPrice,
+				MaxPrice: args.MaxPrice,
+				Location: args.Location,
+				Limit:    args.Limit,
+			}
+			records, err := a.store.SearchEvaluations(ctx, profileID, filter)
+			if err != nil {
+				toolResult = "error: " + err.Error()
+			} else {
+				resBytes, _ := json.Marshal(records)
+				toolResult = string(resBytes)
+			}
 		default:
 			toolResult = "unknown function"
 		}
@@ -489,7 +822,7 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 
 	respMsg, err = a.makeChatRequest(ctx, reqBody)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	// Update sliding window history
@@ -501,10 +834,175 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 	}
 	
 	if err := a.store.UpsertProfile(ctx, profile); err != nil {
-		return "", nil, fmt.Errorf("failed to save mcp history: %w", err)
+		return "", nil, nil, fmt.Errorf("failed to save mcp history: %w", err)
 	}
 
-	return respMsg.Content, prefsChanged, nil
+	return respMsg.Content, prefsChanged, areaChanged, nil
+}
+
+func haversineDistance(lat1, lon1, lat2, lon2 float64) float64 {
+	const earthRadius = 6371000.0 // meters
+	dLat := (lat2 - lat1) * math.Pi / 180.0
+	dLon := (lon2 - lon1) * math.Pi / 180.0
+	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
+		math.Cos(lat1*math.Pi/180.0)*math.Cos(lat2*math.Pi/180.0)*
+			math.Sin(dLon/2)*math.Sin(dLon/2)
+	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+	return earthRadius * c
+}
+
+type geoJSONGeometry struct {
+	Type        string          `json:"type"`
+	Coordinates json.RawMessage `json:"coordinates,omitempty"`
+}
+
+type geoJSONFeature struct {
+	Type     string          `json:"type"`
+	Geometry json.RawMessage `json:"geometry"`
+}
+
+type geoJSONFeatureCollection struct {
+	Type     string           `json:"type"`
+	Features []geoJSONFeature `json:"features"`
+}
+
+func parseGeoJSONArea(text string) (*domain.GeoSearchArea, error) {
+	polygons, err := geoJSONMultiPolygonCoordinates([]byte(strings.TrimSpace(text)))
+	if err != nil {
+		return nil, err
+	}
+	if len(polygons) == 0 {
+		return nil, fmt.Errorf("GeoJSON does not contain Polygon or MultiPolygon")
+	}
+	normalized, err := json.Marshal(map[string]any{
+		"type":        "MultiPolygon",
+		"coordinates": polygons,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &domain.GeoSearchArea{
+		WKT:     multiPolygonCoordinatesWKT(polygons),
+		GeoJSON: string(normalized),
+		SRID:    4326,
+	}, nil
+}
+
+func geoJSONMultiPolygonCoordinates(data []byte) ([][][][]float64, error) {
+	var typed struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(data, &typed); err != nil {
+		return nil, fmt.Errorf("failed to parse GeoJSON type: %w", err)
+	}
+	switch strings.ToLower(strings.TrimSpace(typed.Type)) {
+	case "featurecollection":
+		var collection geoJSONFeatureCollection
+		if err := json.Unmarshal(data, &collection); err != nil {
+			return nil, fmt.Errorf("failed to parse FeatureCollection: %w", err)
+		}
+		var polygons [][][][]float64
+		for _, feature := range collection.Features {
+			if len(feature.Geometry) == 0 || string(feature.Geometry) == "null" {
+				continue
+			}
+			featurePolygons, err := geoJSONMultiPolygonCoordinates(feature.Geometry)
+			if err != nil {
+				return nil, err
+			}
+			polygons = append(polygons, featurePolygons...)
+		}
+		return validateMultiPolygonCoordinates(polygons)
+	case "feature":
+		var feature geoJSONFeature
+		if err := json.Unmarshal(data, &feature); err != nil {
+			return nil, fmt.Errorf("failed to parse Feature: %w", err)
+		}
+		if len(feature.Geometry) == 0 || string(feature.Geometry) == "null" {
+			return nil, fmt.Errorf("Feature is missing geometry")
+		}
+		return geoJSONMultiPolygonCoordinates(feature.Geometry)
+	case "polygon":
+		var geometry geoJSONGeometry
+		if err := json.Unmarshal(data, &geometry); err != nil {
+			return nil, fmt.Errorf("failed to parse Polygon: %w", err)
+		}
+		var polygon [][][]float64
+		if err := json.Unmarshal(geometry.Coordinates, &polygon); err != nil {
+			return nil, fmt.Errorf("failed to parse Polygon coordinates: %w", err)
+		}
+		return validateMultiPolygonCoordinates([][][][]float64{polygon})
+	case "multipolygon":
+		var geometry geoJSONGeometry
+		if err := json.Unmarshal(data, &geometry); err != nil {
+			return nil, fmt.Errorf("failed to parse MultiPolygon: %w", err)
+		}
+		var polygons [][][][]float64
+		if err := json.Unmarshal(geometry.Coordinates, &polygons); err != nil {
+			return nil, fmt.Errorf("failed to parse MultiPolygon coordinates: %w", err)
+		}
+		return validateMultiPolygonCoordinates(polygons)
+	default:
+		return nil, fmt.Errorf("only GeoJSON Polygon, MultiPolygon, Feature, and FeatureCollection are supported")
+	}
+}
+
+func validateMultiPolygonCoordinates(polygons [][][][]float64) ([][][][]float64, error) {
+	for i := range polygons {
+		if len(polygons[i]) == 0 {
+			return nil, fmt.Errorf("polygon %d has no rings", i+1)
+		}
+		for j := range polygons[i] {
+			ring := polygons[i][j]
+			if len(ring) < 4 {
+				return nil, fmt.Errorf("polygon %d ring %d has fewer than 4 points", i+1, j+1)
+			}
+			for k, coord := range ring {
+				if len(coord) < 2 {
+					return nil, fmt.Errorf("polygon %d ring %d point %d has fewer than 2 coordinates", i+1, j+1, k+1)
+				}
+				lng, lat := coord[0], coord[1]
+				if math.IsNaN(lng) || math.IsInf(lng, 0) || math.IsNaN(lat) || math.IsInf(lat, 0) {
+					return nil, fmt.Errorf("polygon %d ring %d point %d has non-numeric coordinate", i+1, j+1, k+1)
+				}
+				if lng < -180 || lng > 180 || lat < -90 || lat > 90 {
+					return nil, fmt.Errorf("polygon %d ring %d point %d is out of range", i+1, j+1, k+1)
+				}
+				polygons[i][j][k] = []float64{lng, lat}
+			}
+			if len(ring[0]) >= 2 && len(ring[len(ring)-1]) >= 2 && (ring[0][0] != ring[len(ring)-1][0] || ring[0][1] != ring[len(ring)-1][1]) {
+				polygons[i][j] = append(polygons[i][j], []float64{ring[0][0], ring[0][1]})
+			}
+		}
+	}
+	return polygons, nil
+}
+
+func multiPolygonCoordinatesWKT(polygons [][][][]float64) string {
+	var b strings.Builder
+	b.WriteString("MULTIPOLYGON(")
+	for i, polygon := range polygons {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString("(")
+		for j, ring := range polygon {
+			if j > 0 {
+				b.WriteString(",")
+			}
+			b.WriteString("(")
+			for k, coord := range ring {
+				if k > 0 {
+					b.WriteString(",")
+				}
+				fmt.Fprintf(&b, "%.8f %.8f", coord[0], coord[1])
+			}
+			b.WriteString(")")
+		}
+		b.WriteString(")")
+	}
+	b.WriteString(")")
+	return b.String()
 }
 
 func (a *Agent) makeChatRequest(ctx context.Context, reqBody chatRequest) (chatMessage, error) {

@@ -276,16 +276,18 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 		if b.mcpAgent == nil {
 			return textResponse{Text: "Агент MCP не настроен."}, nil
 		}
-		reply, prefsChanged, err := b.mcpAgent.ProcessCommand(context.Background(), profile.ID, text)
+		reply, prefsChanged, areaChanged, err := b.mcpAgent.ProcessCommand(context.Background(), profile.ID, text)
 		if err != nil {
 			return textResponse{Text: "Ошибка агента: " + err.Error()}, nil
 		}
-		if prefsChanged != nil {
-			// Trigger geometry rebuild and history save
-			draft := preferenceparser.Draft{
-				Preferences: *prefsChanged,
+		if prefsChanged != nil || areaChanged != nil {
+			var draft preferenceparser.Draft
+			if prefsChanged != nil {
+				draft.Preferences = *prefsChanged
+			} else if profile.Preferences != nil {
+				draft.Preferences = *profile.Preferences
 			}
-			if err := b.saveDraft(context.Background(), chatID, draft, nil); err != nil {
+			if err := b.saveDraft(context.Background(), chatID, draft, areaChanged); err != nil {
 				return textResponse{Text: "Ошибка сохранения новых фильтров: " + err.Error()}, nil
 			}
 		}
@@ -645,15 +647,18 @@ func (b *Bot) saveReplyFeedback(ctx context.Context, message *models.Message) (s
 
 	profile, profileOk, profileErr := b.store.GetProfile(ctx, profiles.IDForTelegramChat(message.Chat.ID))
 	if profileErr == nil && profileOk && profiles.MCPModeEnabled(profile) && b.mcpAgent != nil {
-		reply, prefsChanged, agentErr := b.mcpAgent.ProcessFeedback(ctx, profile.ID, *listing, text)
+		reply, prefsChanged, areaChanged, agentErr := b.mcpAgent.ProcessFeedback(ctx, profile.ID, *listing, text)
 		if agentErr != nil {
 			return "Отзыв сохранен, но ошибка агента: " + agentErr.Error(), nil
 		}
-		if prefsChanged != nil {
-			draft := preferenceparser.Draft{
-				Preferences: *prefsChanged,
+		if prefsChanged != nil || areaChanged != nil {
+			var draft preferenceparser.Draft
+			if prefsChanged != nil {
+				draft.Preferences = *prefsChanged
+			} else if profile.Preferences != nil {
+				draft.Preferences = *profile.Preferences
 			}
-			if draftErr := b.saveDraft(ctx, message.Chat.ID, draft, nil); draftErr != nil {
+			if draftErr := b.saveDraft(ctx, message.Chat.ID, draft, areaChanged); draftErr != nil {
 				return "Отзыв сохранен, но ошибка применения фильтров: " + draftErr.Error(), nil
 			}
 		}

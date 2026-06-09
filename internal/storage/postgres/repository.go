@@ -731,6 +731,117 @@ func usageFloat(usage *domain.AIUsage, getter func(domain.AIUsage) float64) any 
 	return getter(*usage)
 }
 
+func (r *Repository) SearchEvaluations(ctx context.Context, profileID string, filter domain.EvaluationSearchFilter) ([]domain.ListingEvaluationRecord, error) {
+	queryParts := []string{`
+		select listing, source, score, insights, ai_usage, duplicate, coalesce(report, ''), status, coalesce(failure_reason, '')
+		from listing_evaluations
+		where profile_id = $1
+	`}
+	args := []any{profileID}
+
+	if filter.Status != "" {
+		args = append(args, filter.Status)
+		queryParts = append(queryParts, fmt.Sprintf("and status = $%d", len(args)))
+	}
+
+	if filter.MinPrice > 0 {
+		args = append(args, filter.MinPrice)
+		queryParts = append(queryParts, fmt.Sprintf("and (listing->>'price')::integer >= $%d", len(args)))
+	}
+
+	if filter.MaxPrice > 0 {
+		args = append(args, filter.MaxPrice)
+		queryParts = append(queryParts, fmt.Sprintf("and (listing->>'price')::integer <= $%d", len(args)))
+	}
+
+	if filter.Location != "" {
+		args = append(args, "%"+strings.ToLower(filter.Location)+"%")
+		queryParts = append(queryParts, fmt.Sprintf("and (lower(listing->>'district') ilike $%d or lower(listing->>'title') ilike $%d or lower(listing->>'description') ilike $%d)", len(args), len(args), len(args)))
+	}
+
+	if filter.Query != "" {
+		args = append(args, "%"+strings.ToLower(filter.Query)+"%")
+		queryParts = append(queryParts, fmt.Sprintf("and (lower(listing->>'title') ilike $%d or lower(listing->>'description') ilike $%d or lower(coalesce(report, '')) ilike $%d or lower(coalesce(failure_reason, '')) ilike $%d or lower(coalesce(insights::text, '')) ilike $%d)", len(args), len(args), len(args), len(args), len(args)))
+	}
+
+	queryParts = append(queryParts, "order by created_at desc")
+
+	limit := 10
+	if filter.Limit > 0 {
+		limit = filter.Limit
+	}
+	args = append(args, limit)
+	queryParts = append(queryParts, fmt.Sprintf("limit $%d", len(args)))
+
+	query := strings.Join(queryParts, "\n")
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []domain.ListingEvaluationRecord
+	for rows.Next() {
+		var record domain.ListingEvaluationRecord
+		var listingJSON []byte
+		var sourceJSON []byte
+		var scoreJSON []byte
+		var insightsJSON []byte
+		var aiUsageJSON []byte
+		var duplicateJSON []byte
+
+		err := rows.Scan(
+			&listingJSON,
+			&sourceJSON,
+			&scoreJSON,
+			&insightsJSON,
+			&aiUsageJSON,
+			&duplicateJSON,
+			&record.Report,
+			&record.Status,
+			&record.FailureReason,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		if err := json.Unmarshal(listingJSON, &record.Listing); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal listing: %w", err)
+		}
+		if err := json.Unmarshal(sourceJSON, &record.Source); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal source: %w", err)
+		}
+		if len(scoreJSON) > 0 {
+			var score domain.ListingScore
+			if err := json.Unmarshal(scoreJSON, &score); err == nil {
+				record.Score = &score
+			}
+		}
+		if len(insightsJSON) > 0 {
+			var insights domain.ListingInsights
+			if err := json.Unmarshal(insightsJSON, &insights); err == nil {
+				record.Insights = &insights
+			}
+		}
+		if len(aiUsageJSON) > 0 {
+			var aiUsage domain.AIUsage
+			if err := json.Unmarshal(aiUsageJSON, &aiUsage); err == nil {
+				record.AIUsage = &aiUsage
+			}
+		}
+		if len(duplicateJSON) > 0 {
+			var duplicate any
+			if err := json.Unmarshal(duplicateJSON, &duplicate); err == nil {
+				record.Duplicate = duplicate
+			}
+		}
+
+		records = append(records, record)
+	}
+
+	return records, rows.Err()
+}
+
 func FormatDSN(host, port, user, password, dbname string) string {
 	return fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable", host, port, user, password, dbname)
 }

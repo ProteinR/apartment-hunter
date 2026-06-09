@@ -196,3 +196,12 @@ type ListingFeedback struct {
 	ResolvedCommit    string `json:"resolved_commit,omitempty"`
 	ResolutionNote    string `json:"resolution_note,omitempty"`
 }
+
+type EvaluationSearchFilter struct {
+	Status   string
+	Query    string
+	MinPrice int
+	MaxPrice int
+	Location string
+	Limit    int
+}
