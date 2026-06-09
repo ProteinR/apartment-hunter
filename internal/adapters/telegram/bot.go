@@ -216,9 +216,18 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 		if b.mcpAgent == nil {
 			return textResponse{Text: "Агент MCP не настроен."}, nil
 		}
-		reply, err := b.mcpAgent.ProcessCommand(context.Background(), profile.ID, text)
+		reply, prefsChanged, err := b.mcpAgent.ProcessCommand(context.Background(), profile.ID, text)
 		if err != nil {
 			return textResponse{Text: "Ошибка агента: " + err.Error()}, nil
+		}
+		if prefsChanged != nil {
+			// Trigger geometry rebuild and history save
+			draft := preferenceparser.Draft{
+				Preferences: *prefsChanged,
+			}
+			if err := b.saveDraft(context.Background(), chatID, draft, nil); err != nil {
+				return textResponse{Text: "Ошибка сохранения новых фильтров: " + err.Error()}, nil
+			}
 		}
 		return textResponse{
 			Text:        reply,

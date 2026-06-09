@@ -94,7 +94,7 @@ func (p *Parser) Normalize(ctx context.Context, input string) (string, error) {
 
 func (p *Parser) Extract(ctx context.Context, normalizedInput string) (*domain.UserPreferences, error) {
 	var out domain.UserPreferences
-	if err := p.call(ctx, extractionInstructions, normalizedInput, "user_preferences", preferencesSchema(), &out); err != nil {
+	if err := p.call(ctx, extractionInstructions, normalizedInput, "user_preferences", PreferencesSchema(), &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -183,7 +183,7 @@ func normalizationSchema() map[string]any {
 	}
 }
 
-func preferencesSchema() map[string]any {
+func PreferencesSchema() map[string]any {
 	locationPreference := map[string]any{
 		"type":                 "object",
 		"additionalProperties": false,

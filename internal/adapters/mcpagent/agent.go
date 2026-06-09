@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"apartment-hunter/internal/adapters/openaipreferences"
 	"apartment-hunter/internal/domain"
 	"apartment-hunter/internal/profiles"
 )
@@ -90,13 +91,13 @@ type toolCall struct {
 	} `json:"function"`
 }
 
-func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text string) (string, error) {
+func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text string) (string, *domain.UserPreferences, error) {
 	profile, ok, err := a.store.GetProfile(ctx, profileID)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if !ok {
-		return "Профиль не найден", nil
+		return "Профиль не найден", nil, nil
 	}
 
 	state, err := json.MarshalIndent(map[string]any{
@@ -104,15 +105,22 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 		"Preferences":    profile.Preferences,
 	}, "", "  ")
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 
-	systemPrompt := fmt.Sprintf(`Ты - интеллектуальный ассистент (MCP Agent), помогающий пользователю настраивать параметры поиска квартир. 
-Твоя задача — понимать текстовые команды пользователя и вызывать соответствующие инструменты (tools), чтобы изменять фильтры, добавлять стоп-слова, включать или выключать фильтрацию объявлений.
+	systemPrompt := fmt.Sprintf(`Ты - персональный ассистент по поиску квартир (MCP Agent). Твоя цель — помочь пользователю сформировать идеальные фильтры для поиска жилья.
+Ты можешь:
+1. Рассказывать пользователю, какие у него сейчас стоят настройки и как ты видишь его идеальную квартиру.
+2. Обсуждать желаемый ремонт, район, бюджет, удобства и помогать сформулировать четкие критерии.
+3. Изменять фильтры с помощью инструмента update_preferences, НО только после того, как согласуешь изменения с пользователем, или если пользователь прямо попросил обновить фильтр.
+4. Включать/выключать фильтрацию с помощью set_filtering_status.
+
+Веди диалог живо, эмпатично и профессионально. Задавай уточняющие вопросы, если пожелания размыты (например, "хочу бабушкин вариант" -> предложи добавить "soviet" в reject_rules).
+
 Текущее состояние настроек:
 %s
 
-Отвечай кратко, подтверждая выполненные действия.`, string(state))
+Отвечай в дружелюбном тоне.`, string(state))
 
 	messages := []chatMessage{
 		{Role: "system", Content: systemPrompt},
@@ -140,32 +148,9 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 		{
 			Type: "function",
 			Function: chatFunction{
-				Name:        "add_stop_word",
-				Description: "Добавляет слово или фразу в список стоп-слов (RejectRules). Если в объявлении встретится это слово, оно будет отклонено.",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"word": map[string]any{
-							"type": "string",
-						},
-					},
-					"required": []string{"word"},
-				},
-			},
-		},
-		{
-			Type: "function",
-			Function: chatFunction{
-				Name:        "update_budget",
-				Description: "Обновляет минимальный и максимальный бюджет в долларах.",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"min_budget": map[string]any{"type": "integer"},
-						"max_budget": map[string]any{"type": "integer"},
-					},
-					"required": []string{"min_budget", "max_budget"},
-				},
+				Name:        "update_preferences",
+				Description: "Полностью обновляет параметры поиска квартир (бюджет, площадь, ремонт, локации, стоп-слова и т.д.).",
+				Parameters: openaipreferences.PreferencesSchema(),
 			},
 		},
 	}
@@ -178,12 +163,14 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 
 	respMsg, err := a.makeChatRequest(ctx, reqBody)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	if len(respMsg.ToolCalls) == 0 {
-		return respMsg.Content, nil
+		return respMsg.Content, nil, nil
 	}
+
+	var prefsChanged *domain.UserPreferences
 
 	// Apply tool calls
 	messages = append(messages, respMsg)
@@ -203,39 +190,20 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 			} else {
 				toolResult = err.Error()
 			}
-		case "add_stop_word":
-			var args struct {
-				Word string `json:"word"`
-			}
-			json.Unmarshal([]byte(tc.Function.Arguments), &args)
-			if profile.Preferences == nil {
-				profile.Preferences = &domain.UserPreferences{}
-			}
-			profile.Preferences.RejectRules = append(profile.Preferences.RejectRules, args.Word)
-			err = a.store.UpsertProfile(ctx, profile)
-			if err == nil {
-				toolResult = "success"
+		case "update_preferences":
+			var newPrefs domain.UserPreferences
+			err := json.Unmarshal([]byte(tc.Function.Arguments), &newPrefs)
+			if err != nil {
+				toolResult = "error: failed to parse preferences JSON"
 			} else {
-				toolResult = err.Error()
-			}
-		case "update_budget":
-			var args struct {
-				MinBudget int `json:"min_budget"`
-				MaxBudget int `json:"max_budget"`
-			}
-			json.Unmarshal([]byte(tc.Function.Arguments), &args)
-			if profile.Preferences == nil {
-				profile.Preferences = &domain.UserPreferences{}
-			}
-			minB := args.MinBudget
-			maxB := args.MaxBudget
-			profile.Preferences.BudgetMin = &minB
-			profile.Preferences.BudgetMax = &maxB
-			err = a.store.UpsertProfile(ctx, profile)
-			if err == nil {
-				toolResult = "success"
-			} else {
-				toolResult = err.Error()
+				profile.Preferences = &newPrefs
+				prefsChanged = &newPrefs
+				err = a.store.UpsertProfile(ctx, profile)
+				if err == nil {
+					toolResult = "success"
+				} else {
+					toolResult = err.Error()
+				}
 			}
 		default:
 			toolResult = "unknown function"
@@ -255,10 +223,10 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 
 	respMsg, err = a.makeChatRequest(ctx, reqBody)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 
-	return respMsg.Content, nil
+	return respMsg.Content, prefsChanged, nil
 }
 
 func (a *Agent) makeChatRequest(ctx context.Context, reqBody chatRequest) (chatMessage, error) {
