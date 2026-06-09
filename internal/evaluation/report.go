@@ -10,9 +10,7 @@ import (
 
 func BuildReport(record domain.ListingEvaluationRecord, prefs domain.UserPreferences) string {
 	lines := []string{
-		"🏠 Отчет по объявлению",
 		"📌 " + record.Listing.Title,
-		"🚦 Статус: " + statusLabel(record.Status),
 	}
 	if record.Score != nil {
 		lines = append(lines, fmt.Sprintf("🎯 Итог: %.0f/100", record.Score.ScoreTotal))
@@ -22,20 +20,11 @@ func BuildReport(record domain.ListingEvaluationRecord, prefs domain.UserPrefere
 	} else if record.Source.ChannelID != "" && record.Source.MessageID != 0 {
 		lines = append(lines, fmt.Sprintf("🔗 Источник: %s/%d", record.Source.ChannelID, record.Source.MessageID))
 	}
-	if text := originalMessageText(record.Listing.Description); text != "" {
-		lines = append(lines, "", "📝 Текст объявления:", text)
-	}
+	lines = append(lines, "🚦 Статус: "+statusLabel(record.Status))
 
-	lines = append(lines, "", "✅ Критерии:")
+	lines = append(lines, "", "Критерии:")
 	for _, item := range checklistItems(record, prefs) {
-		lines = append(lines, fmt.Sprintf("- %s %s: %s%s", item.Mark, item.Label, checklistStatus(item.Mark), item.Note))
-	}
-
-	if items := reportItems(record, prefs); len(items) > 0 {
-		lines = append(lines, "", "📊 Баллы:")
-		for _, item := range items {
-			lines = append(lines, fmt.Sprintf("- %s: %d/10%s", item.Label, item.Score, item.Note))
-		}
+		lines = append(lines, fmt.Sprintf("%s %s%s", item.Mark, item.Label, item.Note))
 	}
 
 	if record.Score != nil && len(record.Score.RejectionReasons) > 0 {
@@ -79,7 +68,7 @@ func checklistItems(record domain.ListingEvaluationRecord, prefs domain.UserPref
 func areaChecklistItem(record domain.ListingEvaluationRecord, prefs domain.UserPreferences) checklistItem {
 	note := areaNote(record.Listing, prefs)
 	if prefs.MinAreaM2 <= 0 {
-		return checklistItem{Label: "Метраж", Mark: "-", Note: " (требование не задано)"}
+		return checklistItem{Label: "Метраж", Mark: "➖", Note: " (требование не задано)"}
 	}
 	if record.Listing.AreaM2 <= 0 {
 		return checklistItem{Label: "Метраж", Mark: "❌", Note: " (метраж не найден)"}
@@ -90,7 +79,7 @@ func areaChecklistItem(record domain.ListingEvaluationRecord, prefs domain.UserP
 func priceChecklistItem(record domain.ListingEvaluationRecord, prefs domain.UserPreferences) checklistItem {
 	note := priceNote(record.Listing, prefs)
 	if prefs.MinBudget <= 0 && prefs.MaxBudget <= 0 {
-		return checklistItem{Label: "Цена", Mark: "-", Note: " (требование не задано)"}
+		return checklistItem{Label: "Цена", Mark: "➖", Note: " (требование не задано)"}
 	}
 	if record.Listing.Price <= 0 {
 		return checklistItem{Label: "Цена", Mark: "❌", Note: " (цена не найдена)"}
@@ -103,16 +92,16 @@ func priceChecklistItem(record domain.ListingEvaluationRecord, prefs domain.User
 
 func locationChecklistItem(record domain.ListingEvaluationRecord, prefs domain.UserPreferences) checklistItem {
 	if len(prefs.Locations) == 0 && len(prefs.LocationPreferences) == 0 {
-		return checklistItem{Label: "Локация", Mark: "-", Note: " (требование не задано)"}
+		return checklistItem{Label: "Локация", Mark: "➖", Note: " (требование не задано)"}
 	}
 	if record.Status == "rejected_basic" {
-		return checklistItem{Label: "Локация", Mark: "-", Note: " (не анализировалась из-за базового фильтра)"}
+		return checklistItem{Label: "Локация", Mark: "➖", Note: " (не анализировалась из-за базового фильтра)"}
 	}
 	if record.Status == "rejected_location" {
 		return checklistItem{Label: "Локация", Mark: "❌", Note: locationNote(record.Listing, prefs)}
 	}
 	if record.Status == "received" || record.Status == "failed" {
-		return checklistItem{Label: "Локация", Mark: "-", Note: " (не завершена проверка)"}
+		return checklistItem{Label: "Локация", Mark: "➖", Note: " (не завершена проверка)"}
 	}
 	return checklistItem{Label: "Локация", Mark: "✅", Note: locationNote(record.Listing, prefs)}
 }
@@ -120,19 +109,19 @@ func locationChecklistItem(record domain.ListingEvaluationRecord, prefs domain.U
 func appliancesChecklistItem(record domain.ListingEvaluationRecord, prefs domain.UserPreferences) checklistItem {
 	note := appliancesNote(record.Listing, prefs)
 	if !prefs.RequireDishwasher && !prefs.RequireOven {
-		return checklistItem{Label: "Техника", Mark: "-", Note: " (требование не задано)"}
+		return checklistItem{Label: "Техника", Mark: "➖", Note: " (требование не задано)"}
 	}
 	ok := (!prefs.RequireDishwasher || record.Listing.HasDishwasher) &&
 		(!prefs.RequireOven || record.Listing.HasOven)
 	if record.Status == "rejected_basic" && !ok {
-		return checklistItem{Label: "Техника", Mark: "-", Note: " (не анализировалась по фото из-за базового фильтра)"}
+		return checklistItem{Label: "Техника", Mark: "➖", Note: " (не анализировалась по фото из-за базового фильтра)"}
 	}
 	return checklistItem{Label: "Техника", Mark: passMark(ok), Note: note}
 }
 
 func interiorChecklistItem(record domain.ListingEvaluationRecord) checklistItem {
 	if record.Insights == nil {
-		return checklistItem{Label: "Ремонт", Mark: "-", Note: " (не анализировался)"}
+		return checklistItem{Label: "Ремонт", Mark: "➖", Note: " (не анализировался)"}
 	}
 	ok := true
 	if record.Score != nil {
@@ -155,7 +144,7 @@ func interiorChecklistItem(record domain.ListingEvaluationRecord) checklistItem 
 
 func viewChecklistItem(record domain.ListingEvaluationRecord) checklistItem {
 	if record.Insights == nil {
-		return checklistItem{Label: "Вид из окна", Mark: "-", Note: " (не анализировался)"}
+		return checklistItem{Label: "Вид из окна", Mark: "➖", Note: " (не анализировался)"}
 	}
 	ok := true
 	if record.Score != nil {
@@ -174,49 +163,6 @@ func passMark(ok bool) string {
 		return "✅"
 	}
 	return "❌"
-}
-
-func checklistStatus(mark string) string {
-	switch mark {
-	case "✅":
-		return "удовлетворено"
-	case "❌":
-		return "не удовлетворено"
-	default:
-		return "пропущено"
-	}
-}
-
-func reportItems(record domain.ListingEvaluationRecord, prefs domain.UserPreferences) []reportItem {
-	if record.Score == nil {
-		return nil
-	}
-	breakdown := record.Score.ScoreBreakdown
-	items := []reportItem{}
-	add := func(key, label, note string) {
-		value, ok := breakdown[key]
-		if !ok {
-			return
-		}
-		items = append(items, reportItem{Label: label, Score: tenPoint(value), Note: note})
-	}
-	add("location", "Расположение", locationNote(record.Listing, prefs))
-	add("area", "Метраж", areaNote(record.Listing, prefs))
-	add("interior", "Ремонт", "")
-	add("view", "Вид из окна", "")
-	add("price", "Цена", priceNote(record.Listing, prefs))
-	if shouldShowAppliancesScore(record, prefs) {
-		add("appliances", "Техника", appliancesNote(record.Listing, prefs))
-	}
-	return items
-}
-
-func shouldShowAppliancesScore(record domain.ListingEvaluationRecord, prefs domain.UserPreferences) bool {
-	if record.Status != "rejected_basic" {
-		return true
-	}
-	return (!prefs.RequireDishwasher || record.Listing.HasDishwasher) &&
-		(!prefs.RequireOven || record.Listing.HasOven)
 }
 
 func tenPoint(value float64) int {
@@ -351,15 +297,3 @@ func appliancesNote(listing domain.ApartmentListing, prefs domain.UserPreference
 	return " (нет: " + strings.Join(missing, ", ") + ")"
 }
 
-func originalMessageText(text string) string {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return ""
-	}
-	const limit = 900
-	runes := []rune(text)
-	if len(runes) <= limit {
-		return text
-	}
-	return strings.TrimSpace(string(runes[:limit])) + "..."
-}

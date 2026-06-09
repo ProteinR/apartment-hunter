@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"apartment-hunter/internal/domain"
 	"apartment-hunter/internal/sources"
@@ -25,6 +26,13 @@ type Profile struct {
 	DebugMode       *bool                   `json:"debug_mode,omitempty"`
 	MCPMode         *bool                   `json:"mcp_mode,omitempty"`
 	FilterDisabled  *bool                   `json:"filter_disabled,omitempty"`
+	MCPHistory      []MCPMessage            `json:"mcp_history,omitempty"`
+}
+
+type MCPMessage struct {
+	Role      string    `json:"role"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type ChannelSubscription struct {

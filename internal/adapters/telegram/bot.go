@@ -525,8 +525,13 @@ func (b *Bot) mcpMode(ctx context.Context, chatID int64, text string) (string, e
 			return "", err
 		}
 		return mcpModeStatusMessage(false), nil
+	case "clear", "сброс", "reset":
+		if err := b.store.UpsertProfile(ctx, profiles.Profile{ID: profileID, TelegramChatID: chatID, MCPHistory: []profiles.MCPMessage{}}); err != nil {
+			return "", err
+		}
+		return "Контекст агента успешно сброшен. Начинаем с чистого листа!", nil
 	default:
-		return "Использование: /mcp (переключение), /mcp on или /mcp off", nil
+		return "Использование: /mcp (переключение), /mcp on, /mcp off или /mcp clear", nil
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,11 +23,12 @@ type ProfileStore interface {
 }
 
 type Agent struct {
-	apiKey string
-	model  string
-	apiURL string
-	client *http.Client
-	store  ProfileStore
+	apiKey   string
+	model    string
+	apiURL   string
+	ttlHours int
+	client   *http.Client
+	store    ProfileStore
 }
 
 func New(apiKey string, store ProfileStore) *Agent {
@@ -40,12 +42,21 @@ func New(apiKey string, store ProfileStore) *Agent {
 	if model == "" {
 		model = "gpt-4o"
 	}
+	
+	ttlHours := 24
+	if envTTL := strings.TrimSpace(os.Getenv("MCP_CONTEXT_TTL_HOURS")); envTTL != "" {
+		if parsed, err := strconv.Atoi(envTTL); err == nil {
+			ttlHours = parsed
+		}
+	}
+
 	return &Agent{
-		apiKey: apiKey,
-		model:  model,
-		apiURL: apiURL,
-		client: &http.Client{Timeout: 60 * time.Second},
-		store:  store,
+		apiKey:   apiKey,
+		model:    model,
+		apiURL:   apiURL,
+		ttlHours: ttlHours,
+		client:   &http.Client{Timeout: 60 * time.Second},
+		store:    store,
 	}
 }
 
@@ -124,8 +135,25 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 
 	messages := []chatMessage{
 		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: text},
 	}
+
+	var activeHistory []profiles.MCPMessage
+	for _, msg := range profile.MCPHistory {
+		if a.ttlHours > 0 && !msg.CreatedAt.IsZero() && time.Since(msg.CreatedAt) > time.Duration(a.ttlHours)*time.Hour {
+			continue
+		}
+		activeHistory = append(activeHistory, msg)
+	}
+	profile.MCPHistory = activeHistory
+
+	for _, msg := range profile.MCPHistory {
+		messages = append(messages, chatMessage{
+			Role:    msg.Role,
+			Content: msg.Content,
+		})
+	}
+
+	messages = append(messages, chatMessage{Role: "user", Content: text})
 
 	tools := []chatTool{
 		{
@@ -224,6 +252,18 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 	respMsg, err = a.makeChatRequest(ctx, reqBody)
 	if err != nil {
 		return "", nil, err
+	}
+
+	// Update sliding window history
+	now := time.Now()
+	profile.MCPHistory = append(profile.MCPHistory, profiles.MCPMessage{Role: "user", Content: text, CreatedAt: now})
+	profile.MCPHistory = append(profile.MCPHistory, profiles.MCPMessage{Role: "assistant", Content: respMsg.Content, CreatedAt: now})
+	if len(profile.MCPHistory) > 10 {
+		profile.MCPHistory = profile.MCPHistory[len(profile.MCPHistory)-10:]
+	}
+	
+	if err := a.store.UpsertProfile(ctx, profile); err != nil {
+		return "", nil, fmt.Errorf("failed to save mcp history: %w", err)
 	}
 
 	return respMsg.Content, prefsChanged, nil

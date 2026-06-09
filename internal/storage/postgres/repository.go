@@ -70,17 +70,29 @@ func (r *Repository) UpsertProfile(ctx context.Context, profile profiles.Profile
 	if profile.FilterDisabled != nil {
 		filterDisabled = *profile.FilterDisabled
 	}
+	var mcpHistoryJSON any
+	if profile.MCPHistory != nil {
+		data, err := json.Marshal(profile.MCPHistory)
+		if err != nil {
+			return err
+		}
+		if string(data) == "null" {
+			data = []byte("[]")
+		}
+		mcpHistoryJSON = data
+	}
 	_, err := r.db.ExecContext(ctx, `
-		insert into profiles (id, telegram_chat_id, preferences, debug_mode, mcp_mode, filter_disabled)
-		values ($1, $2, $3, coalesce($4, true), coalesce($5, false), coalesce($6, false))
+		insert into profiles (id, telegram_chat_id, preferences, debug_mode, mcp_mode, filter_disabled, mcp_history)
+		values ($1, $2, $3, coalesce($4, true), coalesce($5, false), coalesce($6, false), coalesce($7, '[]'::jsonb))
 		on conflict (id) do update set
 			telegram_chat_id = coalesce(excluded.telegram_chat_id, profiles.telegram_chat_id),
 			preferences = coalesce(excluded.preferences, profiles.preferences),
 			debug_mode = coalesce($4, profiles.debug_mode),
 			mcp_mode = coalesce($5, profiles.mcp_mode),
 			filter_disabled = coalesce($6, profiles.filter_disabled),
+			mcp_history = coalesce($7, profiles.mcp_history),
 			updated_at = now()
-	`, profile.ID, nullInt64(profile.TelegramChatID), preferencesJSON, debugMode, mcpMode, filterDisabled)
+	`, profile.ID, nullInt64(profile.TelegramChatID), preferencesJSON, debugMode, mcpMode, filterDisabled, mcpHistoryJSON)
 	return err
 }
 
@@ -90,11 +102,12 @@ func (r *Repository) GetProfile(ctx context.Context, id string) (profiles.Profil
 	var debugMode bool
 	var mcpMode bool
 	var filterDisabled bool
+	var mcpHistoryJSON []byte
 	err := r.db.QueryRowContext(ctx, `
-		select id, coalesce(telegram_chat_id, 0), preferences, debug_mode, mcp_mode, filter_disabled
+		select id, coalesce(telegram_chat_id, 0), preferences, debug_mode, mcp_mode, filter_disabled, mcp_history
 		from profiles
 		where id = $1
-	`, id).Scan(&profile.ID, &profile.TelegramChatID, &preferencesJSON, &debugMode, &mcpMode, &filterDisabled)
+	`, id).Scan(&profile.ID, &profile.TelegramChatID, &preferencesJSON, &debugMode, &mcpMode, &filterDisabled, &mcpHistoryJSON)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return profiles.Profile{}, false, nil
@@ -110,6 +123,13 @@ func (r *Repository) GetProfile(ctx context.Context, id string) (profiles.Profil
 			return profiles.Profile{}, false, err
 		}
 		profile.Preferences = &prefs
+	}
+	if len(mcpHistoryJSON) > 0 {
+		var history []profiles.MCPMessage
+		if err := json.Unmarshal(mcpHistoryJSON, &history); err != nil {
+			return profiles.Profile{}, false, err
+		}
+		profile.MCPHistory = history
 	}
 	channels, err := r.listProfileChannels(ctx, id)
 	if err != nil {

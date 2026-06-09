@@ -95,6 +95,7 @@ create table if not exists profiles (
 	debug_mode boolean not null default true,
 	mcp_mode boolean not null default false,
 	filter_disabled boolean not null default false,
+	mcp_history jsonb not null default '[]'::jsonb,
 	created_at timestamptz not null default now(),
 	updated_at timestamptz not null default now()
 );
@@ -102,7 +103,8 @@ create table if not exists profiles (
 alter table profiles
 	add column if not exists debug_mode boolean not null default true,
 	add column if not exists mcp_mode boolean not null default false,
-	add column if not exists filter_disabled boolean not null default false;
+	add column if not exists filter_disabled boolean not null default false,
+	add column if not exists mcp_history jsonb not null default '[]'::jsonb;
 
 create table if not exists user_search_profiles (
 	id bigserial primary key,
