@@ -368,12 +368,7 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 			} else {
 				profile.Preferences = &newPrefs
 				prefsChanged = &newPrefs
-				err = a.store.UpsertProfile(ctx, profile)
-				if err == nil {
-					toolResult = "success"
-				} else {
-					toolResult = err.Error()
-				}
+				toolResult = "success"
 			}
 		case "resolve_address":
 			var args struct {
@@ -727,12 +722,7 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 			} else {
 				profile.Preferences = &newPrefs
 				prefsChanged = &newPrefs
-				err = a.store.UpsertProfile(ctx, profile)
-				if err == nil {
-					toolResult = "success"
-				} else {
-					toolResult = err.Error()
-				}
+				toolResult = "success"
 			}
 		case "resolve_address":
 			var args struct {

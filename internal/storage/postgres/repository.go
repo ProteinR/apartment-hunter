@@ -51,14 +51,6 @@ func (r *Repository) Migrate(ctx context.Context) error {
 }
 
 func (r *Repository) UpsertProfile(ctx context.Context, profile profiles.Profile) error {
-	var preferencesJSON any
-	if profile.Preferences != nil {
-		data, err := json.Marshal(profile.Preferences)
-		if err != nil {
-			return err
-		}
-		preferencesJSON = data
-	}
 	var debugMode any
 	if profile.DebugMode != nil {
 		debugMode = *profile.DebugMode
@@ -83,17 +75,16 @@ func (r *Repository) UpsertProfile(ctx context.Context, profile profiles.Profile
 		mcpHistoryJSON = data
 	}
 	_, err := r.db.ExecContext(ctx, `
-		insert into profiles (id, telegram_chat_id, preferences, debug_mode, mcp_mode, filter_disabled, mcp_history)
-		values ($1, $2, $3, coalesce($4, true), coalesce($5, false), coalesce($6, false), coalesce($7, '[]'::jsonb))
+		insert into profiles (id, telegram_chat_id, debug_mode, mcp_mode, filter_disabled, mcp_history)
+		values ($1, $2, coalesce($3, true), coalesce($4, false), coalesce($5, false), coalesce($6, '[]'::jsonb))
 		on conflict (id) do update set
 			telegram_chat_id = coalesce(excluded.telegram_chat_id, profiles.telegram_chat_id),
-			preferences = coalesce(excluded.preferences, profiles.preferences),
-			debug_mode = coalesce($4, profiles.debug_mode),
-			mcp_mode = coalesce($5, profiles.mcp_mode),
-			filter_disabled = coalesce($6, profiles.filter_disabled),
-			mcp_history = coalesce($7, profiles.mcp_history),
+			debug_mode = coalesce($3, profiles.debug_mode),
+			mcp_mode = coalesce($4, profiles.mcp_mode),
+			filter_disabled = coalesce($5, profiles.filter_disabled),
+			mcp_history = coalesce($6, profiles.mcp_history),
 			updated_at = now()
-	`, profile.ID, nullInt64(profile.TelegramChatID), preferencesJSON, debugMode, mcpMode, filterDisabled, mcpHistoryJSON)
+	`, profile.ID, nullInt64(profile.TelegramChatID), debugMode, mcpMode, filterDisabled, mcpHistoryJSON)
 	return err
 }
 
@@ -105,10 +96,10 @@ func (r *Repository) GetProfile(ctx context.Context, id string) (profiles.Profil
 	var filterDisabled bool
 	var mcpHistoryJSON []byte
 	err := r.db.QueryRowContext(ctx, `
-		select id, coalesce(telegram_chat_id, 0), preferences, debug_mode, mcp_mode, filter_disabled, mcp_history
+		select id, coalesce(telegram_chat_id, 0), debug_mode, mcp_mode, filter_disabled, mcp_history
 		from profiles
 		where id = $1
-	`, id).Scan(&profile.ID, &profile.TelegramChatID, &preferencesJSON, &debugMode, &mcpMode, &filterDisabled, &mcpHistoryJSON)
+	`, id).Scan(&profile.ID, &profile.TelegramChatID, &debugMode, &mcpMode, &filterDisabled, &mcpHistoryJSON)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return profiles.Profile{}, false, nil
@@ -118,23 +109,22 @@ func (r *Repository) GetProfile(ctx context.Context, id string) (profiles.Profil
 	profile.DebugMode = &debugMode
 	profile.MCPMode = &mcpMode
 	profile.FilterDisabled = &filterDisabled
-	if len(preferencesJSON) > 0 {
+	var hasArea bool
+	err = r.db.QueryRowContext(ctx, `
+		select preferences_json, search_area is not null
+		from user_search_profiles
+		where user_id = $1
+		order by created_at desc, id desc
+		limit 1
+	`, id).Scan(&preferencesJSON, &hasArea)
+	if err == nil && len(preferencesJSON) > 0 {
 		var prefs domain.UserPreferences
-		if err := json.Unmarshal(preferencesJSON, &prefs); err != nil {
-			return profiles.Profile{}, false, err
+		if err := json.Unmarshal(preferencesJSON, &prefs); err == nil {
+			if hasArea {
+				prefs.HasSearchArea = true
+			}
+			profile.Preferences = &prefs
 		}
-		var hasArea bool
-		err := r.db.QueryRowContext(ctx, `
-			select search_area is not null
-			from user_search_profiles
-			where user_id = $1
-			order by created_at desc, id desc
-			limit 1
-		`, id).Scan(&hasArea)
-		if err == nil && hasArea {
-			prefs.HasSearchArea = true
-		}
-		profile.Preferences = &prefs
 	}
 	if len(mcpHistoryJSON) > 0 {
 		var history []profiles.MCPMessage

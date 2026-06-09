@@ -91,7 +91,6 @@ where input_tokens is null
 create table if not exists profiles (
 	id text primary key,
 	telegram_chat_id bigint unique,
-	preferences jsonb,
 	debug_mode boolean not null default true,
 	mcp_mode boolean not null default false,
 	filter_disabled boolean not null default false,
@@ -105,6 +104,8 @@ alter table profiles
 	add column if not exists mcp_mode boolean not null default false,
 	add column if not exists filter_disabled boolean not null default false,
 	add column if not exists mcp_history jsonb not null default '[]'::jsonb;
+
+alter table profiles drop column if exists preferences;
 
 create table if not exists user_search_profiles (
 	id bigserial primary key,
