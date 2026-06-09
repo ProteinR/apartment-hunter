@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"html"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -868,11 +870,11 @@ func sendMessage(ctx context.Context, api *telegrambot.Bot, chatID int64, text s
 func sendMessageWithMarkup(ctx context.Context, api *telegrambot.Bot, chatID int64, text string, markup models.ReplyMarkup) error {
 	_, err := api.SendMessage(ctx, &telegrambot.SendMessageParams{
 		ChatID:      chatID,
-		Text:        text,
-		ParseMode:   models.ParseModeMarkdown,
+		Text:        markdownToHTML(text),
+		ParseMode:   models.ParseModeHTML,
 		ReplyMarkup: markup,
 	})
-	if err != nil && strings.Contains(err.Error(), "can't parse entities") {
+	if err != nil {
 		_, err = api.SendMessage(ctx, &telegrambot.SendMessageParams{
 			ChatID:      chatID,
 			Text:        text,
@@ -892,11 +894,11 @@ func sendPhotoBytesWithMarkup(ctx context.Context, api *telegrambot.Bot, chatID 
 			Filename: filename,
 			Data:     bytes.NewReader(data),
 		},
-		Caption:     caption,
-		ParseMode:   models.ParseModeMarkdown,
+		Caption:     markdownToHTML(caption),
+		ParseMode:   models.ParseModeHTML,
 		ReplyMarkup: markup,
 	})
-	if err != nil && strings.Contains(err.Error(), "can't parse entities") {
+	if err != nil {
 		_, err = api.SendPhoto(ctx, &telegrambot.SendPhotoParams{
 			ChatID: chatID,
 			Photo: &models.InputFileUpload{
@@ -920,11 +922,11 @@ func sendDocumentBytesWithMarkup(ctx context.Context, api *telegrambot.Bot, chat
 			Filename: filename,
 			Data:     bytes.NewReader(data),
 		},
-		Caption:     caption,
-		ParseMode:   models.ParseModeMarkdown,
+		Caption:     markdownToHTML(caption),
+		ParseMode:   models.ParseModeHTML,
 		ReplyMarkup: markup,
 	})
-	if err != nil && strings.Contains(err.Error(), "can't parse entities") {
+	if err != nil {
 		_, err = api.SendDocument(ctx, &telegrambot.SendDocumentParams{
 			ChatID: chatID,
 			Document: &models.InputFileUpload{
@@ -941,13 +943,13 @@ func sendDocumentBytesWithMarkup(ctx context.Context, api *telegrambot.Bot, chat
 func sendMessageWithReply(ctx context.Context, api *telegrambot.Bot, chatID int64, replyToMessageID int, text string) error {
 	_, err := api.SendMessage(ctx, &telegrambot.SendMessageParams{
 		ChatID: chatID,
-		Text:   text,
-		ParseMode: models.ParseModeMarkdown,
+		Text:   markdownToHTML(text),
+		ParseMode: models.ParseModeHTML,
 		ReplyParameters: &models.ReplyParameters{
 			MessageID: replyToMessageID,
 		},
 	})
-	if err != nil && strings.Contains(err.Error(), "can't parse entities") {
+	if err != nil {
 		_, err = api.SendMessage(ctx, &telegrambot.SendMessageParams{
 			ChatID: chatID,
 			Text:   text,
@@ -971,10 +973,10 @@ func SendTextMessageID(ctx context.Context, token string, chatID int64, text str
 	}
 	message, err := api.SendMessage(ctx, &telegrambot.SendMessageParams{
 		ChatID:    chatID,
-		Text:      text,
-		ParseMode: models.ParseModeMarkdown,
+		Text:      markdownToHTML(text),
+		ParseMode: models.ParseModeHTML,
 	})
-	if err != nil && strings.Contains(err.Error(), "can't parse entities") {
+	if err != nil {
 		message, err = api.SendMessage(ctx, &telegrambot.SendMessageParams{
 			ChatID: chatID,
 			Text:   text,
@@ -1002,10 +1004,10 @@ func SendPhotoBytesMessageID(ctx context.Context, token string, chatID int64, fi
 			Filename: filename,
 			Data:     bytes.NewReader(data),
 		},
-		Caption:   caption,
-		ParseMode: models.ParseModeMarkdown,
+		Caption:   markdownToHTML(caption),
+		ParseMode: models.ParseModeHTML,
 	})
-	if err != nil && strings.Contains(err.Error(), "can't parse entities") {
+	if err != nil {
 		message, err = api.SendPhoto(ctx, &telegrambot.SendPhotoParams{
 			ChatID: chatID,
 			Photo: &models.InputFileUpload{
@@ -1019,4 +1021,59 @@ func SendPhotoBytesMessageID(ctx context.Context, token string, chatID int64, fi
 		return 0, err
 	}
 	return message.ID, nil
+}
+
+func markdownToHTML(md string) string {
+	escaped := html.EscapeString(md)
+
+	// Block pre code: ```(lang)?\n(content)``` -> <pre>(content)</pre>
+	rePre := regexp.MustCompile("(?s)```[a-zA-Z0-9]*\n?(.*?)```")
+	escaped = rePre.ReplaceAllString(escaped, "<pre>${1}</pre>")
+
+	// Inline code: `code` -> <code>code</code>
+	reCode := regexp.MustCompile("`([^`\n]+)`")
+	escaped = reCode.ReplaceAllString(escaped, "<code>${1}</code>")
+
+	// Bold: **text** -> <b>text</b>
+	reBold1 := regexp.MustCompile(`\*\*([^\*]+)\*\*`)
+	escaped = reBold1.ReplaceAllString(escaped, "<b>${1}</b>")
+
+	// Bold: __text__ -> <b>text</b>
+	reBold2 := regexp.MustCompile(`__([^_]+)__`)
+	escaped = reBold2.ReplaceAllString(escaped, "<b>${1}</b>")
+
+	// Italic: *text* -> <i>text</i>
+	reItalic1 := regexp.MustCompile(`\*([^\*]+)\*`)
+	escaped = reItalic1.ReplaceAllString(escaped, "<i>${1}</i>")
+
+	// Italic: _text_ -> <i>text</i>
+	reItalic2 := regexp.MustCompile(`_([^_]+)_`)
+	escaped = reItalic2.ReplaceAllString(escaped, "<i>${1}</i>")
+
+	// Links: [text](url) -> <a href="url">text</a>
+	reLink := regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
+	escaped = reLink.ReplaceAllString(escaped, `<a href="${2}">${1}</a>`)
+
+	// Headers: # Header -> <b>Header</b>
+	lines := strings.Split(escaped, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			hashes := 0
+			for _, r := range trimmed {
+				if r == '#' {
+					hashes++
+				} else {
+					break
+				}
+			}
+			if hashes > 0 && hashes < len(trimmed) && trimmed[hashes] == ' ' {
+				headerText := strings.TrimSpace(trimmed[hashes:])
+				lines[i] = "<b>" + headerText + "</b>"
+			}
+		}
+	}
+	escaped = strings.Join(lines, "\n")
+
+	return escaped
 }
