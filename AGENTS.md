@@ -173,7 +173,9 @@ For expensive pipeline issues:
 When modifying the preference parser, bot logic, or database storage:
 
 - Refer to the [telegram-bot-communication skill](.agents/skills/telegram-bot-communication/SKILL.md) for detailed instructions on bot commands, modes (MCP/Debug/Regular), and how to configure/run the bot for testing.
-- Agents MUST spawn a specialized testing subagent to verify the changes interactively using the Telegram MCP bot interface.
-- Run the bot locally and use a test subagent to send messages, verify formatting, check database updates, and ensure the conversational flow works.
-- If the test subagent detects any errors, incorrect behavior, or crash logs, the agent must treat it as a failed validation and return the code for rework.
+- Agents MUST verify the changes interactively using the Telegram MCP bot interface.
+- **CRITICAL:** Do NOT use browser tools or open web browsers (such as `browser_subagent` or navigating to `web.telegram.org` in a browser) for testing. Browser scraping is unreliable, and browser authentication is locked.
+- **HOW TO TEST:** Write and execute a programmatic Python script in the `scratch/` directory using the `telethon` library (using the virtual environment `/Users/dmemruk/development/go/telegram-mcp-app/.venv` and account session credentials from the local `.env` file). The script must act as a test user client, sending commands/messages to the bot (e.g., `@Apartmenthuner_bot`), sleeping to wait for responses, reading the responses, and verifying the conversational flow and formatting.
+- If the test script/subagent detects any errors, incorrect behavior, or crash logs, the agent must treat it as a failed validation and return the code for rework.
 - Once the validation passes successfully, agents MUST immediately commit all production and configuration changes.
+
