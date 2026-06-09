@@ -2,6 +2,14 @@
 
 This is a short map for future agents. Treat it as a starting point, then verify details in code before changing behavior.
 
+## Inspecting Telegram Posts
+
+When you need to look at an actual Telegram post (for example, to reproduce a feedback or check what text/price a listing really contained), you MUST read it through the Telegram userbot/MCP, never through a web browser or by guessing from `t.me/...` links.
+
+- Use the userbot client in `internal/adapters/telegramuserbot` (`Fetch`/`Listen`), which authenticates with the `TELEGRAM_*` env vars in `.env`.
+- The bot's MCP mode (`/mcp`) is for managing preferences conversationally; for reading raw channel history use the userbot fetch path.
+- Browser scraping of `t.me` is unreliable (albums, hidden text, auth) and is not allowed for this repo.
+
 ## Big Picture
 
 `apartment-hunter` evaluates Batumi rental listings against a Telegram user's preferences.

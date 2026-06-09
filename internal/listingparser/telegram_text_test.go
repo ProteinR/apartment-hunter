@@ -105,3 +105,24 @@ func TestFromChannelMessageParsesCoordinates(t *testing.T) {
 		t.Fatalf("unexpected coordinates %.6f %.6f", listing.Latitude, listing.Longitude)
 	}
 }
+
+func TestFromChannelMessageParsesAlbumCaptionPriceWithTrailingWords(t *testing.T) {
+	// Regression for the album-fragment price bug: the caption (recovered from a
+	// sibling album message) puts price text inline with trailing words.
+	listing := FromChannelMessage(sources.ChannelMessage{
+		ChannelID: "1625798850",
+		MessageID: 954697,
+		Text: "#Сдам квартиру 2+1\n" +
+			"Ул. Горгиладзе, 88\n" +
+			"🟢80кв.м\n" +
+			"🟢духовка\n" +
+			"Цена 1450$ аренда на долгий срок",
+	})
+
+	if listing.Price != 1450 {
+		t.Fatalf("expected price 1450, got %d", listing.Price)
+	}
+	if listing.AreaM2 != 80 {
+		t.Fatalf("expected area 80, got %.1f", listing.AreaM2)
+	}
+}

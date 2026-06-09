@@ -298,6 +298,7 @@ func (a App) telegramProcessWithContext(ctx context.Context, profileID string, r
 		if !profileSubscribedToMessage(profile, message) {
 			return nil
 		}
+		message = enrichGroupedAlbumText(ctx, reader, message, a.Err)
 		if strings.TrimSpace(message.Text) == "" && len(message.Photos) == 0 {
 			return nil
 		}
@@ -356,6 +357,38 @@ func (a App) telegramProcessWithContext(ctx context.Context, profileID string, r
 
 func telegramCaptionFits(text string) bool {
 	return len([]rune(text)) <= telegramPhotoCaptionMaxRunes
+}
+
+// albumTextResolver fetches the caption/text of a grouped Telegram album by scanning
+// sibling messages that share the same grouped id.
+type albumTextResolver interface {
+	FetchAlbumText(ctx context.Context, channel sources.ChannelRef, groupedID int64, anchorMessageID int) (string, error)
+}
+
+// enrichGroupedAlbumText repairs album fragments that arrive without their caption.
+// Telegram puts an album's text/price on a single message of the group; when the group
+// is split across fetch/listen batches a photo-only fragment can reach the pipeline with
+// empty text, producing price=0 and a default title. In that case we look the text up
+// from the album's sibling messages and merge it in.
+func enrichGroupedAlbumText(ctx context.Context, resolver albumTextResolver, message sources.ChannelMessage, errOut io.Writer) sources.ChannelMessage {
+	if resolver == nil {
+		return message
+	}
+	if message.GroupedID == 0 || strings.TrimSpace(message.Text) != "" {
+		return message
+	}
+	channel := sources.ChannelRef{ID: message.ChannelID, Username: message.ChannelUsername}
+	text, err := resolver.FetchAlbumText(ctx, channel, message.GroupedID, message.MessageID)
+	if err != nil {
+		if errOut != nil {
+			fmt.Fprintf(errOut, "album text lookup failed for %s/%d (grouped %d): %v\n", message.ChannelID, message.MessageID, message.GroupedID, err)
+		}
+		return message
+	}
+	if strings.TrimSpace(text) != "" {
+		message.Text = text
+	}
+	return message
 }
 
 func (a App) catchUpTelegramHistory(ctx context.Context, profileID string, reader *telegramuserbot.Client, store *pgstore.Repository, handler telegramuserbot.MessageHandler) error {

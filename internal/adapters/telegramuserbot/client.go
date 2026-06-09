@@ -200,6 +200,70 @@ func (c *Client) Fetch(ctx context.Context, channel sources.ChannelRef, cursor s
 	return coalesceGroupedMessages(messages), next, nil
 }
 
+// FetchAlbumText looks up the text of a grouped album by scanning sibling messages
+// that share the same groupedID around the anchor message. Telegram puts an album's
+// caption on a single message of the group, so a photo-only fragment can arrive without
+// it. Returns the first non-empty sibling text found, or "" if none.
+func (c *Client) FetchAlbumText(ctx context.Context, channel sources.ChannelRef, groupedID int64, anchorMessageID int) (string, error) {
+	if groupedID == 0 || anchorMessageID <= 0 {
+		return "", nil
+	}
+	storage, err := c.sessionStorage(ctx)
+	if err != nil {
+		return "", err
+	}
+	client := telegram.NewClient(c.cfg.AppID, c.cfg.AppHash, telegram.Options{
+		SessionStorage: storage,
+		NoUpdates:      true,
+	})
+	const albumWindow = 20
+	text := ""
+	err = client.Run(ctx, func(ctx context.Context) error {
+		if err := c.authIfNeeded(ctx, client); err != nil {
+			return err
+		}
+		api := client.API()
+		peer, _, err := resolveChannel(ctx, api, channel)
+		if err != nil {
+			return err
+		}
+		// Center the window on the anchor: OffsetID points just past the newest
+		// message we want, AddOffset pulls in messages newer than the offset too.
+		history, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+			Peer:      peer,
+			OffsetID:  anchorMessageID + albumWindow,
+			AddOffset: 0,
+			Limit:     albumWindow * 2,
+		})
+		if err != nil {
+			return err
+		}
+		modified, ok := history.AsModified()
+		if !ok {
+			return nil
+		}
+		for _, raw := range modified.GetMessages() {
+			message, ok := raw.(*tg.Message)
+			if !ok {
+				continue
+			}
+			gid, _ := message.GetGroupedID()
+			if gid != groupedID {
+				continue
+			}
+			if strings.TrimSpace(message.Message) != "" {
+				text = message.Message
+				return nil
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return text, nil
+}
+
 type groupedMessageHandler struct {
 	handler MessageHandler
 	delay   time.Duration

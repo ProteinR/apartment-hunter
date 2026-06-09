@@ -135,3 +135,66 @@ func (s *fakeSearchAreaStore) LatestSearchAreaGeoJSON(ctx context.Context, profi
 	ok := s.ok || s.geoJSON != ""
 	return s.geoJSON, ok, nil
 }
+
+type fakeAlbumTextResolver struct {
+	text   string
+	err    error
+	called bool
+	gotID  int64
+}
+
+func (r *fakeAlbumTextResolver) FetchAlbumText(ctx context.Context, channel sources.ChannelRef, groupedID int64, anchorMessageID int) (string, error) {
+	r.called = true
+	r.gotID = groupedID
+	return r.text, r.err
+}
+
+func TestEnrichGroupedAlbumTextFillsMissingCaption(t *testing.T) {
+	resolver := &fakeAlbumTextResolver{text: "#Сдам квартиру 2+1\nЦена 1450$"}
+	message := sources.ChannelMessage{
+		ChannelID:       "1625798850",
+		ChannelUsername: "domikibatumi",
+		MessageID:       954706,
+		GroupedID:       14248112711694490,
+		Photos:          []sources.ChannelPhoto{{ID: "photo-1"}},
+	}
+
+	out := enrichGroupedAlbumText(context.Background(), resolver, message, nil)
+
+	if !resolver.called {
+		t.Fatal("expected resolver to be called for text-less album fragment")
+	}
+	if resolver.gotID != 14248112711694490 {
+		t.Fatalf("unexpected grouped id passed to resolver: %d", resolver.gotID)
+	}
+	if out.Text != "#Сдам квартиру 2+1\nЦена 1450$" {
+		t.Fatalf("expected album text to be merged in, got %q", out.Text)
+	}
+}
+
+func TestEnrichGroupedAlbumTextSkipsNonGroupedAndCaptioned(t *testing.T) {
+	resolver := &fakeAlbumTextResolver{text: "should not be used"}
+
+	nonGrouped := sources.ChannelMessage{MessageID: 1, Text: ""}
+	if out := enrichGroupedAlbumText(context.Background(), resolver, nonGrouped, nil); out.Text != "" {
+		t.Fatalf("expected non-grouped message to be left untouched, got %q", out.Text)
+	}
+
+	captioned := sources.ChannelMessage{MessageID: 2, GroupedID: 99, Text: "Цена 1000$"}
+	if out := enrichGroupedAlbumText(context.Background(), resolver, captioned, nil); out.Text != "Цена 1000$" {
+		t.Fatalf("expected captioned album message to keep its text, got %q", out.Text)
+	}
+	if resolver.called {
+		t.Fatal("expected resolver not to be called when text is present or message is not grouped")
+	}
+}
+
+func TestEnrichGroupedAlbumTextToleratesResolverError(t *testing.T) {
+	resolver := &fakeAlbumTextResolver{err: errors.New("telegram unavailable")}
+	message := sources.ChannelMessage{MessageID: 3, GroupedID: 99, Photos: []sources.ChannelPhoto{{ID: "p"}}}
+
+	out := enrichGroupedAlbumText(context.Background(), resolver, message, nil)
+	if out.Text != "" {
+		t.Fatalf("expected message to be returned unchanged on resolver error, got %q", out.Text)
+	}
+}
