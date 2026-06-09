@@ -154,7 +154,7 @@ func TestBuildReportLocalizesLocationRejectionReason(t *testing.T) {
 	})
 
 	for _, expected := range []string{
-		"❌ Локация (Batumi, Georgia; координаты 41.65110, 41.63670)",
+		"❌ Локация (вне зоны поиска)",
 		"локация объявления вне выбранной зоны поиска",
 	} {
 		if !strings.Contains(report, expected) {
@@ -199,3 +199,41 @@ func TestBuildReportUsesEmojiForChecklistDecisions(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildReportSimplifiesLocationNote(t *testing.T) {
+	prefs := domain.UserPreferences{
+		Locations: []domain.LocationPreference{{Name: "Batumi"}},
+	}
+
+	// Case 1: Location check passed (status "passed" or "rejected_ai")
+	reportPassed := BuildReport(domain.ListingEvaluationRecord{
+		Listing: domain.ApartmentListing{
+			Title:     "Apartment",
+			District:  "Batumi",
+			Latitude:  41.6,
+			Longitude: 41.6,
+		},
+		Status: "passed",
+	}, prefs)
+	if !strings.Contains(reportPassed, "✅ Локация\n") && !strings.HasSuffix(reportPassed, "✅ Локация") {
+		// Wait, it might be in the middle of lines, let's just check if it contains "✅ Локация" and does NOT contain coordinates
+		if !strings.Contains(reportPassed, "✅ Локация") || strings.Contains(reportPassed, "✅ Локация (") {
+			t.Fatalf("expected report to contain clean '✅ Локация' with no note, got:\n%s", reportPassed)
+		}
+	}
+
+	// Case 2: Location unresolved
+	reportUnresolved := BuildReport(domain.ListingEvaluationRecord{
+		Listing: domain.ApartmentListing{
+			Title: "Apartment",
+		},
+		Status: "rejected_location",
+		Score: &domain.ListingScore{
+			RejectionReasons: []string{"listing location is unresolved"},
+		},
+	}, prefs)
+	if !strings.Contains(reportUnresolved, "❌ Локация (не определена)") {
+		t.Fatalf("expected report to contain '❌ Локация (не определена)', got:\n%s", reportUnresolved)
+	}
+}
+

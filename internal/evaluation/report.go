@@ -101,12 +101,21 @@ func locationChecklistItem(record domain.ListingEvaluationRecord, prefs domain.U
 		return checklistItem{Label: "Локация", Mark: "➖", Note: " (не анализировалась из-за базового фильтра)"}
 	}
 	if record.Status == "rejected_location" {
-		return checklistItem{Label: "Локация", Mark: "❌", Note: locationNote(record.Listing, prefs)}
+		note := " (вне зоны поиска)"
+		if record.Score != nil {
+			for _, r := range record.Score.RejectionReasons {
+				if r == "listing location is unresolved" {
+					note = " (не определена)"
+					break
+				}
+			}
+		}
+		return checklistItem{Label: "Локация", Mark: "❌", Note: note}
 	}
 	if record.Status == "received" || record.Status == "failed" {
 		return checklistItem{Label: "Локация", Mark: "➖", Note: " (не завершена проверка)"}
 	}
-	return checklistItem{Label: "Локация", Mark: "✅", Note: locationNote(record.Listing, prefs)}
+	return checklistItem{Label: "Локация", Mark: "✅", Note: ""}
 }
 
 func appliancesChecklistItem(record domain.ListingEvaluationRecord, prefs domain.UserPreferences) checklistItem {
@@ -258,22 +267,6 @@ func areaNote(listing domain.ApartmentListing, prefs domain.UserPreferences) str
 		return fmt.Sprintf(" (%.1f м2 при минимуме %.1f)", listing.AreaM2, prefs.MinAreaM2)
 	}
 	return fmt.Sprintf(" (%.1f м2)", listing.AreaM2)
-}
-
-func locationNote(listing domain.ApartmentListing, prefs domain.UserPreferences) string {
-	if listing.District != "" {
-		if listing.Latitude != 0 || listing.Longitude != 0 {
-			return fmt.Sprintf(" (%s; координаты %.5f, %.5f)", listing.District, listing.Latitude, listing.Longitude)
-		}
-		return " (" + listing.District + ")"
-	}
-	if listing.Latitude != 0 || listing.Longitude != 0 {
-		return fmt.Sprintf(" (координаты %.5f, %.5f)", listing.Latitude, listing.Longitude)
-	}
-	if len(prefs.Locations) == 0 {
-		return " (локации не заданы)"
-	}
-	return ""
 }
 
 func appliancesNote(listing domain.ApartmentListing, prefs domain.UserPreferences) string {
