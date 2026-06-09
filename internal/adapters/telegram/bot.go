@@ -196,7 +196,14 @@ func (b *Bot) handleMessage(ctx context.Context, api *telegrambot.Bot, chatID in
 		return sendDocumentBytesWithMarkup(ctx, api, chatID, response.DocumentFilename, response.DocumentBytes, response.Text, response.ReplyMarkup)
 	}
 	if len(response.PhotoBytes) > 0 {
-		return sendPhotoBytesWithMarkup(ctx, api, chatID, response.PhotoFilename, response.PhotoBytes, response.Text, response.ReplyMarkup)
+		textRunes := []rune(response.Text)
+		if len(textRunes) <= 1024 {
+			return sendPhotoBytesWithMarkup(ctx, api, chatID, response.PhotoFilename, response.PhotoBytes, response.Text, response.ReplyMarkup)
+		}
+		if err := sendPhotoBytesWithMarkup(ctx, api, chatID, response.PhotoFilename, response.PhotoBytes, "Карта зоны поиска", nil); err != nil {
+			return err
+		}
+		return sendMessageWithMarkup(ctx, api, chatID, response.Text, response.ReplyMarkup)
 	}
 	return sendMessageWithMarkup(ctx, api, chatID, response.Text, response.ReplyMarkup)
 }
@@ -240,6 +247,21 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 		reply, err := b.mcpMode(context.Background(), chatID, text)
 		return textResponse{Text: reply, ReplyMarkup: mainCommandKeyboard()}, err
 	}
+	if text == "/clear" || text == "/reset" {
+		profileID := profiles.IDForTelegramChat(chatID)
+		b.deleteSession(chatID)
+		profile, ok, err := b.store.GetProfile(context.Background(), profileID)
+		if err == nil && ok {
+			profile.MCPHistory = []profiles.MCPMessage{}
+			if err := b.store.UpsertProfile(context.Background(), profile); err != nil {
+				return textResponse{}, err
+			}
+		}
+		return textResponse{
+			Text:        "Сессия общения и текущие настройки сброшены. Начинаем с чистого листа!",
+			ReplyMarkup: mainCommandKeyboard(),
+		}, nil
+	}
 	if looksLikeChannelSubscription(text) {
 		reply, err := b.subscribeChannelsFromText(context.Background(), chatID, text)
 		return textResponse{Text: reply, ReplyMarkup: mainCommandKeyboard()}, err
@@ -282,7 +304,7 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 				strings.Contains(lowerReply, "настройк") ||
 				strings.Contains(lowerReply, "локаци")
 		}
-		if shouldAttachMap && len([]rune(reply)) <= 1024 {
+		if shouldAttachMap {
 			if saStore, ok := b.store.(interface {
 				LatestSearchAreaGeoJSON(ctx context.Context, profileID string) (string, bool, error)
 			}); ok {
@@ -837,8 +859,16 @@ func sendMessageWithMarkup(ctx context.Context, api *telegrambot.Bot, chatID int
 	_, err := api.SendMessage(ctx, &telegrambot.SendMessageParams{
 		ChatID:      chatID,
 		Text:        text,
+		ParseMode:   models.ParseModeMarkdown,
 		ReplyMarkup: markup,
 	})
+	if err != nil && strings.Contains(err.Error(), "can't parse entities") {
+		_, err = api.SendMessage(ctx, &telegrambot.SendMessageParams{
+			ChatID:      chatID,
+			Text:        text,
+			ReplyMarkup: markup,
+		})
+	}
 	return err
 }
 
@@ -853,8 +883,20 @@ func sendPhotoBytesWithMarkup(ctx context.Context, api *telegrambot.Bot, chatID 
 			Data:     bytes.NewReader(data),
 		},
 		Caption:     caption,
+		ParseMode:   models.ParseModeMarkdown,
 		ReplyMarkup: markup,
 	})
+	if err != nil && strings.Contains(err.Error(), "can't parse entities") {
+		_, err = api.SendPhoto(ctx, &telegrambot.SendPhotoParams{
+			ChatID: chatID,
+			Photo: &models.InputFileUpload{
+				Filename: filename,
+				Data:     bytes.NewReader(data),
+			},
+			Caption:     caption,
+			ReplyMarkup: markup,
+		})
+	}
 	return err
 }
 
@@ -869,8 +911,20 @@ func sendDocumentBytesWithMarkup(ctx context.Context, api *telegrambot.Bot, chat
 			Data:     bytes.NewReader(data),
 		},
 		Caption:     caption,
+		ParseMode:   models.ParseModeMarkdown,
 		ReplyMarkup: markup,
 	})
+	if err != nil && strings.Contains(err.Error(), "can't parse entities") {
+		_, err = api.SendDocument(ctx, &telegrambot.SendDocumentParams{
+			ChatID: chatID,
+			Document: &models.InputFileUpload{
+				Filename: filename,
+				Data:     bytes.NewReader(data),
+			},
+			Caption:     caption,
+			ReplyMarkup: markup,
+		})
+	}
 	return err
 }
 
@@ -878,10 +932,20 @@ func sendMessageWithReply(ctx context.Context, api *telegrambot.Bot, chatID int6
 	_, err := api.SendMessage(ctx, &telegrambot.SendMessageParams{
 		ChatID: chatID,
 		Text:   text,
+		ParseMode: models.ParseModeMarkdown,
 		ReplyParameters: &models.ReplyParameters{
 			MessageID: replyToMessageID,
 		},
 	})
+	if err != nil && strings.Contains(err.Error(), "can't parse entities") {
+		_, err = api.SendMessage(ctx, &telegrambot.SendMessageParams{
+			ChatID: chatID,
+			Text:   text,
+			ReplyParameters: &models.ReplyParameters{
+				MessageID: replyToMessageID,
+			},
+		})
+	}
 	return err
 }
 

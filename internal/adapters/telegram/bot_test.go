@@ -500,7 +500,7 @@ func TestRepliesIncludeCommandKeyboard(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected command keyboard, got %T", response.ReplyMarkup)
 	}
-	for _, expected := range []string{"/preferences", "/channels", "/subscribe", "/unsubscribe", "/debug", "/mcp"} {
+	for _, expected := range []string{"/preferences", "/channels", "/subscribe", "/unsubscribe", "/debug", "/mcp", "/clear"} {
 		if !keyboardHasButton(keyboard, expected) {
 			t.Fatalf("expected keyboard to contain %q: %+v", expected, keyboard.Keyboard)
 		}
@@ -512,6 +512,51 @@ func TestRepliesIncludeCommandKeyboard(t *testing.T) {
 	}
 	if _, ok := response.ReplyMarkup.(*models.ReplyKeyboardMarkup); !ok {
 		t.Fatalf("expected command keyboard after /channels, got %T", response.ReplyMarkup)
+	}
+}
+
+func TestClearAndResetCommands(t *testing.T) {
+	store := newFakeProfileStore()
+	bot := New("test-token", t.TempDir(), WithProfileStore(store))
+
+	// Setup a session and MCP history
+	chatID := int64(42)
+	profileID := "telegram_42"
+	bot.setSession(chatID, &preferenceSession{State: "awaiting_query"})
+	
+	p := profiles.Profile{
+		ID:             profileID,
+		TelegramChatID: chatID,
+		MCPHistory: []profiles.MCPMessage{
+			{Role: "user", Content: "hello"},
+		},
+	}
+	if err := store.UpsertProfile(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+
+	// Send /clear
+	response, err := bot.handleTextResponse(chatID, "/clear")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(response.Text, "сброшены") {
+		t.Fatalf("unexpected clear reply: %q", response.Text)
+	}
+
+	// Verify session and history are cleared
+	if bot.getSession(chatID) != nil {
+		t.Fatal("expected session to be cleared")
+	}
+	profile, ok, err := store.GetProfile(context.Background(), profileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected profile to exist")
+	}
+	if len(profile.MCPHistory) != 0 {
+		t.Fatalf("expected MCP history to be empty, got %d messages", len(profile.MCPHistory))
 	}
 }
 

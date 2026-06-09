@@ -310,6 +310,7 @@ func mainCommandKeyboard() models.ReplyMarkup {
 			{
 				{Text: "/debug"},
 				{Text: "/mcp"},
+				{Text: "/clear"},
 			},
 		},
 		ResizeKeyboard: true,
