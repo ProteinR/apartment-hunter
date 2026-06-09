@@ -477,8 +477,8 @@ func listingSearchAreaMapURL(ctx context.Context, store latestSearchAreaStore, r
 	if !shouldSendListingSearchAreaMap(record) || store == nil {
 		return "", false, nil
 	}
-	geoJSON, ok, err := store.LatestSearchAreaGeoJSON(ctx, record.Source.ProfileID)
-	if err != nil || !ok {
+	geoJSON, _, err := store.LatestSearchAreaGeoJSON(ctx, record.Source.ProfileID)
+	if err != nil {
 		return "", false, err
 	}
 	mapURL := renderer.ListingSearchAreaURL(record.Listing, geoJSON)
@@ -492,8 +492,8 @@ func listingSearchAreaMapImage(ctx context.Context, store latestSearchAreaStore,
 	if !shouldSendListingSearchAreaMap(record) || store == nil {
 		return nil, false, nil
 	}
-	geoJSON, ok, err := store.LatestSearchAreaGeoJSON(ctx, record.Source.ProfileID)
-	if err != nil || !ok {
+	geoJSON, _, err := store.LatestSearchAreaGeoJSON(ctx, record.Source.ProfileID)
+	if err != nil {
 		return nil, false, err
 	}
 	image, err := renderer.ListingSearchAreaImage(ctx, record.Listing, geoJSON)

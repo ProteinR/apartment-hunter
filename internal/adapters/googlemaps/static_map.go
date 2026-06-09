@@ -37,11 +37,7 @@ func (r StaticMapRenderer) SearchAreaURL(searchAreaGeoJSON string) string {
 }
 
 func (r StaticMapRenderer) searchAreaURL(searchAreaGeoJSON string, marker string) string {
-	if strings.TrimSpace(r.APIKey) == "" || strings.TrimSpace(searchAreaGeoJSON) == "" {
-		return ""
-	}
-	polygons, ok := parseMultiPolygon(searchAreaGeoJSON)
-	if !ok || len(polygons) == 0 {
+	if strings.TrimSpace(r.APIKey) == "" {
 		return ""
 	}
 
@@ -57,6 +53,36 @@ func (r StaticMapRenderer) searchAreaURL(searchAreaGeoJSON string, marker string
 	if mapType == "" {
 		mapType = "roadmap"
 	}
+
+	if strings.TrimSpace(searchAreaGeoJSON) == "" {
+		if marker == "" {
+			return ""
+		}
+		values := url.Values{}
+		values.Set("key", strings.TrimSpace(r.APIKey))
+		values.Set("size", size)
+		values.Set("scale", "2")
+		values.Set("maptype", mapType)
+		values.Set("markers", marker)
+		values.Set("zoom", "15")
+		return endpoint + "?" + values.Encode()
+	}
+
+	polygons, ok := parseMultiPolygon(searchAreaGeoJSON)
+	if !ok || len(polygons) == 0 {
+		if marker == "" {
+			return ""
+		}
+		values := url.Values{}
+		values.Set("key", strings.TrimSpace(r.APIKey))
+		values.Set("size", size)
+		values.Set("scale", "2")
+		values.Set("maptype", mapType)
+		values.Set("markers", marker)
+		values.Set("zoom", "15")
+		return endpoint + "?" + values.Encode()
+	}
+
 	maxURLLen := r.MaxURLLen
 	if maxURLLen <= 0 {
 		maxURLLen = 8000

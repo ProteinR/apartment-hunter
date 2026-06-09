@@ -80,14 +80,18 @@ func TestStaticMapRendererReturnsEmptyWithoutInputs(t *testing.T) {
 	if got := renderer.ListingSearchAreaURL(domain.ApartmentListing{}, testSearchAreaGeoJSON); got != "" {
 		t.Fatalf("expected no map without listing coordinates, got %q", got)
 	}
-	if got := renderer.ListingSearchAreaURL(listing, ""); got != "" {
-		t.Fatalf("expected no map without search area, got %q", got)
+	if got := renderer.ListingSearchAreaURL(listing, ""); got == "" {
+		t.Fatalf("expected map URL without search area when coordinates are present")
+	} else if !strings.Contains(got, "zoom=15") || !strings.Contains(got, "markers=") {
+		t.Fatalf("expected map URL to have zoom and markers, got %q", got)
 	}
 	if got := renderer.SearchAreaURL(""); got != "" {
-		t.Fatalf("expected no map without search area, got %q", got)
+		t.Fatalf("expected no map without search area and no listing coordinates, got %q", got)
 	}
-	if got := renderer.ListingSearchAreaURL(listing, `{"type":"Point","coordinates":[41.62,41.64]}`); got != "" {
-		t.Fatalf("expected no map for unsupported GeoJSON, got %q", got)
+	if got := renderer.ListingSearchAreaURL(listing, `{"type":"Point","coordinates":[41.62,41.64]}`); got == "" {
+		t.Fatalf("expected map URL for unsupported/invalid GeoJSON when coordinates are present")
+	} else if !strings.Contains(got, "zoom=15") || !strings.Contains(got, "markers=") {
+		t.Fatalf("expected map URL to fall back to zoom and markers, got %q", got)
 	}
 }
 
