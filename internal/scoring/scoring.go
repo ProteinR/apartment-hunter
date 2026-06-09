@@ -26,7 +26,7 @@ func (s Scorer) Score(listing domain.ApartmentListing, prefs domain.UserPreferen
 }
 
 func ScoreWithInsights(listing domain.ApartmentListing, prefs domain.UserPreferences, insights domain.ListingInsights) domain.ListingScore {
-	prefs = normalizeScoringPreferences(prefs)
+	prefs = NormalizeScoringPreferences(prefs)
 	listing = listingWithInsightAppliances(listing, insights)
 	reasons := hardFilterReasons(listing, prefs, insights)
 	breakdown := BreakdownWithInsights(listing, prefs, insights)
@@ -46,7 +46,7 @@ func ScoreWithInsights(listing domain.ApartmentListing, prefs domain.UserPrefere
 }
 
 func BreakdownWithInsights(listing domain.ApartmentListing, prefs domain.UserPreferences, insights domain.ListingInsights) map[string]float64 {
-	prefs = normalizeScoringPreferences(prefs)
+	prefs = NormalizeScoringPreferences(prefs)
 	listing = listingWithInsightAppliances(listing, insights)
 	return map[string]float64{
 		"location":   locationScore(listing, prefs),
@@ -59,7 +59,7 @@ func BreakdownWithInsights(listing domain.ApartmentListing, prefs domain.UserPre
 }
 
 func BasicScoreBreakdown(listing domain.ApartmentListing, prefs domain.UserPreferences) map[string]float64 {
-	prefs = normalizeScoringPreferences(prefs)
+	prefs = NormalizeScoringPreferences(prefs)
 	return map[string]float64{
 		"location":   locationScore(listing, prefs),
 		"area":       areaScore(listing.AreaM2, prefs.MinAreaM2),
@@ -69,7 +69,7 @@ func BasicScoreBreakdown(listing domain.ApartmentListing, prefs domain.UserPrefe
 }
 
 func BasicFilterReasons(listing domain.ApartmentListing, prefs domain.UserPreferences) []string {
-	prefs = normalizeScoringPreferences(prefs)
+	prefs = NormalizeScoringPreferences(prefs)
 	reasons := []string{}
 	if prefs.MaxBudget > 0 && listing.Price > prefs.MaxBudget {
 		reasons = append(reasons, fmt.Sprintf("price %d exceeds max budget %d", listing.Price, prefs.MaxBudget))
@@ -80,7 +80,7 @@ func BasicFilterReasons(listing domain.ApartmentListing, prefs domain.UserPrefer
 	return reasons
 }
 
-func normalizeScoringPreferences(prefs domain.UserPreferences) domain.UserPreferences {
+func NormalizeScoringPreferences(prefs domain.UserPreferences) domain.UserPreferences {
 	if prefs.BudgetMin != nil {
 		prefs.MinBudget = *prefs.BudgetMin
 	}

@@ -6,11 +6,14 @@ import (
 	"strings"
 
 	"apartment-hunter/internal/domain"
+	"apartment-hunter/internal/scoring"
 )
 
 func BuildReport(record domain.ListingEvaluationRecord, prefs domain.UserPreferences) string {
-	lines := []string{
-		"📌 " + record.Listing.Title,
+	prefs = scoring.NormalizeScoringPreferences(prefs)
+	var lines []string
+	if record.Listing.Title != "" && record.Listing.Title != "Telegram listing" {
+		lines = append(lines, "📌 "+record.Listing.Title)
 	}
 	if record.Score != nil {
 		lines = append(lines, fmt.Sprintf("🎯 Итог: %.0f/100", record.Score.ScoreTotal))
