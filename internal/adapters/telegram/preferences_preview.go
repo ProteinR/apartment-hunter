@@ -77,7 +77,7 @@ func buildPreferencesPreviewWithOptions(draft preferenceparser.Draft, includeQue
 	rejects := append([]string{}, prefs.InteriorPreferences.Reject...)
 	rejects = append(rejects, prefs.RejectRules...)
 	appendList(&b, "Исключить", rejects, lang)
-	appendLocations(&b, prefs.LocationPreferences, lang)
+	appendLocations(&b, prefs.LocationPreferences, prefs.HasSearchArea, lang)
 	appendList(&b, "Неразобранные гео-правила", prefs.UnresolvedLocationRules, lang)
 	fmt.Fprintf(&b, "\n%s\n", searchAreaEditInstructions)
 	b.WriteString("\nСохранить?")
@@ -99,8 +99,15 @@ func appendList(b *strings.Builder, title string, values []string, lang string) 
 	}
 }
 
-func appendLocations(b *strings.Builder, locations []domain.LocationPreference, lang string) {
+func appendLocations(b *strings.Builder, locations []domain.LocationPreference, hasSearchArea bool, lang string) {
 	if len(locations) == 0 {
+		if hasSearchArea {
+			if lang == "ru" {
+				b.WriteString("Локация:\n* Поиск по заданной области на карте\n")
+			} else {
+				b.WriteString("Location:\n* Search within specified area on map\n")
+			}
+		}
 		return
 	}
 	b.WriteString("Районы:\n")

@@ -565,7 +565,7 @@ func TestSaveReplyFeedbackStoresFeedback(t *testing.T) {
 	store.feedbackMatched = true
 	bot := New("test-token", t.TempDir(), WithProfileStore(store))
 
-	reply, err := bot.saveReplyFeedback(context.Background(), &models.Message{
+	reply, handled, err := bot.saveReplyFeedback(context.Background(), &models.Message{
 		ID:   101,
 		Text: "гео определено неверно",
 		Chat: models.Chat{ID: 42},
@@ -575,6 +575,9 @@ func TestSaveReplyFeedbackStoresFeedback(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !handled {
+		t.Fatal("expected handled to be true")
 	}
 	if reply != "Отзыв сохранен: feedback #7" {
 		t.Fatalf("unexpected reply %q", reply)
@@ -588,11 +591,11 @@ func TestSaveReplyFeedbackStoresFeedback(t *testing.T) {
 	}
 }
 
-func TestSaveReplyFeedbackExplainsUnmatchedReply(t *testing.T) {
+func TestSaveReplyFeedbackUnmatchedReplyReturnsNotHandled(t *testing.T) {
 	store := newFakeProfileStore()
 	bot := New("test-token", t.TempDir(), WithProfileStore(store))
 
-	reply, err := bot.saveReplyFeedback(context.Background(), &models.Message{
+	reply, handled, err := bot.saveReplyFeedback(context.Background(), &models.Message{
 		ID:             101,
 		Text:           "гео определено неверно",
 		Chat:           models.Chat{ID: 42},
@@ -601,8 +604,11 @@ func TestSaveReplyFeedbackExplainsUnmatchedReply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(reply, "Не нашел объявление") {
-		t.Fatalf("unexpected reply %q", reply)
+	if handled {
+		t.Fatal("expected handled to be false for unmatched reply")
+	}
+	if reply != "" {
+		t.Fatalf("expected empty reply, got %q", reply)
 	}
 	if len(store.feedbacks) != 0 {
 		t.Fatalf("unexpected feedback saved: %+v", store.feedbacks)

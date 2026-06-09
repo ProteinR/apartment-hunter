@@ -174,13 +174,15 @@ func (b *Bot) handleUpdate(ctx context.Context, api *telegrambot.Bot, update *mo
 		return
 	}
 	if update.Message.ReplyToMessage != nil && b.getSession(chatID) == nil && !strings.HasPrefix(strings.TrimSpace(update.Message.Text), "/") {
-		reply, err := b.saveReplyFeedback(ctx, update.Message)
+		reply, handled, err := b.saveReplyFeedback(ctx, update.Message)
 		if err != nil {
 			_ = sendMessage(ctx, api, chatID, "Error: "+err.Error())
 			return
 		}
-		_ = sendMessageWithReply(ctx, api, chatID, update.Message.ID, reply)
-		return
+		if handled {
+			_ = sendMessageWithReply(ctx, api, chatID, update.Message.ID, reply)
+			return
+		}
 	}
 	if err := b.handleMessage(ctx, api, chatID, update.Message.Text); err != nil {
 		_ = sendMessage(ctx, api, chatID, "Error: "+err.Error())
@@ -621,16 +623,16 @@ func (b *Bot) mcpMode(ctx context.Context, chatID int64, text string) (string, e
 	}
 }
 
-func (b *Bot) saveReplyFeedback(ctx context.Context, message *models.Message) (string, error) {
+func (b *Bot) saveReplyFeedback(ctx context.Context, message *models.Message) (string, bool, error) {
 	if b.store == nil {
-		return "", fmt.Errorf("profile store is required")
+		return "", false, fmt.Errorf("profile store is required")
 	}
 	if message.ReplyToMessage == nil {
-		return "Ответь на сообщение с отчетом по квартире и напиши отзыв.", nil
+		return "Ответь на сообщение с отчетом по квартире и напиши отзыв.", false, nil
 	}
 	text := strings.TrimSpace(message.Text)
 	if text == "" {
-		return "Пустой отзыв не сохранен.", nil
+		return "Пустой отзыв не сохранен.", false, nil
 	}
 	id, listing, err := b.store.SaveListingFeedback(ctx, domain.ListingFeedback{
 		TelegramChatID:    message.Chat.ID,
@@ -639,17 +641,17 @@ func (b *Bot) saveReplyFeedback(ctx context.Context, message *models.Message) (s
 		Text:              text,
 	})
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if listing == nil {
-		return "Не нашел объявление для этого ответа. Ответь на сообщение с отчетом по квартире, например: «гео определено неверно».", nil
+		return "", false, nil
 	}
 
 	profile, profileOk, profileErr := b.store.GetProfile(ctx, profiles.IDForTelegramChat(message.Chat.ID))
 	if profileErr == nil && profileOk && profiles.MCPModeEnabled(profile) && b.mcpAgent != nil {
 		reply, prefsChanged, areaChanged, agentErr := b.mcpAgent.ProcessFeedback(ctx, profile.ID, *listing, text)
 		if agentErr != nil {
-			return "Отзыв сохранен, но ошибка агента: " + agentErr.Error(), nil
+			return "Отзыв сохранен, но ошибка агента: " + agentErr.Error(), true, nil
 		}
 		if prefsChanged != nil || areaChanged != nil {
 			var draft preferenceparser.Draft
@@ -659,13 +661,13 @@ func (b *Bot) saveReplyFeedback(ctx context.Context, message *models.Message) (s
 				draft.Preferences = *profile.Preferences
 			}
 			if draftErr := b.saveDraft(ctx, message.Chat.ID, draft, areaChanged); draftErr != nil {
-				return "Отзыв сохранен, но ошибка применения фильтров: " + draftErr.Error(), nil
+				return "Отзыв сохранен, но ошибка применения фильтров: " + draftErr.Error(), true, nil
 			}
 		}
-		return reply, nil
+		return reply, true, nil
 	}
 
-	return "Отзыв сохранен: feedback #" + id, nil
+	return "Отзыв сохранен: feedback #" + id, true, nil
 }
 
 func debugModeStatusMessage(enabled bool) string {
@@ -768,6 +770,9 @@ func (b *Bot) prepareDraftGeometry(ctx context.Context, draft *preferenceparser.
 	}
 	if area != nil {
 		draft.Preferences.UnresolvedLocationRules = append(draft.Preferences.UnresolvedLocationRules, area.UnresolvedRules...)
+		if strings.TrimSpace(area.GeoJSON) != "" {
+			draft.Preferences.HasSearchArea = true
+		}
 	}
 	return area, nil
 }
