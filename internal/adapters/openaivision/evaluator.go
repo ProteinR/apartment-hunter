@@ -26,8 +26,8 @@ import (
 )
 
 const (
-	defaultAPIURL      = "https://api.openai.com/v1/responses"
-	defaultModel       = "gpt-4.1-mini"
+	defaultAPIURL      = "https://openrouter.ai/api/v1/chat/completions"
+	defaultModel       = "openai/gpt-4o-mini"
 	defaultMaxImageDim = 768
 	defaultMaxPhotos   = 8
 )
@@ -118,17 +118,31 @@ func New(apiKey string, opts ...Option) *Evaluator {
 }
 
 func FromEnv(opts ...Option) (*Evaluator, error) {
-	apiKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+	apiKey := strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY"))
 	if apiKey == "" {
-		return nil, errors.New("OPENAI_API_KEY is required for OpenAI vision evaluator")
+		apiKey = strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+	}
+	if apiKey == "" {
+		return nil, errors.New("neither OPENROUTER_API_KEY nor OPENAI_API_KEY is configured for OpenAI vision evaluator")
 	}
 	envOpts := []Option{}
-	if model := strings.TrimSpace(os.Getenv("OPENAI_VISION_MODEL")); model != "" {
+	
+	model := strings.TrimSpace(os.Getenv("OPENROUTER_VISION_MODEL"))
+	if model == "" {
+		model = strings.TrimSpace(os.Getenv("OPENAI_VISION_MODEL"))
+	}
+	if model != "" {
 		envOpts = append(envOpts, WithModel(model))
 	}
-	if apiURL := strings.TrimSpace(os.Getenv("OPENAI_BASE_URL")); apiURL != "" {
-		envOpts = append(envOpts, WithAPIURL(strings.TrimRight(apiURL, "/")+"/responses"))
+	
+	baseURL := strings.TrimSpace(os.Getenv("OPENROUTER_BASE_URL"))
+	if baseURL == "" {
+		baseURL = strings.TrimSpace(os.Getenv("OPENAI_BASE_URL"))
 	}
+	if baseURL != "" {
+		envOpts = append(envOpts, WithAPIURL(strings.TrimRight(baseURL, "/")+"/chat/completions"))
+	}
+	
 	envOpts = append(envOpts, opts...)
 	return New(apiKey, envOpts...), nil
 }
@@ -163,11 +177,11 @@ func (e *Evaluator) LastError() error {
 
 func (e *Evaluator) analyze(ctx context.Context, listing domain.ApartmentListing) (domain.ListingInsights, domain.AIUsage, error) {
 	if e.apiKey == "" {
-		return domain.ListingInsights{}, domain.AIUsage{}, errors.New("missing OpenAI API key")
+		return domain.ListingInsights{}, domain.AIUsage{}, errors.New("missing API key")
 	}
 
 	content := []contentItem{{
-		Type: "input_text",
+		Type: "text",
 		Text: listingPrompt(listing),
 	}}
 
@@ -180,20 +194,34 @@ func (e *Evaluator) analyze(ctx context.Context, listing domain.ApartmentListing
 			continue
 		}
 		content = append(content, contentItem{
-			Type:     "input_image",
-			ImageURL: dataURL,
-			Detail:   "low",
+			Type: "image_url",
+			ImageURL: &contentImageURL{
+				URL:    dataURL,
+				Detail: "low",
+			},
 		})
 	}
 
-	payload := responsesRequest{
-		Model:        e.model,
-		Instructions: "You evaluate rental apartment listings. Use the listing text and photos. Return only structured JSON matching the schema. Be conservative: mark visual defects true only when clearly visible or directly stated. Mark dishwasher and oven true when they are directly stated in text or clearly visible in the kitchen photos.",
-		Input: []inputMessage{{
-			Role:    "user",
-			Content: content,
-		}},
-		Text: textConfig{Format: jsonSchemaFormat()},
+	payload := chatRequest{
+		Model: e.model,
+		Messages: []chatMessage{
+			{
+				Role:    "system",
+				Content: "You evaluate rental apartment listings. Use the listing text and photos. Return only structured JSON matching the schema. Be conservative: mark visual defects true only when clearly visible or directly stated. Mark dishwasher and oven true when they are directly stated in text or clearly visible in the kitchen photos.",
+			},
+			{
+				Role:    "user",
+				Content: content,
+			},
+		},
+		ResponseFormat: responseFormat{
+			Type: "json_schema",
+			JSONSchema: jsonSchema{
+				Name:   "listing_insights",
+				Strict: true,
+				Schema: jsonSchemaFormat().Schema,
+			},
+		},
 	}
 
 	body, err := json.Marshal(payload)
@@ -219,7 +247,7 @@ func (e *Evaluator) analyze(ctx context.Context, listing domain.ApartmentListing
 		return domain.ListingInsights{}, domain.AIUsage{}, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return domain.ListingInsights{}, domain.AIUsage{}, fmt.Errorf("openai API status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		return domain.ListingInsights{}, domain.AIUsage{}, fmt.Errorf("API status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 
 	outputText, usage, err := extractOutputTextAndUsage(respBody, e.model, e.pricing)
@@ -373,31 +401,34 @@ func init() {
 	image.RegisterFormat("png", "png", png.Decode, png.DecodeConfig)
 }
 
-type responsesRequest struct {
-	Model        string         `json:"model"`
-	Instructions string         `json:"instructions"`
-	Input        []inputMessage `json:"input"`
-	Text         textConfig     `json:"text"`
+type chatRequest struct {
+	Model          string         `json:"model"`
+	Messages       []chatMessage  `json:"messages"`
+	ResponseFormat responseFormat `json:"response_format"`
 }
 
-type inputMessage struct {
-	Role    string        `json:"role"`
-	Content []contentItem `json:"content"`
+type chatMessage struct {
+	Role    string `json:"role"`
+	Content any    `json:"content"`
 }
 
 type contentItem struct {
-	Type     string `json:"type"`
-	Text     string `json:"text,omitempty"`
-	ImageURL string `json:"image_url,omitempty"`
-	Detail   string `json:"detail,omitempty"`
+	Type     string            `json:"type"`
+	Text     string            `json:"text,omitempty"`
+	ImageURL *contentImageURL `json:"image_url,omitempty"`
 }
 
-type textConfig struct {
-	Format jsonSchema `json:"format"`
+type contentImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
+}
+
+type responseFormat struct {
+	Type       string     `json:"type"`
+	JSONSchema jsonSchema `json:"json_schema"`
 }
 
 type jsonSchema struct {
-	Type   string         `json:"type"`
 	Name   string         `json:"name"`
 	Strict bool           `json:"strict"`
 	Schema map[string]any `json:"schema"`
@@ -405,7 +436,6 @@ type jsonSchema struct {
 
 func jsonSchemaFormat() jsonSchema {
 	return jsonSchema{
-		Type:   "json_schema",
 		Name:   "listing_insights",
 		Strict: true,
 		Schema: map[string]any{
@@ -462,41 +492,31 @@ func extractOutputText(body []byte) (string, error) {
 
 func extractOutputTextAndUsage(body []byte, model string, pricing Pricing) (string, domain.AIUsage, error) {
 	var response struct {
-		Output []struct {
-			Type    string `json:"type"`
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"output"`
-		OutputText string `json:"output_text"`
-		Usage      struct {
-			InputTokens        int `json:"input_tokens"`
-			OutputTokens       int `json:"output_tokens"`
-			TotalTokens        int `json:"total_tokens"`
-			InputTokensDetails struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Usage struct {
+			PromptTokens            int `json:"prompt_tokens"`
+			CompletionTokens        int `json:"completion_tokens"`
+			TotalTokens             int `json:"total_tokens"`
+			PromptTokensDetails     struct {
 				CachedTokens int `json:"cached_tokens"`
-			} `json:"input_tokens_details"`
-			OutputTokensDetails struct {
+			} `json:"prompt_tokens_details"`
+			CompletionTokensDetails struct {
 				ReasoningTokens int `json:"reasoning_tokens"`
-			} `json:"output_tokens_details"`
+			} `json:"completion_tokens_details"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &response); err != nil {
 		return "", domain.AIUsage{}, err
 	}
-	usage := usageFromResponse(model, pricing, response.Usage.InputTokens, response.Usage.InputTokensDetails.CachedTokens, response.Usage.OutputTokens, response.Usage.OutputTokensDetails.ReasoningTokens, response.Usage.TotalTokens)
-	if strings.TrimSpace(response.OutputText) != "" {
-		return response.OutputText, usage, nil
+	if len(response.Choices) == 0 {
+		return "", domain.AIUsage{}, errors.New("API response did not contain choices")
 	}
-	for _, output := range response.Output {
-		for _, content := range output.Content {
-			if content.Type == "output_text" && strings.TrimSpace(content.Text) != "" {
-				return content.Text, usage, nil
-			}
-		}
-	}
-	return "", usage, errors.New("missing output_text in OpenAI response")
+	usage := usageFromResponse(model, pricing, response.Usage.PromptTokens, response.Usage.PromptTokensDetails.CachedTokens, response.Usage.CompletionTokens, response.Usage.CompletionTokensDetails.ReasoningTokens, response.Usage.TotalTokens)
+	return response.Choices[0].Message.Content, usage, nil
 }
 
 func usageFromResponse(model string, pricing Pricing, inputTokens, cachedInputTokens, outputTokens, reasoningTokens, totalTokens int) domain.AIUsage {
@@ -505,7 +525,7 @@ func usageFromResponse(model string, pricing Pricing, inputTokens, cachedInputTo
 		float64(cachedInputTokens)*pricing.CachedInputPerMillionUSD +
 		float64(outputTokens)*pricing.OutputPerMillionUSD) / 1_000_000
 	return domain.AIUsage{
-		Provider:                      "openai",
+		Provider:                      "openrouter",
 		Model:                         model,
 		InputTokens:                   inputTokens,
 		CachedInputTokens:             cachedInputTokens,

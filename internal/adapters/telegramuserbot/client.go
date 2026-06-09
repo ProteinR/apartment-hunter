@@ -37,6 +37,8 @@ type Config struct {
 
 type Client struct {
 	cfg Config
+	mu  sync.Mutex
+	tg  *telegram.Client
 }
 
 type MessageHandler func(ctx context.Context, message sources.ChannelMessage) error
@@ -113,6 +115,15 @@ func (c *Client) Listen(ctx context.Context, handler MessageHandler) error {
 	dispatcher.OnNewChannelMessage(func(ctx context.Context, entities tg.Entities, update *tg.UpdateNewChannelMessage) error {
 		return handleMessage(ctx, entities, update.Message)
 	})
+
+	c.mu.Lock()
+	c.tg = client
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.tg = nil
+		c.mu.Unlock()
+	}()
 
 	return client.Run(ctx, func(ctx context.Context) error {
 		if err := c.authIfNeeded(ctx, client); err != nil {
@@ -514,6 +525,43 @@ func (c *Client) DownloadPhotos(ctx context.Context, message sources.ChannelMess
 	}
 	if len(tokens) == 0 {
 		return nil, nil
+	}
+
+	c.mu.Lock()
+	activeClient := c.tg
+	c.mu.Unlock()
+
+	if activeClient != nil {
+		var downloaded []sources.ChannelPhoto
+		for i, token := range tokens {
+			location := &tg.InputPhotoFileLocation{
+				ID:            token.PhotoID,
+				AccessHash:    token.AccessHash,
+				FileReference: token.FileReference,
+				ThumbSize:     token.ThumbSize,
+			}
+			channelID := message.ChannelID
+			if channelID == "" {
+				channelID = "unknown"
+			}
+			dir := filepath.Join(c.cfg.MediaDir, safePathPart(channelID))
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				return nil, err
+			}
+			path := filepath.Join(dir, fmt.Sprintf("%d_%d_%s.jpg", message.MessageID, token.PhotoID, safePathPart(token.ThumbSize)))
+			if _, err := activeClient.Download(location).ToPath(ctx, path); err != nil {
+				return nil, fmt.Errorf("download telegram photo %d from message %d: %w", token.PhotoID, message.MessageID, err)
+			}
+			caption := ""
+			if i < len(message.Photos) {
+				caption = message.Photos[i].Caption
+			}
+			downloaded = append(downloaded, sources.ChannelPhoto{
+				ID:      "file://" + path,
+				Caption: caption,
+			})
+		}
+		return downloaded, nil
 	}
 
 	storage, err := c.sessionStorage(ctx)

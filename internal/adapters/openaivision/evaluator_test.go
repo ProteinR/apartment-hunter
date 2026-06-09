@@ -39,26 +39,37 @@ func TestAnalyzeSendsResizedPhotoAndParsesInsights(t *testing.T) {
 			t.Fatalf("unexpected auth header %q", got)
 		}
 
-		var request responsesRequest
+		var request chatRequest
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Fatal(err)
 		}
-		if request.Text.Format.Type != "json_schema" {
-			t.Fatalf("expected json schema format, got %q", request.Text.Format.Type)
+		if request.ResponseFormat.Type != "json_schema" {
+			t.Fatalf("expected json schema format, got %q", request.ResponseFormat.Type)
 		}
-		if len(request.Input) != 1 {
-			t.Fatalf("expected one input message, got %d", len(request.Input))
+		if len(request.Messages) != 2 {
+			t.Fatalf("expected two messages, got %d", len(request.Messages))
 		}
-		for _, item := range request.Input[0].Content {
-			if item.Type != "input_image" {
+		userContentBytes, err := json.Marshal(request.Messages[1].Content)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var contentItems []contentItem
+		if err := json.Unmarshal(userContentBytes, &contentItems); err != nil {
+			t.Fatal(err)
+		}
+		for _, item := range contentItems {
+			if item.Type != "image_url" {
 				continue
 			}
 			sawImage = true
-			const prefix = "data:image/jpeg;base64,"
-			if !strings.HasPrefix(item.ImageURL, prefix) {
-				t.Fatalf("expected jpeg data URL, got %q", item.ImageURL[:min(len(item.ImageURL), 24)])
+			if item.ImageURL == nil {
+				t.Fatal("expected image_url object")
 			}
-			data, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(item.ImageURL, prefix))
+			const prefix = "data:image/jpeg;base64,"
+			if !strings.HasPrefix(item.ImageURL.URL, prefix) {
+				t.Fatalf("expected jpeg data URL, got %q", item.ImageURL.URL[:min(len(item.ImageURL.URL), 24)])
+			}
+			data, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(item.ImageURL.URL, prefix))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -72,12 +83,10 @@ func TestAnalyzeSendsResizedPhotoAndParsesInsights(t *testing.T) {
 		}
 
 		return response(http.StatusOK, "application/json", `{
-			"output": [{
-				"type": "message",
-				"content": [{
-					"type": "output_text",
-					"text": "{\"style\":\"modern\",\"has_glossy_ceilings\":false,\"has_dark_walls\":false,\"has_old_renovation\":false,\"windows_facing_house\":true,\"view_quality\":0.2,\"interior_quality\":0.9,\"description_highlights\":[\"bright kitchen\"]}"
-				}]
+			"choices": [{
+				"message": {
+					"content": "{\"style\":\"modern\",\"has_glossy_ceilings\":false,\"has_dark_walls\":false,\"has_old_renovation\":false,\"windows_facing_house\":true,\"view_quality\":0.2,\"interior_quality\":0.9,\"description_highlights\":[\"bright kitchen\"]}"
+				}
 			}]
 		}`), nil
 	})}

@@ -32,15 +32,25 @@ type Agent struct {
 }
 
 func New(apiKey string, store ProfileStore) *Agent {
-	apiURL := strings.TrimSpace(os.Getenv("OPENAI_BASE_URL"))
+	apiURL := strings.TrimSpace(os.Getenv("OPENROUTER_BASE_URL"))
 	if apiURL == "" {
-		apiURL = "https://api.openai.com/v1/chat/completions"
+		apiURL = strings.TrimSpace(os.Getenv("OPENAI_BASE_URL"))
+	}
+	if apiURL == "" {
+		if strings.HasPrefix(apiKey, "sk-or-") || os.Getenv("OPENROUTER_API_KEY") != "" {
+			apiURL = "https://openrouter.ai/api/v1/chat/completions"
+		} else {
+			apiURL = "https://api.openai.com/v1/chat/completions"
+		}
 	} else {
 		apiURL = strings.TrimRight(apiURL, "/") + "/chat/completions"
 	}
-	model := strings.TrimSpace(os.Getenv("OPENAI_PREFERENCES_MODEL"))
+	model := strings.TrimSpace(os.Getenv("OPENROUTER_PREFERENCES_MODEL"))
 	if model == "" {
-		model = "gpt-4o"
+		model = strings.TrimSpace(os.Getenv("OPENAI_PREFERENCES_MODEL"))
+	}
+	if model == "" {
+		model = "gpt-5.4-mini"
 	}
 	
 	ttlHours := 24
@@ -61,9 +71,12 @@ func New(apiKey string, store ProfileStore) *Agent {
 }
 
 func FromEnv(store ProfileStore) (*Agent, error) {
-	apiKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+	apiKey := strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY"))
 	if apiKey == "" {
-		return nil, fmt.Errorf("OPENAI_API_KEY is required for MCP agent")
+		apiKey = strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+	}
+	if apiKey == "" {
+		return nil, fmt.Errorf("neither OPENROUTER_API_KEY nor OPENAI_API_KEY is configured for MCP agent")
 	}
 	return New(apiKey, store), nil
 }
@@ -213,8 +226,8 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 		now := time.Now()
 		profile.MCPHistory = append(profile.MCPHistory, profiles.MCPMessage{Role: "user", Content: text, CreatedAt: now})
 		profile.MCPHistory = append(profile.MCPHistory, profiles.MCPMessage{Role: "assistant", Content: respMsg.Content, CreatedAt: now})
-		if len(profile.MCPHistory) > 10 {
-			profile.MCPHistory = profile.MCPHistory[len(profile.MCPHistory)-10:]
+		if len(profile.MCPHistory) > 50 {
+			profile.MCPHistory = profile.MCPHistory[len(profile.MCPHistory)-50:]
 		}
 		if err := a.store.UpsertProfile(ctx, profile); err != nil {
 			return "", nil, fmt.Errorf("failed to save mcp history: %w", err)
@@ -281,6 +294,199 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 	// Update sliding window history
 	now := time.Now()
 	profile.MCPHistory = append(profile.MCPHistory, profiles.MCPMessage{Role: "user", Content: text, CreatedAt: now})
+	profile.MCPHistory = append(profile.MCPHistory, profiles.MCPMessage{Role: "assistant", Content: respMsg.Content, CreatedAt: now})
+	if len(profile.MCPHistory) > 50 {
+		profile.MCPHistory = profile.MCPHistory[len(profile.MCPHistory)-50:]
+	}
+	
+	if err := a.store.UpsertProfile(ctx, profile); err != nil {
+		return "", nil, fmt.Errorf("failed to save mcp history: %w", err)
+	}
+
+	return respMsg.Content, prefsChanged, nil
+}
+
+func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing domain.ApartmentListing, feedbackText string) (string, *domain.UserPreferences, error) {
+	profile, ok, err := a.store.GetProfile(ctx, profileID)
+	if err != nil {
+		return "", nil, err
+	}
+	if !ok {
+		return "Профиль не найден", nil, nil
+	}
+
+	var searchAreaJSON any
+	if saStore, ok := a.store.(interface {
+		LatestSearchAreaGeoJSON(ctx context.Context, profileID string) (string, bool, error)
+	}); ok {
+		if geoJSON, ok, err := saStore.LatestSearchAreaGeoJSON(ctx, profileID); err == nil && ok {
+			var parsed any
+			if err := json.Unmarshal([]byte(geoJSON), &parsed); err == nil {
+				searchAreaJSON = parsed
+			} else {
+				searchAreaJSON = geoJSON
+			}
+		}
+	}
+
+	state, err := json.MarshalIndent(map[string]any{
+		"FilterDisabled": profiles.FilterDisabled(profile),
+		"Preferences":    profile.Preferences,
+		"SearchArea":     searchAreaJSON,
+	}, "", "  ")
+	if err != nil {
+		return "", nil, err
+	}
+
+	systemPrompt := fmt.Sprintf(`Ты - персональный ассистент по поиску квартир (MCP Agent). Пользователь ответил на отчет об объявлении о квартире с отзывом. Твоя цель — помочь пользователю уточнить фильтры, основываясь на его отзыве и данных объявления.
+Ты можешь:
+1. Рассказывать пользователю, какие у него сейчас стоят настройки и как ты видишь его идеальную квартиру.
+2. Обсуждать желаемый ремонт, район, бюджет, удобства и помогать сформулировать четкие критерии.
+3. Изменять фильтры с помощью инструмента update_preferences, НО только после того, как согласуешь изменения с пользователем, или если пользователь прямо попросил обновить фильтр.
+4. Включать/выключать фильтрацию с помощью set_filtering_status.
+
+Веди диалог живо, эмпатично и профессионально. Задавай уточняющие вопросы, если пожелания размыты (например, "хочу бабушкин вариант" -> предложи добавить "soviet" в reject_rules).
+
+Текущее состояние настроек:
+%s
+
+Отвечай в дружелюбном тоне.`, string(state))
+
+	messages := []chatMessage{
+		{Role: "system", Content: systemPrompt},
+	}
+
+	var activeHistory []profiles.MCPMessage
+	for _, msg := range profile.MCPHistory {
+		if a.ttlHours > 0 && !msg.CreatedAt.IsZero() && time.Since(msg.CreatedAt) > time.Duration(a.ttlHours)*time.Hour {
+			continue
+		}
+		activeHistory = append(activeHistory, msg)
+	}
+	profile.MCPHistory = activeHistory
+
+	for _, msg := range profile.MCPHistory {
+		messages = append(messages, chatMessage{
+			Role:    msg.Role,
+			Content: msg.Content,
+		})
+	}
+
+	listingJSON, _ := json.MarshalIndent(listing, "", "  ")
+	userContent := fmt.Sprintf("Контекст: Я ответил на следующее объявление:\n%s\n\nМой отзыв: %s", string(listingJSON), feedbackText)
+	messages = append(messages, chatMessage{Role: "user", Content: userContent})
+
+	tools := []chatTool{
+		{
+			Type: "function",
+			Function: chatFunction{
+				Name:        "set_filtering_status",
+				Description: "Включает или выключает общую фильтрацию объявлений. Если фильтрация выключена, все объявления будут проходить независимо от правил.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"enabled": map[string]any{
+							"type":        "boolean",
+							"description": "true - включить фильтрацию (обычный режим), false - выключить (пропускать все объявления)",
+						},
+					},
+					"required": []string{"enabled"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: chatFunction{
+				Name:        "update_preferences",
+				Description: "Полностью обновляет параметры поиска квартир (бюджет, площадь, ремонт, локации, стоп-слова и т.д.).",
+				Parameters: openaipreferences.PreferencesSchema(),
+			},
+		},
+	}
+
+	reqBody := chatRequest{
+		Model:    a.model,
+		Messages: messages,
+		Tools:    tools,
+	}
+
+	respMsg, err := a.makeChatRequest(ctx, reqBody)
+	if err != nil {
+		return "", nil, err
+	}
+
+	if len(respMsg.ToolCalls) == 0 {
+		now := time.Now()
+		profile.MCPHistory = append(profile.MCPHistory, profiles.MCPMessage{Role: "user", Content: "[Отзыв на объявление] " + feedbackText, CreatedAt: now})
+		profile.MCPHistory = append(profile.MCPHistory, profiles.MCPMessage{Role: "assistant", Content: respMsg.Content, CreatedAt: now})
+		if len(profile.MCPHistory) > 50 {
+			profile.MCPHistory = profile.MCPHistory[len(profile.MCPHistory)-50:]
+		}
+		if err := a.store.UpsertProfile(ctx, profile); err != nil {
+			return "", nil, fmt.Errorf("failed to save mcp history: %w", err)
+		}
+		return respMsg.Content, nil, nil
+	}
+
+	var prefsChanged *domain.UserPreferences
+
+	// Apply tool calls
+	messages = append(messages, respMsg)
+	for _, tc := range respMsg.ToolCalls {
+		var toolResult string
+		switch tc.Function.Name {
+		case "set_filtering_status":
+			var args struct {
+				Enabled bool `json:"enabled"`
+			}
+			json.Unmarshal([]byte(tc.Function.Arguments), &args)
+			disabled := !args.Enabled
+			profile.FilterDisabled = &disabled
+			err = a.store.UpsertProfile(ctx, profile)
+			if err == nil {
+				toolResult = "success"
+			} else {
+				toolResult = err.Error()
+			}
+		case "update_preferences":
+			var newPrefs domain.UserPreferences
+			err := json.Unmarshal([]byte(tc.Function.Arguments), &newPrefs)
+			if err != nil {
+				toolResult = "error: failed to parse preferences JSON"
+			} else {
+				profile.Preferences = &newPrefs
+				prefsChanged = &newPrefs
+				err = a.store.UpsertProfile(ctx, profile)
+				if err == nil {
+					toolResult = "success"
+				} else {
+					toolResult = err.Error()
+				}
+			}
+		default:
+			toolResult = "unknown function"
+		}
+
+		messages = append(messages, chatMessage{
+			Role:       "tool",
+			ToolCallID: tc.ID,
+			Name:       tc.Function.Name,
+			Content:    toolResult,
+		})
+	}
+
+	// Final request to get summary
+	reqBody.Messages = messages
+	reqBody.Tools = nil
+
+	respMsg, err = a.makeChatRequest(ctx, reqBody)
+	if err != nil {
+		return "", nil, err
+	}
+
+	// Update sliding window history
+	now := time.Now()
+	profile.MCPHistory = append(profile.MCPHistory, profiles.MCPMessage{Role: "user", Content: "[Отзыв на объявление] " + feedbackText, CreatedAt: now})
 	profile.MCPHistory = append(profile.MCPHistory, profiles.MCPMessage{Role: "assistant", Content: respMsg.Content, CreatedAt: now})
 	if len(profile.MCPHistory) > 10 {
 		profile.MCPHistory = profile.MCPHistory[len(profile.MCPHistory)-10:]

@@ -41,7 +41,7 @@ type ProfileStore interface {
 	SaveSearchProfile(ctx context.Context, profile domain.UserSearchProfile) error
 	UpsertProfileChannel(ctx context.Context, profileID string, sub profiles.ChannelSubscription) (bool, error)
 	RemoveProfileChannel(ctx context.Context, profileID, channel string) (bool, error)
-	SaveListingFeedback(ctx context.Context, feedback domain.ListingFeedback) (string, bool, error)
+	SaveListingFeedback(ctx context.Context, feedback domain.ListingFeedback) (string, *domain.ApartmentListing, error)
 }
 
 type preferenceSession struct {
@@ -608,7 +608,7 @@ func (b *Bot) saveReplyFeedback(ctx context.Context, message *models.Message) (s
 	if text == "" {
 		return "Пустой отзыв не сохранен.", nil
 	}
-	id, ok, err := b.store.SaveListingFeedback(ctx, domain.ListingFeedback{
+	id, listing, err := b.store.SaveListingFeedback(ctx, domain.ListingFeedback{
 		TelegramChatID:    message.Chat.ID,
 		FeedbackMessageID: message.ID,
 		RepliedMessageID:  message.ReplyToMessage.ID,
@@ -617,9 +617,27 @@ func (b *Bot) saveReplyFeedback(ctx context.Context, message *models.Message) (s
 	if err != nil {
 		return "", err
 	}
-	if !ok {
+	if listing == nil {
 		return "Не нашел объявление для этого ответа. Ответь на сообщение с отчетом по квартире, например: «гео определено неверно».", nil
 	}
+
+	profile, profileOk, profileErr := b.store.GetProfile(ctx, profiles.IDForTelegramChat(message.Chat.ID))
+	if profileErr == nil && profileOk && profiles.MCPModeEnabled(profile) && b.mcpAgent != nil {
+		reply, prefsChanged, agentErr := b.mcpAgent.ProcessFeedback(ctx, profile.ID, *listing, text)
+		if agentErr != nil {
+			return "Отзыв сохранен, но ошибка агента: " + agentErr.Error(), nil
+		}
+		if prefsChanged != nil {
+			draft := preferenceparser.Draft{
+				Preferences: *prefsChanged,
+			}
+			if draftErr := b.saveDraft(ctx, message.Chat.ID, draft, nil); draftErr != nil {
+				return "Отзыв сохранен, но ошибка применения фильтров: " + draftErr.Error(), nil
+			}
+		}
+		return reply, nil
+	}
+
 	return "Отзыв сохранен: feedback #" + id, nil
 }
 

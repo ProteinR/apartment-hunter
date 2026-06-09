@@ -435,29 +435,35 @@ func (r *Repository) SaveEvaluation(ctx context.Context, record domain.ListingEv
 	return err
 }
 
-func (r *Repository) SaveListingFeedback(ctx context.Context, feedback domain.ListingFeedback) (string, bool, error) {
+func (r *Repository) SaveListingFeedback(ctx context.Context, feedback domain.ListingFeedback) (string, *domain.ApartmentListing, error) {
 	feedback.Text = strings.TrimSpace(feedback.Text)
 	if feedback.Text == "" {
-		return "", false, fmt.Errorf("feedback text is required")
+		return "", nil, fmt.Errorf("feedback text is required")
 	}
 	if feedback.TelegramChatID == 0 || feedback.FeedbackMessageID == 0 || feedback.RepliedMessageID == 0 {
-		return "", false, fmt.Errorf("telegram chat id, feedback message id and replied message id are required")
+		return "", nil, fmt.Errorf("telegram chat id, feedback message id and replied message id are required")
 	}
 
 	var evaluationID, listingID, profileID string
+	var listingJSON string
 	err := r.db.QueryRowContext(ctx, `
-		select id::text, listing_id, coalesce(profile_id, '')
+		select id::text, listing_id, coalesce(profile_id, ''), listing::text
 		from listing_evaluations
 		where telegram_chat_id = $1
 			and (bot_message_id = $2 or message_id = $2)
 		order by updated_at desc, id desc
 		limit 1
-	`, feedback.TelegramChatID, feedback.RepliedMessageID).Scan(&evaluationID, &listingID, &profileID)
+	`, feedback.TelegramChatID, feedback.RepliedMessageID).Scan(&evaluationID, &listingID, &profileID, &listingJSON)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return "", false, nil
+			return "", nil, nil
 		}
-		return "", false, err
+		return "", nil, err
+	}
+
+	var listing domain.ApartmentListing
+	if err := json.Unmarshal([]byte(listingJSON), &listing); err != nil {
+		return "", nil, fmt.Errorf("failed to parse listing json: %w", err)
 	}
 
 	var id string
@@ -472,7 +478,7 @@ func (r *Repository) SaveListingFeedback(ctx context.Context, feedback domain.Li
 		returning id::text
 	`, evaluationID, listingID, nullString(profileID), feedback.TelegramChatID,
 		feedback.FeedbackMessageID, feedback.RepliedMessageID, feedback.Text).Scan(&id)
-	return id, true, err
+	return id, &listing, err
 }
 
 func (r *Repository) UpdateEvaluationNotificationMessageID(ctx context.Context, listingID string, botMessageID int) error {

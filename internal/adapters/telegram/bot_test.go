@@ -83,13 +83,13 @@ func (s *fakeProfileStore) RemoveProfileChannel(ctx context.Context, profileID, 
 	return false, nil
 }
 
-func (s *fakeProfileStore) SaveListingFeedback(ctx context.Context, feedback domain.ListingFeedback) (string, bool, error) {
+func (s *fakeProfileStore) SaveListingFeedback(ctx context.Context, feedback domain.ListingFeedback) (string, *domain.ApartmentListing, error) {
 	if !s.feedbackMatched {
-		return "", false, nil
+		return "", nil, nil
 	}
 	feedback.ID = "7"
 	s.feedbacks = append(s.feedbacks, feedback)
-	return feedback.ID, true, nil
+	return feedback.ID, &domain.ApartmentListing{ID: "dummy-listing"}, nil
 }
 
 func TestHandleTextParsesPreviewsAndSavesPreferences(t *testing.T) {

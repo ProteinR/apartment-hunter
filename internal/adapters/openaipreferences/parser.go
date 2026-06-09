@@ -16,8 +16,8 @@ import (
 )
 
 const (
-	defaultAPIURL = "https://api.openai.com/v1/responses"
-	defaultModel  = "gpt-4.1-mini"
+	defaultAPIURL = "https://openrouter.ai/api/v1/chat/completions"
+	defaultModel  = "openai/gpt-4o-mini"
 )
 
 type Parser struct {
@@ -67,17 +67,32 @@ func New(apiKey string, opts ...Option) *Parser {
 }
 
 func FromEnv(opts ...Option) (*Parser, error) {
-	apiKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+	apiKey := strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY"))
 	if apiKey == "" {
-		return nil, errors.New("OPENAI_API_KEY is required for natural language preferences parser")
+		apiKey = strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
 	}
+	if apiKey == "" {
+		return nil, errors.New("neither OPENROUTER_API_KEY nor OPENAI_API_KEY is configured for natural language preferences parser")
+	}
+	
 	envOpts := []Option{}
-	if model := strings.TrimSpace(os.Getenv("OPENAI_PREFERENCES_MODEL")); model != "" {
+	
+	model := strings.TrimSpace(os.Getenv("OPENROUTER_PREFERENCES_MODEL"))
+	if model == "" {
+		model = strings.TrimSpace(os.Getenv("OPENAI_PREFERENCES_MODEL"))
+	}
+	if model != "" {
 		envOpts = append(envOpts, WithModel(model))
 	}
-	if apiURL := strings.TrimSpace(os.Getenv("OPENAI_BASE_URL")); apiURL != "" {
-		envOpts = append(envOpts, WithAPIURL(strings.TrimRight(apiURL, "/")+"/responses"))
+	
+	baseURL := strings.TrimSpace(os.Getenv("OPENROUTER_BASE_URL"))
+	if baseURL == "" {
+		baseURL = strings.TrimSpace(os.Getenv("OPENAI_BASE_URL"))
 	}
+	if baseURL != "" {
+		envOpts = append(envOpts, WithAPIURL(strings.TrimRight(baseURL, "/")+"/chat/completions"))
+	}
+	
 	envOpts = append(envOpts, opts...)
 	return New(apiKey, envOpts...), nil
 }
@@ -102,24 +117,28 @@ func (p *Parser) Extract(ctx context.Context, normalizedInput string) (*domain.U
 
 func (p *Parser) call(ctx context.Context, instructions, input, schemaName string, schema map[string]any, out any) error {
 	if p.apiKey == "" {
-		return errors.New("missing OpenAI API key")
+		return errors.New("missing API key")
 	}
-	payload := responsesRequest{
-		Model:        p.model,
-		Instructions: instructions,
-		Input: []inputMessage{{
-			Role: "user",
-			Content: []contentItem{{
-				Type: "input_text",
-				Text: input,
-			}},
-		}},
-		Text: textConfig{Format: jsonSchema{
-			Type:   "json_schema",
-			Name:   schemaName,
-			Strict: true,
-			Schema: schema,
-		}},
+	payload := chatRequest{
+		Model: p.model,
+		Messages: []chatMessage{
+			{
+				Role:    "system",
+				Content: instructions,
+			},
+			{
+				Role:    "user",
+				Content: input,
+			},
+		},
+		ResponseFormat: responseFormat{
+			Type: "json_schema",
+			JSONSchema: jsonSchema{
+				Name:   schemaName,
+				Strict: true,
+				Schema: schema,
+			},
+		},
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -141,7 +160,7 @@ func (p *Parser) call(ctx context.Context, instructions, input, schemaName strin
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("openai preferences API status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		return fmt.Errorf("preferences API status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 	outputText, err := extractOutputText(respBody)
 	if err != nil {
@@ -267,29 +286,23 @@ func stringArray() map[string]any {
 	return map[string]any{"type": "array", "items": map[string]any{"type": "string"}}
 }
 
-type responsesRequest struct {
-	Model        string         `json:"model"`
-	Instructions string         `json:"instructions"`
-	Input        []inputMessage `json:"input"`
-	Text         textConfig     `json:"text"`
+type chatRequest struct {
+	Model          string         `json:"model"`
+	Messages       []chatMessage  `json:"messages"`
+	ResponseFormat responseFormat `json:"response_format"`
 }
 
-type inputMessage struct {
-	Role    string        `json:"role"`
-	Content []contentItem `json:"content"`
+type chatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
 }
 
-type contentItem struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
-}
-
-type textConfig struct {
-	Format jsonSchema `json:"format"`
+type responseFormat struct {
+	Type       string     `json:"type"`
+	JSONSchema jsonSchema `json:"json_schema"`
 }
 
 type jsonSchema struct {
-	Type   string         `json:"type"`
 	Name   string         `json:"name"`
 	Strict bool           `json:"strict"`
 	Schema map[string]any `json:"schema"`
@@ -297,25 +310,17 @@ type jsonSchema struct {
 
 func extractOutputText(body []byte) (string, error) {
 	var response struct {
-		Output []struct {
-			Content []struct {
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"output"`
-		OutputText string `json:"output_text"`
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
 	}
 	if err := json.Unmarshal(body, &response); err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(response.OutputText) != "" {
-		return response.OutputText, nil
+	if len(response.Choices) == 0 {
+		return "", errors.New("API response did not contain choices")
 	}
-	for _, output := range response.Output {
-		for _, content := range output.Content {
-			if strings.TrimSpace(content.Text) != "" {
-				return content.Text, nil
-			}
-		}
-	}
-	return "", errors.New("openai response did not contain output text")
+	return response.Choices[0].Message.Content, nil
 }
