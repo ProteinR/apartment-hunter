@@ -591,43 +591,6 @@ func (c *Client) DownloadPhotos(ctx context.Context, message sources.ChannelMess
 		return nil, nil
 	}
 
-	c.mu.Lock()
-	activeClient := c.tg
-	c.mu.Unlock()
-
-	if activeClient != nil {
-		var downloaded []sources.ChannelPhoto
-		for i, token := range tokens {
-			location := &tg.InputPhotoFileLocation{
-				ID:            token.PhotoID,
-				AccessHash:    token.AccessHash,
-				FileReference: token.FileReference,
-				ThumbSize:     token.ThumbSize,
-			}
-			channelID := message.ChannelID
-			if channelID == "" {
-				channelID = "unknown"
-			}
-			dir := filepath.Join(c.cfg.MediaDir, safePathPart(channelID))
-			if err := os.MkdirAll(dir, 0755); err != nil {
-				return nil, err
-			}
-			path := filepath.Join(dir, fmt.Sprintf("%d_%d_%s.jpg", message.MessageID, token.PhotoID, safePathPart(token.ThumbSize)))
-			if _, err := activeClient.Download(location).ToPath(ctx, path); err != nil {
-				return nil, fmt.Errorf("download telegram photo %d from message %d: %w", token.PhotoID, message.MessageID, err)
-			}
-			caption := ""
-			if i < len(message.Photos) {
-				caption = message.Photos[i].Caption
-			}
-			downloaded = append(downloaded, sources.ChannelPhoto{
-				ID:      "file://" + path,
-				Caption: caption,
-			})
-		}
-		return downloaded, nil
-	}
-
 	storage, err := c.sessionStorage(ctx)
 	if err != nil {
 		return nil, err

@@ -126,3 +126,46 @@ func TestFromChannelMessageParsesAlbumCaptionPriceWithTrailingWords(t *testing.T
 		t.Fatalf("expected area 80, got %.1f", listing.AreaM2)
 	}
 }
+
+func TestFromChannelMessageParsesPriceIgnoringDeposit(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want int
+	}{
+		{
+			name: "deposit before price",
+			text: "🟢депозит 200$.\nЦена 800$ аренда на год",
+			want: 800,
+		},
+		{
+			name: "price before deposit",
+			text: "Цена 800$, залог 400$ за последний месяц",
+			want: 800,
+		},
+		{
+			name: "only deposit mentions",
+			text: "Депозит 300$, без комиссии",
+			want: 300, // Fallback to first if all skipped
+		},
+		{
+			name: "rent and deposit on same line",
+			text: "Аренда 800$ в месяц, залог 800$",
+			want: 800,
+		},
+		{
+			name: "deposit with rent keyword after it",
+			text: "депозит 200$, цена 600$",
+			want: 600,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			listing := FromChannelMessage(sources.ChannelMessage{Text: tt.text})
+			if listing.Price != tt.want {
+				t.Fatalf("expected price %d, got %d", tt.want, listing.Price)
+			}
+		})
+	}
+}

@@ -78,23 +78,79 @@ func firstNonEmptyLine(text string) string {
 }
 
 func parsePrice(text string) int {
-	match := pricePattern.FindStringSubmatch(text)
-	if len(match) < 2 {
+	matches := pricePattern.FindAllStringSubmatchIndex(text, -1)
+	if len(matches) == 0 {
 		return 0
 	}
-	value := ""
-	for _, candidate := range match[1:] {
-		if strings.TrimSpace(candidate) != "" {
-			value = candidate
-			break
+
+	var firstParsedPrice int
+	hasFirstParsedPrice := false
+
+	for _, m := range matches {
+		var value string
+		for i := 1; i < len(m)/2; i++ {
+			startIdx := m[2*i]
+			endIdx := m[2*i+1]
+			if startIdx != -1 && endIdx != -1 {
+				val := strings.TrimSpace(text[startIdx:endIdx])
+				if val != "" {
+					value = val
+					break
+				}
+			}
+		}
+		if value == "" {
+			continue
+		}
+		value = strings.NewReplacer(" ", "", ",", "", ".", "").Replace(value)
+		price, err := strconv.Atoi(value)
+		if err != nil || price <= 0 {
+			continue
+		}
+
+		if !hasFirstParsedPrice {
+			firstParsedPrice = price
+			hasFirstParsedPrice = true
+		}
+
+		// Find the start of the line containing the match
+		lineStart := 0
+		for idx := m[0] - 1; idx >= 0; idx-- {
+			if text[idx] == '\n' {
+				lineStart = idx + 1
+				break
+			}
+		}
+		linePrefix := strings.ToLower(text[lineStart:m[0]])
+
+		hasDepositKeyword := false
+		for _, kw := range []string{"депозит", "залог", "deposit", "комиссия", "commission"} {
+			idx := strings.LastIndex(linePrefix, kw)
+			if idx != -1 {
+				hasRentAfter := false
+				suffix := linePrefix[idx+len(kw):]
+				for _, rentKw := range []string{"цена", "price", "стоимость", "rent"} {
+					if strings.Contains(suffix, rentKw) {
+						hasRentAfter = true
+						break
+					}
+				}
+				if !hasRentAfter {
+					hasDepositKeyword = true
+					break
+				}
+			}
+		}
+
+		if !hasDepositKeyword {
+			return price
 		}
 	}
-	if value == "" {
-		return 0
+
+	if hasFirstParsedPrice {
+		return firstParsedPrice
 	}
-	value = strings.NewReplacer(" ", "", ",", "", ".", "").Replace(value)
-	price, _ := strconv.Atoi(value)
-	return price
+	return 0
 }
 
 func parseArea(text string) float64 {
