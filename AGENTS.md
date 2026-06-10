@@ -170,17 +170,17 @@ For expensive pipeline issues:
 
 ## Testing Changes via Telegram MCP
 
-When modifying the preference parser, bot logic, or database storage:
+Когда агент вносит любые изменения, связанные с ботом (включая логику команд, парсер предпочтений, работу с базой данных или формат отчетов/сообщений, отправляемых ботом), он **ОБЯЗАН** протестировать эти изменения интеграционными тестами с помощью Telegram MCP.
 
-- Refer to the [telegram-bot-communication skill](.agents/skills/telegram-bot-communication/SKILL.md) for detailed instructions on bot commands, modes (MCP/Debug/Regular), and how to configure/run the bot for testing.
-- Agents MUST verify the changes interactively using the Telegram MCP bot interface.
-- **CRITICAL:** Do NOT use browser tools or open web browsers (such as `browser_subagent` or navigating to `web.telegram.org` in a browser) for testing. Browser scraping is unreliable, and browser authentication is locked.
-- **HOW TO TEST:** Use the prepared Python script [scripts/test_bot.py](file:///Users/dmemruk/development/go/apartment-hunter/scripts/test_bot.py). Run it using the virtual environment `/Users/dmemruk/development/go/telegram-mcp-app/.venv` and account session credentials from the local `.env` file:
-  - To test a single command/message: `/Users/dmemruk/development/go/telegram-mcp-app/.venv/bin/python scripts/test_bot.py --message "/preferences"`
-  - To test the full conversational search setup flow: `/Users/dmemruk/development/go/telegram-mcp-app/.venv/bin/python scripts/test_bot.py --flow`
-  - If you need a custom interaction sequence, you can copy or modify this script in the `scratch/` directory.
-- If the test script detects any errors, incorrect behavior, or crash logs, the agent must treat it as a failed validation and return the code for rework.
-- Once the validation passes successfully, agents MUST immediately commit all production and configuration changes.
+- См. [telegram-bot-communication skill](.agents/skills/telegram-bot-communication/SKILL.md) для получения подробных инструкций о командах бота, режимах работы и конфигурировании.
+- Агенты **ОБЯЗАНЫ** проверять изменения интерактивно с использованием Telegram MCP-интерфейса бота.
+- **КРИТИЧЕСКИ ВАЖНО:** Не используйте браузерные инструменты или открытие браузера для тестов.
+- **КАК ТЕСТИРОВАТЬ:** Используйте подготовленный Python-скрипт [scripts/test_bot.py](file:///Users/dmemruk/development/go/apartment-hunter/scripts/test_bot.py). Запускайте его в виртуальном окружении `/Users/dmemruk/development/go/telegram-mcp-app/.venv` с учетными данными сессии из локального файла `.env`:
+  - Для теста одной команды/сообщения: `/Users/dmemruk/development/go/telegram-mcp-app/.venv/bin/python scripts/test_bot.py --message "/preferences"`
+  - Для теста полного диалогового сценария настройки предпочтений: `/Users/dmemruk/development/go/telegram-mcp-app/.venv/bin/python scripts/test_bot.py --flow`
+  - Если необходима кастомная последовательность действий, вы можете скопировать или изменить этот скрипт в директории `scratch/`.
+- Если скрипт тестирования обнаружит ошибки, неверное поведение или логи падения, агент должен считать валидацию проваленной и вернуть код на доработку.
+- После успешного прохождения валидации агент **ОБЯЗАН** немедленно закоммитить все рабочие и конфигурационные файлы.
 
 ## Housing Facts Knowledge Base
 
