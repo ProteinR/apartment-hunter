@@ -136,5 +136,8 @@ func normalizePreferences(prefs domain.UserPreferences) domain.UserPreferences {
 	if prefs.UnresolvedLocationRules == nil {
 		prefs.UnresolvedLocationRules = []string{}
 	}
+	if prefs.StopWords == nil {
+		prefs.StopWords = []string{"юсдт", "usdt", "обмен", "обменяю", "обменять", "exchange"}
+	}
 	return prefs
 }

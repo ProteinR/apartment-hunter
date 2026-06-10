@@ -519,3 +519,74 @@ func TestProcessMessageDoesNotRejectMissingAppliancesBeforePhotoAnalysis(t *test
 		t.Fatalf("expected listing to pass after appliance insights, got %s with reasons %v", result.Record.Status, result.Record.Score.RejectionReasons)
 	}
 }
+
+func TestLooksLikeApartmentListingRefinedHeuristics(t *testing.T) {
+	tests := []struct {
+		name     string
+		text     string
+		hasPhoto bool
+		price    int
+		area     float64
+		expected bool
+	}{
+		{
+			name:     "USDT request (non-listing)",
+			text:     "Кто продаст юсдт? Взамен отдам наличку",
+			hasPhoto: false,
+			expected: false,
+		},
+		{
+			name:     "USDT request with photo (non-listing)",
+			text:     "Кто продаст юсдт? Взамен отдам наличку",
+			hasPhoto: true,
+			expected: false,
+		},
+		{
+			name:     "Standard rental listing",
+			text:     "Сдам квартиру 1+1 в Батуми. Ремонт отличный.",
+			hasPhoto: true,
+			expected: true,
+		},
+		{
+			name:     "Brief listing with layout and price",
+			text:     "1+1, 55 кв.м., $500",
+			price:    500,
+			area:     55,
+			expected: true,
+		},
+		{
+			name:     "Listing mentioning rent but no explicit housing word",
+			text:     "Сдам на долгий срок. Посудомойка, газ. $400.",
+			price:    400,
+			expected: true,
+		},
+		{
+			name:     "Channel service message",
+			text:     "Добро пожаловать в группу по недвижимости в Батуми! Приобретите абонемент для публикаций.",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var photos []sources.ChannelPhoto
+			if tt.hasPhoto {
+				photos = append(photos, sources.ChannelPhoto{ID: "test"})
+			}
+			msg := sources.ChannelMessage{
+				Text:   tt.text,
+				Photos: photos,
+			}
+			listing := domain.ApartmentListing{
+				Title:       tt.text,
+				Description: tt.text,
+				Price:       tt.price,
+				AreaM2:      tt.area,
+			}
+			got := looksLikeApartmentListing(msg, listing)
+			if got != tt.expected {
+				t.Fatalf("expected looksLikeApartmentListing to be %v, got %v", tt.expected, got)
+			}
+		})
+	}
+}

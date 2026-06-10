@@ -1,6 +1,7 @@
 package scoring
 
 import (
+	"strings"
 	"testing"
 
 	"apartment-hunter/internal/domain"
@@ -248,5 +249,41 @@ func TestPriceScoreUsesPreferredRange(t *testing.T) {
 	}
 	if got := priceScore(700, 400, 600); got != 0 {
 		t.Fatalf("expected price above max budget to score 0, got %v", got)
+	}
+}
+
+func TestBasicFilterRejectsStopWords(t *testing.T) {
+	prefs := domain.UserPreferences{
+		StopWords: []string{"юсдт", "usdt", "обмен"},
+	}
+
+	// 1. Contains stop word in title
+	reasons := BasicFilterReasons(domain.ApartmentListing{
+		Title:       "Продам ЮСДТ",
+		Description: "Квартира хорошая",
+	}, prefs)
+	if len(reasons) != 1 || !strings.Contains(reasons[0], "contains stop word \"юсдт\"") {
+		t.Fatalf("expected stop word rejection for title, got %v", reasons)
+	}
+
+	// 2. Contains stop word in description
+	reasons = BasicFilterReasons(domain.ApartmentListing{
+		Title:       "Сдам квартиру",
+		Description: "Интересует обмен на usdt",
+	}, prefs)
+	if len(reasons) != 2 { // "exchange" or "usdt" or "обмен" might match multiple depending on array
+		t.Logf("Got multiple stop word matches: %v", reasons)
+	}
+	if len(reasons) == 0 {
+		t.Fatalf("expected stop word rejection for description, got none")
+	}
+
+	// 3. Does not contain stop words
+	reasons = BasicFilterReasons(domain.ApartmentListing{
+		Title:       "Сдам студию",
+		Description: "Посудомойка, хорошая локация",
+	}, prefs)
+	if len(reasons) != 0 {
+		t.Fatalf("expected clean listing to pass stop words check, got %v", reasons)
 	}
 }

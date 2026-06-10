@@ -77,6 +77,13 @@ func BasicFilterReasons(listing domain.ApartmentListing, prefs domain.UserPrefer
 	if prefs.MinAreaM2 > 0 && listing.AreaM2 > 0 && listing.AreaM2 < prefs.MinAreaM2 {
 		reasons = append(reasons, fmt.Sprintf("area %.1f is below minimum %.1f", listing.AreaM2, prefs.MinAreaM2))
 	}
+	text := strings.ToLower(listing.Title + " " + listing.Description)
+	for _, word := range prefs.StopWords {
+		wordClean := strings.ToLower(strings.TrimSpace(word))
+		if wordClean != "" && strings.Contains(text, wordClean) {
+			reasons = append(reasons, fmt.Sprintf("contains stop word %q", word))
+		}
+	}
 	return reasons
 }
 

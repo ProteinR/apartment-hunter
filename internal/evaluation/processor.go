@@ -273,15 +273,12 @@ func scoringListingWithInsights(listing domain.ApartmentListing, insights domain
 }
 
 func looksLikeApartmentListing(message sources.ChannelMessage, listing domain.ApartmentListing) bool {
-	if len(message.Photos) > 0 || listing.Price > 0 || listing.AreaM2 > 0 {
-		return true
-	}
-
-	text := strings.ToLower(strings.TrimSpace(listing.Title + "\n" + listing.Description))
+	text := strings.ToLower(strings.TrimSpace(message.Text))
 	if text == "" {
 		return len(message.Photos) > 0
 	}
 
+	// 1. Service messages / advertisements / admin notices
 	serviceSignals := []string{
 		"абонемент",
 		"администратор",
@@ -295,33 +292,82 @@ func looksLikeApartmentListing(message sources.ChannelMessage, listing domain.Ap
 		"welcome to the group",
 		"добро пожаловать в группу",
 	}
-	propertySignals := []string{
-		"апартамент",
-		"аренд",
-		"bedroom",
-		"flat",
-		"rent",
-		"sale",
-		"studio",
-		"квар",
-		"прода",
+
+	// 2. Rental signals (very strong indicators of rental listings)
+	rentalSignals := []string{
+		"аренд", // аренда, аренду, арендовать, под аренду, etc.
 		"сдам",
 		"сдаю",
 		"сдаёт",
 		"сдается",
 		"сдаётся",
-		"студи",
+		"снять",
+		"посуточно",
+		"помесячно",
+		"длительно",
+		"rent",
+		"lease",
+		"ქირავდება",
+		"გაქირავება",
+	}
+
+	// 3. Housing type signals
+	housingSignals := []string{
+		"квартир", // квартира, квартиру, квартиры, квартир
+		"апартамент", // апартаменты, апартамент
+		"студи", // студия, студию, студии
+		"комнат", // комната, комнат, комнаты
+		"спальн", // спальня, спальни, спален
+		"новострой", // новостройка, новострой
+		"flat",
+		"apartment",
+		"studio",
+		"bedroom",
+		"house",
+		"ბინა",
+		"სტუდიო",
+		"ოთახი",
+	}
+
+	// 4. Layout pattern (e.g., 1+1, 2+1, 1+0, etc.)
+	layoutRegex := regexp.MustCompile(`\b\d\s*\+\s*\d\b`)
+	hasLayout := layoutRegex.MatchString(text)
+
+	// 5. Sale signals
+	saleSignals := []string{
+		"продам",
+		"продажа",
+		"продается",
+		"продаётся",
+		"sale",
 	}
 
 	hasServiceSignal := containsAnySubstring(text, serviceSignals...)
-	hasPropertySignal := containsAnySubstring(text, propertySignals...)
-	if hasServiceSignal && !hasPropertySignal {
+	hasHousing := containsAnySubstring(text, housingSignals...) || hasLayout
+	hasRental := containsAnySubstring(text, rentalSignals...)
+	hasSale := containsAnySubstring(text, saleSignals...)
+
+	// A valid listing should have:
+	// - A rental signal, OR
+	// - A housing signal combined with a sale signal, OR
+	// - A housing signal combined with a price/area/photo
+	hasValidPropertySignal := false
+	if hasRental {
+		hasValidPropertySignal = true
+	} else if hasHousing && hasSale {
+		hasValidPropertySignal = true
+	} else if hasHousing && (listing.Price > 0 || listing.AreaM2 > 0 || len(message.Photos) > 0) {
+		hasValidPropertySignal = true
+	}
+
+	if hasServiceSignal && !hasValidPropertySignal {
 		return false
 	}
-	if strings.Contains(text, "групп") && strings.Contains(text, "недвижимост") && !hasPropertySignal {
+	if strings.Contains(text, "групп") && strings.Contains(text, "недвижимост") && !hasValidPropertySignal {
 		return false
 	}
-	return hasPropertySignal
+
+	return hasValidPropertySignal
 }
 
 func containsAnySubstring(text string, needles ...string) bool {

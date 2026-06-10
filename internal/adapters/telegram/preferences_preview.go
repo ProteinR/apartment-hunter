@@ -79,6 +79,11 @@ func buildPreferencesPreviewWithOptions(draft preferenceparser.Draft, includeQue
 	appendList(&b, "Исключить", rejects, lang)
 	appendLocations(&b, prefs.LocationPreferences, prefs.HasSearchArea, lang)
 	appendList(&b, "Неразобранные гео-правила", prefs.UnresolvedLocationRules, lang)
+	if lang == "ru" {
+		appendList(&b, "Стоп-слова", prefs.StopWords, lang)
+	} else {
+		appendList(&b, "Stop words", prefs.StopWords, lang)
+	}
 	fmt.Fprintf(&b, "\n%s\n", searchAreaEditInstructions)
 	b.WriteString("\nСохранить?")
 	return b.String()
