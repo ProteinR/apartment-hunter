@@ -1,0 +1,8 @@
+# ЖК Orbi (Orbi Towers / Orbi City)
+
+**Локация:** Набережная (Шериф Химшиашвили)
+
+## Минусы и особенности
+- **Очереди к лифтам:** В летний пиковый сезон ожидание лифта может составлять до 30 минут из-за огромного количества туристов и апартаментов [[Источник](file:///Users/dmemruk/development/go/apartment-hunter/housing_facts/raw/video_zapavalov_batumi_rent.md#L32-L33)].
+- **Завышенные коммунальные тарифы:** В отельных комплексах Orbi тарифы на обслуживание и коммунальные услуги выше стандартных городских тарифов [[Источник](file:///Users/dmemruk/development/go/apartment-hunter/housing_facts/raw/video_zapavalov_batumi_rent.md#L32-L33)].
+- **Рекомендация:** Автор источника не рекомендует долгосрочное проживание там и советует выбирать стандартные жилые многоэтажные дома [[Источник](file:///Users/dmemruk/development/go/apartment-hunter/housing_facts/raw/video_zapavalov_batumi_rent.md#L32-L33)].

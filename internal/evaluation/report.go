@@ -23,7 +23,15 @@ func BuildReport(record domain.ListingEvaluationRecord, prefs domain.UserPrefere
 	} else if record.Source.ChannelID != "" && record.Source.MessageID != 0 {
 		lines = append(lines, fmt.Sprintf("🔗 Источник: %s/%d", record.Source.ChannelID, record.Source.MessageID))
 	}
-	lines = append(lines, "🚦 Статус: "+statusLabel(record.Status))
+	statusText := statusLabel(record.Status)
+	if record.Status == "rejected_ai" && record.Score != nil && len(record.Score.RejectionReasons) > 0 {
+		var shortReasons []string
+		for _, reason := range record.Score.RejectionReasons {
+			shortReasons = append(shortReasons, rejectionReasonLabel(reason))
+		}
+		statusText += " (" + strings.Join(shortReasons, ", ") + ")"
+	}
+	lines = append(lines, "🚦 Статус: "+statusText)
 
 	lines = append(lines, "", "Критерии:")
 	for _, item := range checklistItems(record, prefs) {
