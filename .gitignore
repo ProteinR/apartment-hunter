@@ -1,9 +1,15 @@
+.DS_Store
+.idea/
+
 .gocache/
 .gomodcache/
 .cache/
 .logs/
 .telegram/
 preferences/
+
+apartment-hunter
+
 .env
 .env.*
 !.env.example

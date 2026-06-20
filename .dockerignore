@@ -1,6 +1,11 @@
 .git
+.DS_Store
+.idea
 .cache
 .gocache
+.gomodcache
+.logs
 .telegram
 .env
 preferences
+apartment-hunter
