@@ -143,6 +143,73 @@ func processableUpdateMessage(raw tg.MessageClass) (*tg.Message, bool) {
 	return message, true
 }
 
+func (c *Client) ListAvailableChats(ctx context.Context, limit int) ([]sources.AvailableChat, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	storage, err := c.sessionStorage(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	client := telegram.NewClient(c.cfg.AppID, c.cfg.AppHash, telegram.Options{
+		SessionStorage: storage,
+		NoUpdates:      true,
+	})
+
+	var chats []sources.AvailableChat
+	err = client.Run(ctx, func(ctx context.Context) error {
+		if err := c.authIfNeeded(ctx, client); err != nil {
+			return err
+		}
+		dialogs, err := client.API().MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
+			OffsetPeer: &tg.InputPeerEmpty{},
+			Limit:      limit,
+		})
+		if err != nil {
+			return err
+		}
+		modified, ok := dialogs.AsModified()
+		if !ok {
+			return nil
+		}
+		chats = publicAvailableChats(modified.GetChats())
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return chats, nil
+}
+
+func publicAvailableChats(rawChats []tg.ChatClass) []sources.AvailableChat {
+	available := make([]sources.AvailableChat, 0, len(rawChats))
+	for _, raw := range rawChats {
+		channel, ok := raw.(*tg.Channel)
+		if !ok || channel.Left || (!channel.Broadcast && !channel.Megagroup) {
+			continue
+		}
+		username, ok := channel.GetUsername()
+		if !ok || strings.TrimSpace(username) == "" {
+			continue
+		}
+		kind := "group"
+		if channel.Broadcast {
+			kind = "channel"
+		}
+		available = append(available, sources.AvailableChat{
+			ID:       strconv.FormatInt(channel.ID, 10),
+			Title:    channel.Title,
+			Username: username,
+			Kind:     kind,
+		})
+	}
+	return available
+}
+
 func (c *Client) Fetch(ctx context.Context, channel sources.ChannelRef, cursor sources.Cursor, limit int) ([]sources.ChannelMessage, sources.Cursor, error) {
 	if limit <= 0 {
 		limit = 50

@@ -32,6 +32,13 @@ type ChannelRef struct {
 	Username string `json:"username,omitempty"`
 }
 
+type AvailableChat struct {
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	Username string `json:"username,omitempty"`
+	Kind     string `json:"kind"`
+}
+
 type Cursor struct {
 	LastMessageID int `json:"last_message_id"`
 }

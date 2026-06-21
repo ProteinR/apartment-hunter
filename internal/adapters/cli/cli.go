@@ -151,6 +151,13 @@ func (a App) telegram(args []string) error {
 		fmt.Fprintf(a.Err, "Failed to initialize MCP agent: %v\n", err)
 	} else if mcpAgent != nil {
 		mcpAgent.SetGeocoder(newGoogleGeocoder())
+		if reason := telegramWorkerDisabledReason(); reason == "" {
+			if chatLister, err := telegramuserbot.FromEnv(a.In); err != nil {
+				fmt.Fprintf(a.Err, "Failed to initialize Telegram chat lister: %v\n", err)
+			} else {
+				mcpAgent.SetTelegramChatLister(chatLister)
+			}
+		}
 	}
 	fmt.Fprintf(a.Out, "Telegram bot started. Saving profiles to Postgres\n")
 

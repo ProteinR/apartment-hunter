@@ -16,6 +16,7 @@ import (
 	"apartment-hunter/internal/adapters/openaipreferences"
 	"apartment-hunter/internal/domain"
 	"apartment-hunter/internal/profiles"
+	"apartment-hunter/internal/sources"
 )
 
 type ProfileStore interface {
@@ -28,14 +29,19 @@ type Geocoder interface {
 	Resolve(ctx context.Context, query string, maxDistanceMeters int) (domain.LocationPreference, error)
 }
 
+type TelegramChatLister interface {
+	ListAvailableChats(ctx context.Context, limit int) ([]sources.AvailableChat, error)
+}
+
 type Agent struct {
-	apiKey   string
-	model    string
-	apiURL   string
-	ttlHours int
-	client   *http.Client
-	store    ProfileStore
-	geocoder Geocoder
+	apiKey     string
+	model      string
+	apiURL     string
+	ttlHours   int
+	client     *http.Client
+	store      ProfileStore
+	geocoder   Geocoder
+	chatLister TelegramChatLister
 }
 
 func New(apiKey string, store ProfileStore) *Agent {
@@ -59,7 +65,7 @@ func New(apiKey string, store ProfileStore) *Agent {
 	if model == "" {
 		model = "gpt-5.4-mini"
 	}
-	
+
 	ttlHours := 24
 	if envTTL := strings.TrimSpace(os.Getenv("MCP_CONTEXT_TTL_HOURS")); envTTL != "" {
 		if parsed, err := strconv.Atoi(envTTL); err == nil {
@@ -81,6 +87,10 @@ func (a *Agent) SetGeocoder(geocoder Geocoder) {
 	a.geocoder = geocoder
 }
 
+func (a *Agent) SetTelegramChatLister(chatLister TelegramChatLister) {
+	a.chatLister = chatLister
+}
+
 func FromEnv(store ProfileStore) (*Agent, error) {
 	apiKey := strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY"))
 	if apiKey == "" {
@@ -99,10 +109,10 @@ type chatRequest struct {
 }
 
 type chatMessage struct {
-	Role       string    `json:"role"`
-	Content    string    `json:"content"`
-	Name       string    `json:"name,omitempty"`
-	ToolCallID string    `json:"tool_call_id,omitempty"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	Name       string     `json:"name,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
 	ToolCalls  []toolCall `json:"tool_calls,omitempty"`
 }
 
@@ -150,9 +160,10 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 	}
 
 	state, err := json.MarshalIndent(map[string]any{
-		"FilterDisabled": profiles.FilterDisabled(profile),
-		"Preferences":    profile.Preferences,
-		"SearchArea":     searchAreaJSON,
+		"FilterDisabled":   profiles.FilterDisabled(profile),
+		"Preferences":      profile.Preferences,
+		"SearchArea":       searchAreaJSON,
+		"ConnectedSources": profile.Channels,
 	}, "", "  ")
 	if err != nil {
 		return "", nil, nil, err
@@ -166,6 +177,7 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 4. Включать/выключать фильтрацию с помощью set_filtering_status.
 5. Работать с географией: находить координаты по адресу (resolve_address), вычислять расстояние в метрах (calculate_distance) и обновлять зону поиска напрямую с помощью GeoJSON (update_search_area).
 6. Управлять списком стоп-слов в поле stop_words (добавлять или удалять слова, по которым нужно отсеивать объявления о квартирах).
+7. Просматривать публичные Telegram-каналы и группы, доступные аккаунту userbot, с помощью list_available_telegram_chats, чтобы предложить релевантные источники для отслеживания. Предлагай только те варианты, которые выглядят связанными с арендой, недвижимостью, Batumi/Батуми, apartment/rent/real estate. Если подходящих мало или нет, так и скажи.
 
 Веди диалог живо, эмпатично и профессионально. Задавай уточняющие вопросы, если пожелания размыты (например, "хочу бабушкин вариант" -> предложи добавить "soviet" в reject_rules).
 
@@ -226,7 +238,7 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 			Function: chatFunction{
 				Name:        "update_preferences",
 				Description: "Полностью обновляет параметры поиска квартир (бюджет, площадь, ремонт, локации, стоп-слова и т.д.).",
-				Parameters: openaipreferences.PreferencesSchema(),
+				Parameters:  openaipreferences.PreferencesSchema(),
 			},
 		},
 		{
@@ -311,6 +323,22 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 						"limit": map[string]any{
 							"type":        "integer",
 							"description": "Максимальное количество возвращаемых результатов (по умолчанию 10).",
+						},
+					},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: chatFunction{
+				Name:        "list_available_telegram_chats",
+				Description: "Возвращает public Telegram-каналы и группы, на которые уже подписан userbot-аккаунт. Используй для выбора релевантных источников объявлений, которые можно предложить подключить через /subscribe @username.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"limit": map[string]any{
+							"type":        "integer",
+							"description": "Максимальное число dialogs для просмотра, по умолчанию 100, максимум 200.",
 						},
 					},
 				},
@@ -445,6 +473,22 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 				resBytes, _ := json.Marshal(records)
 				toolResult = string(resBytes)
 			}
+		case "list_available_telegram_chats":
+			var args struct {
+				Limit int `json:"limit"`
+			}
+			json.Unmarshal([]byte(tc.Function.Arguments), &args)
+			if a.chatLister == nil {
+				toolResult = "error: telegram chat lister is not configured"
+			} else {
+				chats, err := a.chatLister.ListAvailableChats(ctx, args.Limit)
+				if err != nil {
+					toolResult = "error: " + err.Error()
+				} else {
+					resBytes, _ := json.Marshal(chats)
+					toolResult = string(resBytes)
+				}
+			}
 		default:
 			toolResult = "unknown function"
 		}
@@ -473,7 +517,7 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 	if len(profile.MCPHistory) > 50 {
 		profile.MCPHistory = profile.MCPHistory[len(profile.MCPHistory)-50:]
 	}
-	
+
 	if err := a.store.UpsertProfile(ctx, profile); err != nil {
 		return "", nil, nil, fmt.Errorf("failed to save mcp history: %w", err)
 	}
@@ -583,7 +627,7 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 			Function: chatFunction{
 				Name:        "update_preferences",
 				Description: "Полностью обновляет параметры поиска квартир (бюджет, площадь, ремонт, локации, стоп-слова и т.д.).",
-				Parameters: openaipreferences.PreferencesSchema(),
+				Parameters:  openaipreferences.PreferencesSchema(),
 			},
 		},
 		{
@@ -830,7 +874,7 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 	if len(profile.MCPHistory) > 10 {
 		profile.MCPHistory = profile.MCPHistory[len(profile.MCPHistory)-10:]
 	}
-	
+
 	if err := a.store.UpsertProfile(ctx, profile); err != nil {
 		return "", nil, nil, fmt.Errorf("failed to save mcp history: %w", err)
 	}
