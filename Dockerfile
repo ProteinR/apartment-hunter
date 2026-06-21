@@ -5,7 +5,7 @@ RUN apk add --no-cache ca-certificates
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /bin/apartment-hunter ./cmd/apartment-hunter
+RUN GOMAXPROCS=1 CGO_ENABLED=0 go build -p=1 -o /bin/apartment-hunter ./cmd/apartment-hunter
 
 FROM alpine:3.22
 
