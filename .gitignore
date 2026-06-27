@@ -19,3 +19,16 @@ node_modules/
 scratch/
 package.json
 package-lock.json
+
+# Local MCP/API debug scripts. These often contain live Bearer tokens.
+/coolify_client*.js
+/mcp_client.js
+/mcp_py.py
+/get_tools.py
+/list_tools.py
+/list_coolify_tools.py
+/send_msg.py
+/test_eventsource.js
+/test_mcp*.js
+/test_mcp.sh
+/query.go

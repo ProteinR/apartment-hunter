@@ -120,6 +120,19 @@ Geocoding logs live at `.logs/geocoding/geocoding-YYYY-MM-DD.jsonl`.
 
 They record every listing geocoder attempt after basic filters pass, with the same source/listing context plus `query`, `max_distance_meters`, `result_name`, result coordinates, `success`, and `error`. For the Google adapter, `query` is the actual address string sent to Google after default-region expansion, which is useful for spotting Batumi/Tbilisi mixups.
 
+## Production And Coolify
+
+Production is deployed in Coolify as project `Apartment-hunter bot`, application `apartment-hunter`, with standalone Postgres database `apartment-hunter-db`.
+
+Use the Coolify MCP endpoint `https://coolify.memruk.dev/mcp` with a Bearer API token supplied by the user or environment; never commit the token. The current Coolify MCP server exposes inventory tools such as `get_infrastructure_overview`, `list_applications`, `get_application`, `list_databases`, and `get_database`, but it does not expose a log-reading tool. Agents can use MCP to confirm app/database status, but cannot rely on it alone to fetch container stdout/stderr or JSONL files unless the MCP server gains log tools later.
+
+Coolify container logs show the process stdout/stderr. The detailed pipeline/geocoding JSONL logs are file logs controlled by `APARTMENT_HUNTER_PIPELINE_LOG_DIR` and `APARTMENT_HUNTER_GEOCODING_LOG_DIR`. In `docker-compose.yaml`, only `/app/.telegram` is mounted as the `telegram-session` volume; default `/app/.logs/...` files are therefore container-local and may disappear on redeploy. For persistent production JSONL logs, set:
+
+- `APARTMENT_HUNTER_PIPELINE_LOG_DIR=/app/.telegram/logs/pipeline`
+- `APARTMENT_HUNTER_GEOCODING_LOG_DIR=/app/.telegram/logs/geocoding`
+
+If a future agent must debug production via Coolify, first check Coolify app/database status via MCP, then use Coolify UI/API/SSH or an added MCP log tool for container logs. For deep listing decisions, inspect the persisted JSONL log directory above and Postgres `listing_evaluations`.
+
 ## Geometry And Location Matching
 
 Preference geometry is built in `internal/preferenceparser/geometry.go` by `PostGISGeometryBuilder`.
@@ -188,4 +201,3 @@ When users provide summaries, articles, or new facts, agents must:
 - Extract and compile the insights to `housing_facts/wiki/general.md` and/or building-specific pages under `housing_facts/wiki/buildings/`.
 - Cross-reference compiled facts back to the raw source file using markdown links: `[[Source](file:///Users/dmemruk/development/go/apartment-hunter/housing_facts/raw/<file>.md#L<line>)]`.
 - **Token Optimization:** Avoid token-heavy ASCII or Unicode diagrams, directory trees with characters like `│` or `├──`, and horizontal lines. Use simple, compact markdown lists. Keep content highly dense and direct.
-

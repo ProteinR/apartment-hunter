@@ -361,8 +361,8 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 		now := time.Now()
 		profile.MCPHistory = append(profile.MCPHistory, profiles.MCPMessage{Role: "user", Content: text, CreatedAt: now})
 		profile.MCPHistory = append(profile.MCPHistory, profiles.MCPMessage{Role: "assistant", Content: respMsg.Content, CreatedAt: now})
-		if len(profile.MCPHistory) > 50 {
-			profile.MCPHistory = profile.MCPHistory[len(profile.MCPHistory)-50:]
+		if len(profile.MCPHistory) > 10 {
+			profile.MCPHistory = profile.MCPHistory[len(profile.MCPHistory)-10:]
 		}
 		if err := a.store.UpsertProfile(ctx, profile); err != nil {
 			return "", nil, nil, fmt.Errorf("failed to save mcp history: %w", err)
@@ -514,8 +514,8 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 	now := time.Now()
 	profile.MCPHistory = append(profile.MCPHistory, profiles.MCPMessage{Role: "user", Content: text, CreatedAt: now})
 	profile.MCPHistory = append(profile.MCPHistory, profiles.MCPMessage{Role: "assistant", Content: respMsg.Content, CreatedAt: now})
-	if len(profile.MCPHistory) > 50 {
-		profile.MCPHistory = profile.MCPHistory[len(profile.MCPHistory)-50:]
+	if len(profile.MCPHistory) > 10 {
+		profile.MCPHistory = profile.MCPHistory[len(profile.MCPHistory)-10:]
 	}
 
 	if err := a.store.UpsertProfile(ctx, profile); err != nil {
@@ -734,8 +734,8 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 		now := time.Now()
 		profile.MCPHistory = append(profile.MCPHistory, profiles.MCPMessage{Role: "user", Content: "[Отзыв на объявление] " + feedbackText, CreatedAt: now})
 		profile.MCPHistory = append(profile.MCPHistory, profiles.MCPMessage{Role: "assistant", Content: respMsg.Content, CreatedAt: now})
-		if len(profile.MCPHistory) > 50 {
-			profile.MCPHistory = profile.MCPHistory[len(profile.MCPHistory)-50:]
+		if len(profile.MCPHistory) > 10 {
+			profile.MCPHistory = profile.MCPHistory[len(profile.MCPHistory)-10:]
 		}
 		if err := a.store.UpsertProfile(ctx, profile); err != nil {
 			return "", nil, nil, fmt.Errorf("failed to save mcp history: %w", err)

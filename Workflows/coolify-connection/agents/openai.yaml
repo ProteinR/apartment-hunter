@@ -1,0 +1,4 @@
+interface:
+  display_name: "Coolify Connection"
+  short_description: "Connect to Coolify MCP and inspect prod status"
+  default_prompt: "Use $coolify-connection to inspect Coolify app and database status."
