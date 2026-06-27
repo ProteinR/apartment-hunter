@@ -292,7 +292,8 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 		if prefsChanged != nil || areaChanged != nil {
 			var draft preferenceparser.Draft
 			if prefsChanged != nil {
-				draft.Preferences = *prefsChanged
+				normalized := preferenceparser.NormalizePreferences(*prefsChanged)
+				draft.Preferences = normalized
 			} else if profile.Preferences != nil {
 				draft.Preferences = *profile.Preferences
 			}

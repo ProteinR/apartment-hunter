@@ -58,7 +58,7 @@ func (s Service) BuildDraft(ctx context.Context, input string) (Draft, error) {
 	return Draft{
 		RawQuery:        input,
 		NormalizedQuery: normalized,
-		Preferences:     normalizePreferences(*prefs),
+		Preferences:     NormalizePreferences(*prefs),
 	}, nil
 }
 
@@ -75,7 +75,7 @@ func NewNaturalLanguagePreferencesParser(normalizer RequirementsNormalizer, extr
 	}
 }
 
-func normalizePreferences(prefs domain.UserPreferences) domain.UserPreferences {
+func NormalizePreferences(prefs domain.UserPreferences) domain.UserPreferences {
 	if prefs.BudgetMin != nil {
 		prefs.MinBudget = *prefs.BudgetMin
 	} else if prefs.MinBudget > 0 {

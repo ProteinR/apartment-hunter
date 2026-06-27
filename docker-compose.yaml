@@ -25,29 +25,9 @@ x-app-environment: &app-environment
   APARTMENT_HUNTER_POLL_INTERVAL: ${APARTMENT_HUNTER_POLL_INTERVAL:-5m}
 
 services:
-  postgres:
-    image: postgis/postgis:17-3.5-alpine
-    platform: linux/amd64
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-apartment_hunter}
-      POSTGRES_USER: ${POSTGRES_USER:-apartment_hunter}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-apartment_hunter}
-    ports:
-      - "127.0.0.1:5432:5432"
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U apartment_hunter -d apartment_hunter"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-
   bot:
     build: .
     command: ["telegram"]
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment: *app-environment
     volumes:
       - telegram-session:/app/.telegram
@@ -57,13 +37,9 @@ services:
     profiles:
       - worker
     command: ["telegram-process", "${APARTMENT_HUNTER_PROFILE_ID:-telegram_0}"]
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment: *app-environment
     volumes:
       - telegram-session:/app/.telegram
 
 volumes:
-  postgres-data:
   telegram-session:
