@@ -140,6 +140,8 @@ OPENAI_API_KEY=sk-... \
 
 `telegram-process` не читает историю канала. Он держит Telegram userbot session открытой, получает `UpdateNewMessage` / `UpdateNewChannelMessage`, фильтрует события по подпискам профиля и анализирует только новые сообщения. В stdout должны появиться строки `Listening for new Telegram messages`, `Telegram notifications enabled/disabled`, `Processed ...` и `Sending notification ...` - по ним видно, что worker жив и что уведомление ушло в бот.
 
+Подробные pipeline/geocoding события пишутся JSONL-файлами в `APARTMENT_HUNTER_PIPELINE_LOG_DIR` и `APARTMENT_HUNTER_GEOCODING_LOG_DIR`. Для продакшена/Coolify включите `APARTMENT_HUNTER_LOG_TO_STDOUT=true`, чтобы эти же JSONL-события дублировались в container logs.
+
 Базовые отказы по цене, метражу и обязательной технике сохраняются в историю без скачивания фото и без вызова OpenAI. Если базовые фильтры прошли, userbot скачивает фото во временный local media cache, processor проверяет dedup, вызывает OpenAI Vision, считает итоговый score и сохраняет `ai_usage` с токенами и стоимостью. Если задан `TELEGRAM_BOT_TOKEN` и у профиля есть `telegram_chat_id`, worker отправляет в бот отчет по каждому обработанному сообщению из подписанных каналов, а не только по объявлениям со статусом `passed`.
 
 OpenAI Responses API возвращает `usage` с token counts, а OpenAI pricing page публикует цены за 1M tokens. По умолчанию для `gpt-4.1-mini` используются значения:

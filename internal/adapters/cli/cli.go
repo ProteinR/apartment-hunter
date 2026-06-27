@@ -272,7 +272,7 @@ func (a App) telegramProcessWithContext(ctx context.Context, profileID string, r
 	if err != nil {
 		return err
 	}
-	pipelineLog := newPipelineLogger()
+	pipelineLog := newPipelineLogger(a.Out)
 	processor := evaluation.Processor{
 		Prefs:        *profile.Preferences,
 		Deduplicator: dedup.NewService(dedup.NewImageHasher(), store),
@@ -280,7 +280,7 @@ func (a App) telegramProcessWithContext(ctx context.Context, profileID string, r
 		Analyzer:     analyzer,
 		PhotoLoader:  reader,
 		Geocoder:     newGoogleGeocoder(),
-		GeocodeLog:   newGeocodeLogger(),
+		GeocodeLog:   newGeocodeLogger(a.Out),
 		PipelineLog:  pipelineLog,
 		Location:     store,
 	}
@@ -670,7 +670,7 @@ func newGoogleGeocoder() *googlemaps.Geocoder {
 	return geocoder
 }
 
-func newGeocodeLogger() *evaluation.FileGeocodeLogger {
+func newGeocodeLogger(out io.Writer) *evaluation.FileGeocodeLogger {
 	dir := strings.TrimSpace(os.Getenv("APARTMENT_HUNTER_GEOCODING_LOG_DIR"))
 	if dir == "" {
 		dir = ".logs/geocoding"
@@ -685,10 +685,11 @@ func newGeocodeLogger() *evaluation.FileGeocodeLogger {
 	return &evaluation.FileGeocodeLogger{
 		Dir:       dir,
 		Retention: time.Duration(retentionDays) * 24 * time.Hour,
+		Output:    jsonLogOutput(out),
 	}
 }
 
-func newPipelineLogger() *evaluation.FilePipelineLogger {
+func newPipelineLogger(out io.Writer) *evaluation.FilePipelineLogger {
 	dir := strings.TrimSpace(os.Getenv("APARTMENT_HUNTER_PIPELINE_LOG_DIR"))
 	if dir == "" {
 		dir = ".logs/pipeline"
@@ -703,6 +704,23 @@ func newPipelineLogger() *evaluation.FilePipelineLogger {
 	return &evaluation.FilePipelineLogger{
 		Dir:       dir,
 		Retention: time.Duration(retentionDays) * 24 * time.Hour,
+		Output:    jsonLogOutput(out),
+	}
+}
+
+func jsonLogOutput(out io.Writer) io.Writer {
+	if envBool("APARTMENT_HUNTER_LOG_TO_STDOUT") {
+		return out
+	}
+	return nil
+}
+
+func envBool(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "t", "true", "y", "yes", "on":
+		return true
+	default:
+		return false
 	}
 }
 

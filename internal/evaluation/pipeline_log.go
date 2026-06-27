@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,7 @@ type FilePipelineLogger struct {
 	Dir       string
 	Retention time.Duration
 	Now       func() time.Time
+	Output    io.Writer
 
 	mu sync.Mutex
 }
@@ -25,18 +27,28 @@ func (l *FilePipelineLogger) LogPipelineEvent(ctx context.Context, event Pipelin
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	dir := strings.TrimSpace(l.Dir)
-	if dir == "" {
-		return nil
-	}
-
 	now := l.now()
 	if event.Time.IsZero() {
 		event.Time = now.UTC()
 	}
+	data, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	if l.Output != nil {
+		if _, err := l.Output.Write(append(data, '\n')); err != nil {
+			return err
+		}
+	}
+
+	dir := strings.TrimSpace(l.Dir)
+	if dir == "" {
+		return nil
+	}
 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -52,10 +64,6 @@ func (l *FilePipelineLogger) LogPipelineEvent(ctx context.Context, event Pipelin
 	}
 	defer file.Close()
 
-	data, err := json.Marshal(event)
-	if err != nil {
-		return err
-	}
 	if _, err := file.Write(append(data, '\n')); err != nil {
 		return err
 	}

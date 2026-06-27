@@ -1,6 +1,7 @@
 package evaluation
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -58,6 +59,35 @@ func TestFilePipelineLoggerWritesJSONL(t *testing.T) {
 	}
 	if event.Price != 700 || event.AreaM2 != 56 || event.DurationMS != 12 {
 		t.Fatalf("unexpected listing/debug fields: %+v", event)
+	}
+}
+
+func TestFilePipelineLoggerWritesJSONLToOutput(t *testing.T) {
+	now := time.Date(2026, 6, 8, 10, 30, 0, 0, time.UTC)
+	var output bytes.Buffer
+	logger := &FilePipelineLogger{
+		Now:    func() time.Time { return now },
+		Output: &output,
+	}
+
+	err := logger.LogPipelineEvent(context.Background(), PipelineLogEvent{
+		Stage:  "location_checked",
+		Status: "rejected_location",
+		Reason: "listing location is outside preferred search area",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var event PipelineLogEvent
+	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &event); err != nil {
+		t.Fatal(err)
+	}
+	if !event.Time.Equal(now) {
+		t.Fatalf("unexpected time %s", event.Time)
+	}
+	if event.Stage != "location_checked" || event.Status != "rejected_location" {
+		t.Fatalf("unexpected output event: %+v", event)
 	}
 }
 

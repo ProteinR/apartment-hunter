@@ -103,6 +103,7 @@ Retention defaults to 3 days. Override with:
 - `APARTMENT_HUNTER_PIPELINE_LOG_RETENTION_DAYS`
 - `APARTMENT_HUNTER_GEOCODING_LOG_DIR`
 - `APARTMENT_HUNTER_GEOCODING_LOG_RETENTION_DAYS`
+- `APARTMENT_HUNTER_LOG_TO_STDOUT=true` duplicates pipeline/geocoding JSONL events to stdout so Coolify container logs can show detailed processing decisions.
 
 Pipeline logs live at `.logs/pipeline/pipeline-YYYY-MM-DD.jsonl`.
 
@@ -126,10 +127,11 @@ Production is deployed in Coolify as project `Apartment-hunter bot`, application
 
 Use the Coolify MCP endpoint `https://coolify.memruk.dev/mcp` with a Bearer API token supplied by the user or environment; never commit the token. The current Coolify MCP server exposes inventory tools such as `get_infrastructure_overview`, `list_applications`, `get_application`, `list_databases`, and `get_database`, but it does not expose a log-reading tool. Agents can use MCP to confirm app/database status, but cannot rely on it alone to fetch container stdout/stderr or JSONL files unless the MCP server gains log tools later.
 
-Coolify container logs show the process stdout/stderr. The detailed pipeline/geocoding JSONL logs are file logs controlled by `APARTMENT_HUNTER_PIPELINE_LOG_DIR` and `APARTMENT_HUNTER_GEOCODING_LOG_DIR`. In `docker-compose.yaml`, only `/app/.telegram` is mounted as the `telegram-session` volume; default `/app/.logs/...` files are therefore container-local and may disappear on redeploy. For persistent production JSONL logs, set:
+Coolify container logs show the process stdout/stderr. The detailed pipeline/geocoding JSONL logs are file logs controlled by `APARTMENT_HUNTER_PIPELINE_LOG_DIR` and `APARTMENT_HUNTER_GEOCODING_LOG_DIR`; set `APARTMENT_HUNTER_LOG_TO_STDOUT=true` to duplicate those JSONL events into Coolify logs. In `docker-compose.yaml`, only `/app/.telegram` is mounted as the `telegram-session` volume; default `/app/.logs/...` files are therefore container-local and may disappear on redeploy. For persistent production JSONL logs, set:
 
 - `APARTMENT_HUNTER_PIPELINE_LOG_DIR=/app/.telegram/logs/pipeline`
 - `APARTMENT_HUNTER_GEOCODING_LOG_DIR=/app/.telegram/logs/geocoding`
+- `APARTMENT_HUNTER_LOG_TO_STDOUT=true`
 
 If a future agent must debug production via Coolify, first check Coolify app/database status via MCP, then use Coolify UI/API/SSH or an added MCP log tool for container logs. For deep listing decisions, inspect the persisted JSONL log directory above and Postgres `listing_evaluations`.
 

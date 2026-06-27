@@ -1,6 +1,7 @@
 package evaluation
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -61,6 +62,34 @@ func TestFileGeocodeLoggerWritesJSONL(t *testing.T) {
 	}
 	if event.ResultLatitude != 41.6466 || event.ResultLongitude != 41.6266 {
 		t.Fatalf("unexpected result coordinates %.6f %.6f", event.ResultLatitude, event.ResultLongitude)
+	}
+}
+
+func TestFileGeocodeLoggerWritesJSONLToOutput(t *testing.T) {
+	now := time.Date(2026, 6, 8, 10, 30, 0, 0, time.UTC)
+	var output bytes.Buffer
+	logger := &FileGeocodeLogger{
+		Now:    func() time.Time { return now },
+		Output: &output,
+	}
+
+	err := logger.LogGeocodeAttempt(context.Background(), GeocodeLogEvent{
+		Query:   "Europe Square",
+		Success: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var event GeocodeLogEvent
+	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &event); err != nil {
+		t.Fatal(err)
+	}
+	if !event.Time.Equal(now) {
+		t.Fatalf("unexpected time %s", event.Time)
+	}
+	if event.Query != "Europe Square" || !event.Success {
+		t.Fatalf("unexpected output event: %+v", event)
 	}
 }
 
