@@ -208,7 +208,7 @@ Postgres доступен в compose как отдельный сервис `pos
 docker compose run --rm worker telegram-process telegram_42
 ```
 
-Если уже есть Telethon session string, например из `telegram-mcp-app/session_string_generator.py`, можно задать его в `.env`:
+Если уже есть сгенерированный Telethon session string, можно задать его в `.env`:
 
 ```bash
 TELEGRAM_SESSION_STRING=1...
