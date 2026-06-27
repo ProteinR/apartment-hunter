@@ -4,10 +4,12 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"apartment-hunter/internal/adapters/googlemaps"
+	"apartment-hunter/internal/adapters/mcpagent"
 	"apartment-hunter/internal/domain"
 	"apartment-hunter/internal/preferenceparser"
 	"apartment-hunter/internal/profiles"
@@ -20,6 +22,7 @@ const testSearchAreaGeoJSON = `{"type":"MultiPolygon","coordinates":[[[[41.62000
 type fakeProfileStore struct {
 	profiles        map[string]profiles.Profile
 	searchProfiles  []domain.UserSearchProfile
+	latestGeoJSON   string
 	feedbacks       []domain.ListingFeedback
 	feedbackMatched bool
 }
@@ -40,6 +43,20 @@ func (s *fakeProfileStore) UpsertProfile(ctx context.Context, profile profiles.P
 	if profile.DebugMode != nil {
 		debugMode := *profile.DebugMode
 		existing.DebugMode = &debugMode
+	}
+	if profile.MCPMode != nil {
+		mcpMode := *profile.MCPMode
+		existing.MCPMode = &mcpMode
+	}
+	if profile.FilterDisabled != nil {
+		filterDisabled := *profile.FilterDisabled
+		existing.FilterDisabled = &filterDisabled
+	}
+	if profile.MCPHistory != nil {
+		existing.MCPHistory = profile.MCPHistory
+	}
+	if profile.Channels != nil {
+		existing.Channels = profile.Channels
 	}
 	existing.ID = profile.ID
 	s.profiles[profile.ID] = existing
@@ -90,6 +107,21 @@ func (s *fakeProfileStore) SaveListingFeedback(ctx context.Context, feedback dom
 	feedback.ID = "7"
 	s.feedbacks = append(s.feedbacks, feedback)
 	return feedback.ID, &domain.ApartmentListing{ID: "dummy-listing"}, nil
+}
+
+func (s *fakeProfileStore) LatestSearchAreaGeoJSON(ctx context.Context, profileID string) (string, bool, error) {
+	if strings.TrimSpace(s.latestGeoJSON) == "" {
+		return "", false, nil
+	}
+	return s.latestGeoJSON, true, nil
+}
+
+func (s *fakeProfileStore) SearchEvaluations(ctx context.Context, profileID string, filter domain.EvaluationSearchFilter) ([]domain.ListingEvaluationRecord, error) {
+	return nil, nil
+}
+
+func (s *fakeProfileStore) GetEvaluationByTelegramMessage(ctx context.Context, profileID string, telegramChatID int64, messageID int) (domain.ListingEvaluationRecord, bool, error) {
+	return domain.ListingEvaluationRecord{}, false, nil
 }
 
 func TestHandleTextParsesPreviewsAndSavesPreferences(t *testing.T) {
@@ -252,6 +284,54 @@ func TestHandleTextResponseIncludesSearchAreaMapInConfirmation(t *testing.T) {
 	}
 	if _, ok := response.ReplyMarkup.(*models.ReplyKeyboardMarkup); !ok {
 		t.Fatalf("expected confirmation keyboard, got %T", response.ReplyMarkup)
+	}
+}
+
+func TestMCPMapRequestAttachesSearchAreaImage(t *testing.T) {
+	mcpMode := true
+	store := newFakeProfileStore()
+	store.latestGeoJSON = testSearchAreaGeoJSON
+	store.profiles["telegram_42"] = profiles.Profile{
+		ID:             "telegram_42",
+		TelegramChatID: 42,
+		MCPMode:        &mcpMode,
+	}
+	agentServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Прикрепляю изображение текущей зоны поиска."}}]}`))
+	}))
+	defer agentServer.Close()
+	t.Setenv("OPENAI_BASE_URL", agentServer.URL)
+
+	agent := mcpagent.New("test-key", store)
+	mapClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Query().Get("path") == "" {
+			t.Fatalf("expected search area path in static map URL: %q", req.URL.RawQuery)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader("png-bytes")),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})}
+	bot := New(
+		"test-token",
+		t.TempDir(),
+		WithProfileStore(store),
+		WithMCPAgent(agent),
+		WithSearchAreaMapRenderer(googlemaps.StaticMapRenderer{APIKey: "test-key", Endpoint: "https://static-maps.test/map", Client: mapClient}),
+	)
+
+	response, err := bot.handleTextResponse(42, "Пришли мне изображение зоны поиска")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Text != "Прикрепляю изображение текущей зоны поиска." {
+		t.Fatalf("unexpected MCP reply %q", response.Text)
+	}
+	if response.PhotoFilename != "search-area-map.png" || string(response.PhotoBytes) != "png-bytes" {
+		t.Fatalf("expected map photo attachment, got filename=%q bytes=%q", response.PhotoFilename, string(response.PhotoBytes))
 	}
 }
 
@@ -523,7 +603,7 @@ func TestClearAndResetCommands(t *testing.T) {
 	chatID := int64(42)
 	profileID := "telegram_42"
 	bot.setSession(chatID, &preferenceSession{State: "awaiting_query"})
-	
+
 	p := profiles.Profile{
 		ID:             profileID,
 		TelegramChatID: chatID,

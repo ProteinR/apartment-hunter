@@ -23,6 +23,7 @@ type ProfileStore interface {
 	GetProfile(ctx context.Context, id string) (profiles.Profile, bool, error)
 	UpsertProfile(ctx context.Context, profile profiles.Profile) error
 	SearchEvaluations(ctx context.Context, profileID string, filter domain.EvaluationSearchFilter) ([]domain.ListingEvaluationRecord, error)
+	GetEvaluationByTelegramMessage(ctx context.Context, profileID string, telegramChatID int64, messageID int) (domain.ListingEvaluationRecord, bool, error)
 }
 
 type Geocoder interface {
@@ -178,6 +179,7 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 5. Работать с географией: находить координаты по адресу (resolve_address), вычислять расстояние в метрах (calculate_distance) и обновлять зону поиска напрямую с помощью GeoJSON (update_search_area).
 6. Управлять списком стоп-слов в поле stop_words (добавлять или удалять слова, по которым нужно отсеивать объявления о квартирах).
 7. Просматривать публичные Telegram-каналы и группы, доступные аккаунту userbot, с помощью list_available_telegram_chats, чтобы предложить релевантные источники для отслеживания. Предлагай только те варианты, которые выглядят связанными с арендой, недвижимостью, Batumi/Батуми, apartment/rent/real estate. Если подходящих мало или нет, так и скажи.
+8. Получать полный отчет по конкретному объявлению из локальной базы с помощью get_listing_evaluation_report, если пользователь спрашивает, почему объявление прошло/не прошло фильтры, или ссылается на сообщение бота.
 
 Веди диалог живо, эмпатично и профессионально. Задавай уточняющие вопросы, если пожелания размыты (например, "хочу бабушкин вариант" -> предложи добавить "soviet" в reject_rules).
 
@@ -186,6 +188,9 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 - Не упоминай технические ключи из JSON (например, location_preferences, reject_rules). Если выводишь список фильтров или локаций, перечисляй их естественным, человекочитаемым языком.
 - Если пользователь просит добавить стоп-слово или удалить его (например, "добавь стоп-слово 'студия'"), используй update_preferences, чтобы обновить массив stop_words.
 - Если в состоянии настроек заполнен ключ "SearchArea" (даже если текстовые предпочтения по районам пусты), это ОЗНАЧАЕТ, что локация для поиска задана (пользователь ограничил поиск гео-зоной на карте). В этом случае НИКОГДА не пиши, что локация не задана или что предпочтений по районам нет. Указывай, что поиск идет в границах заданной области/зоны поиска на карте.
+- Если пользователь просит показать/прислать карту, картинку, фото или изображение зоны поиска и "SearchArea" заполнен, отвечай коротко, что прикрепляешь изображение текущей зоны поиска. НЕ говори, что не можешь отрисовать или сгенерировать карту: Telegram-бот прикрепит изображение автоматически.
+- Если пользователь спрашивает, какие чаты/каналы/источники сейчас читаются, отслеживаются или подключены, отвечай строго по "ConnectedSources" из текущего состояния. Если список пустой, скажи, что источники пока не подключены. НЕ говори, что ты не подключен к списку чатов.
+- Инструмент list_available_telegram_chats показывает доступные userbot-аккаунту чаты для выбора новых источников; это НЕ список уже подключенных источников поиска.
 - Если пользователь хочет сам нарисовать зону поиска, обязательно дай ему пошаговую инструкцию: 1) Открыть сайт geojson.io, 2) Нарисовать полигон с помощью инструмента рисования (Draw a polygon), 3) Скопировать сгенерированный JSON (справа) и прислать тебе в чат в виде текста или файла.
 
 Текущее состояние настроек:
@@ -325,6 +330,27 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 							"description": "Максимальное количество возвращаемых результатов (по умолчанию 10).",
 						},
 					},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: chatFunction{
+				Name:        "get_listing_evaluation_report",
+				Description: "Возвращает полный сохраненный отчет по одному объявлению: само объявление, источник, статус, причины отклонения, AI-инсайты, итоговый текст отчета и ошибку. Используй, когда пользователь спрашивает, почему конкретное объявление прошло или не прошло фильтры. message_id — это ID сообщения бота с отчетом или ID исходного сообщения в канале.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"message_id": map[string]any{
+							"type":        "integer",
+							"description": "ID сообщения бота с отчетом или исходного сообщения объявления.",
+						},
+						"telegram_chat_id": map[string]any{
+							"type":        "integer",
+							"description": "Telegram chat id пользователя. Если не указан, используется текущий chat id профиля.",
+						},
+					},
+					"required": []string{"message_id"},
 				},
 			},
 		},
@@ -473,6 +499,25 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 				resBytes, _ := json.Marshal(records)
 				toolResult = string(resBytes)
 			}
+		case "get_listing_evaluation_report":
+			var args struct {
+				MessageID      int   `json:"message_id"`
+				TelegramChatID int64 `json:"telegram_chat_id"`
+			}
+			json.Unmarshal([]byte(tc.Function.Arguments), &args)
+			chatID := args.TelegramChatID
+			if chatID == 0 {
+				chatID = profile.TelegramChatID
+			}
+			record, ok, err := a.store.GetEvaluationByTelegramMessage(ctx, profileID, chatID, args.MessageID)
+			if err != nil {
+				toolResult = "error: " + err.Error()
+			} else if !ok {
+				toolResult = "not found"
+			} else {
+				resBytes, _ := json.Marshal(record)
+				toolResult = string(resBytes)
+			}
 		case "list_available_telegram_chats":
 			var args struct {
 				Limit int `json:"limit"`
@@ -525,7 +570,7 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 	return respMsg.Content, prefsChanged, areaChanged, nil
 }
 
-func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing domain.ApartmentListing, feedbackText string) (string, *domain.UserPreferences, *domain.GeoSearchArea, error) {
+func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing domain.ApartmentListing, feedbackText string, telegramChatID int64, repliedMessageID int) (string, *domain.UserPreferences, *domain.GeoSearchArea, error) {
 	profile, ok, err := a.store.GetProfile(ctx, profileID)
 	if err != nil {
 		return "", nil, nil, err
@@ -549,9 +594,10 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 	}
 
 	state, err := json.MarshalIndent(map[string]any{
-		"FilterDisabled": profiles.FilterDisabled(profile),
-		"Preferences":    profile.Preferences,
-		"SearchArea":     searchAreaJSON,
+		"FilterDisabled":   profiles.FilterDisabled(profile),
+		"Preferences":      profile.Preferences,
+		"SearchArea":       searchAreaJSON,
+		"ConnectedSources": profile.Channels,
 	}, "", "  ")
 	if err != nil {
 		return "", nil, nil, err
@@ -565,6 +611,7 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 4. Включать/выключать фильтрацию с помощью set_filtering_status.
 5. Работать с географией: находить координаты по адресу (resolve_address), вычислять расстояние в метрах (calculate_distance) и обновлять зону поиска напрямую с помощью GeoJSON (update_search_area).
 6. Управлять списком стоп-слов в поле stop_words (добавлять или удалять слова, по которым нужно отсеивать объявления о квартирах).
+7. Получать полный отчет по объявлению из локальной базы с помощью get_listing_evaluation_report, когда пользователь спрашивает, почему объявление прошло или не прошло фильтры. В feedback-контексте для этого уже есть telegram_chat_id и replied_message_id.
 
 Веди диалог живо, эмпатично и профессионально. Задавай уточняющие вопросы, если пожелания размыты (например, "хочу бабушкин вариант" -> предложи добавить "soviet" в reject_rules).
 
@@ -573,6 +620,8 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 - Не упоминай технические ключи из JSON (например, location_preferences, reject_rules). Если выводишь список фильтров или локаций, перечисляй их естественным, человекочитаемым языком.
 - Если пользователь просит добавить стоп-слово или удалить его (например, "добавь стоп-слово 'студия'"), используй update_preferences, чтобы обновить массив stop_words.
 - Если в состоянии настроек заполнен ключ "SearchArea" (даже если текстовые предпочтения по районам пусты), это ОЗНАЧАЕТ, что локация для поиска задана (пользователь ограничил поиск гео-зоной на карте). В этом случае НИКОГДА не пиши, что локация не задана или что предпочтений по районам нет. Указывай, что поиск идет в границах заданной области/зоны поиска на карте.
+- Если пользователь просит показать/прислать карту, картинку, фото или изображение зоны поиска и "SearchArea" заполнен, отвечай коротко, что прикрепляешь изображение текущей зоны поиска. НЕ говори, что не можешь отрисовать или сгенерировать карту: Telegram-бот прикрепит изображение автоматически.
+- Если пользователь спрашивает, какие чаты/каналы/источники сейчас читаются, отслеживаются или подключены, отвечай строго по "ConnectedSources" из текущего состояния. Если список пустой, скажи, что источники пока не подключены. НЕ говори, что ты не подключен к списку чатов.
 - Если пользователь хочет сам нарисовать зону поиска, обязательно дай ему пошаговую инструкцию: 1) Открыть сайт geojson.io, 2) Нарисовать полигон с помощью инструмента рисования (Draw a polygon), 3) Скопировать сгенерированный JSON (справа) и прислать тебе в чат в виде текста или файла.
 
 Текущее состояние настроек:
@@ -601,7 +650,7 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 	}
 
 	listingJSON, _ := json.MarshalIndent(listing, "", "  ")
-	userContent := fmt.Sprintf("Контекст: Я ответил на следующее объявление:\n%s\n\nМой отзыв: %s", string(listingJSON), feedbackText)
+	userContent := fmt.Sprintf("Контекст: Я ответил на следующее объявление.\ntelegram_chat_id: %d\nreplied_message_id: %d\n\nДанные объявления:\n%s\n\nМой отзыв: %s", telegramChatID, repliedMessageID, string(listingJSON), feedbackText)
 	messages = append(messages, chatMessage{Role: "user", Content: userContent})
 
 	tools := []chatTool{
@@ -714,6 +763,27 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 							"description": "Максимальное количество возвращаемых результатов (по умолчанию 10).",
 						},
 					},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: chatFunction{
+				Name:        "get_listing_evaluation_report",
+				Description: "Возвращает полный сохраненный отчет по одному объявлению: само объявление, источник, статус, причины отклонения, AI-инсайты, итоговый текст отчета и ошибку. Используй, когда пользователь спрашивает, почему конкретное объявление прошло или не прошло фильтры. message_id — это replied_message_id из feedback-контекста, ID сообщения бота с отчетом или ID исходного сообщения в канале.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"message_id": map[string]any{
+							"type":        "integer",
+							"description": "ID сообщения бота с отчетом или исходного сообщения объявления.",
+						},
+						"telegram_chat_id": map[string]any{
+							"type":        "integer",
+							"description": "Telegram chat id пользователя. Если не указан, используется текущий chat id профиля.",
+						},
+					},
+					"required": []string{"message_id"},
 				},
 			},
 		},
@@ -844,6 +914,25 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 				toolResult = "error: " + err.Error()
 			} else {
 				resBytes, _ := json.Marshal(records)
+				toolResult = string(resBytes)
+			}
+		case "get_listing_evaluation_report":
+			var args struct {
+				MessageID      int   `json:"message_id"`
+				TelegramChatID int64 `json:"telegram_chat_id"`
+			}
+			json.Unmarshal([]byte(tc.Function.Arguments), &args)
+			chatID := args.TelegramChatID
+			if chatID == 0 {
+				chatID = profile.TelegramChatID
+			}
+			record, ok, err := a.store.GetEvaluationByTelegramMessage(ctx, profileID, chatID, args.MessageID)
+			if err != nil {
+				toolResult = "error: " + err.Error()
+			} else if !ok {
+				toolResult = "not found"
+			} else {
+				resBytes, _ := json.Marshal(record)
 				toolResult = string(resBytes)
 			}
 		default:

@@ -748,6 +748,92 @@ func usageFloat(usage *domain.AIUsage, getter func(domain.AIUsage) float64) any 
 	return getter(*usage)
 }
 
+type evaluationScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanEvaluationRecord(scanner evaluationScanner) (domain.ListingEvaluationRecord, error) {
+	var record domain.ListingEvaluationRecord
+	var listingJSON []byte
+	var sourceJSON []byte
+	var scoreJSON []byte
+	var insightsJSON []byte
+	var aiUsageJSON []byte
+	var duplicateJSON []byte
+
+	err := scanner.Scan(
+		&listingJSON,
+		&sourceJSON,
+		&scoreJSON,
+		&insightsJSON,
+		&aiUsageJSON,
+		&duplicateJSON,
+		&record.Report,
+		&record.Status,
+		&record.FailureReason,
+	)
+	if err != nil {
+		return domain.ListingEvaluationRecord{}, err
+	}
+
+	if err := json.Unmarshal(listingJSON, &record.Listing); err != nil {
+		return domain.ListingEvaluationRecord{}, fmt.Errorf("failed to unmarshal listing: %w", err)
+	}
+	if err := json.Unmarshal(sourceJSON, &record.Source); err != nil {
+		return domain.ListingEvaluationRecord{}, fmt.Errorf("failed to unmarshal source: %w", err)
+	}
+	if len(scoreJSON) > 0 {
+		var score domain.ListingScore
+		if err := json.Unmarshal(scoreJSON, &score); err == nil {
+			record.Score = &score
+		}
+	}
+	if len(insightsJSON) > 0 {
+		var insights domain.ListingInsights
+		if err := json.Unmarshal(insightsJSON, &insights); err == nil {
+			record.Insights = &insights
+		}
+	}
+	if len(aiUsageJSON) > 0 {
+		var aiUsage domain.AIUsage
+		if err := json.Unmarshal(aiUsageJSON, &aiUsage); err == nil {
+			record.AIUsage = &aiUsage
+		}
+	}
+	if len(duplicateJSON) > 0 {
+		var duplicate any
+		if err := json.Unmarshal(duplicateJSON, &duplicate); err == nil {
+			record.Duplicate = duplicate
+		}
+	}
+
+	return record, nil
+}
+
+func (r *Repository) GetEvaluationByTelegramMessage(ctx context.Context, profileID string, telegramChatID int64, messageID int) (domain.ListingEvaluationRecord, bool, error) {
+	if strings.TrimSpace(profileID) == "" || telegramChatID == 0 || messageID == 0 {
+		return domain.ListingEvaluationRecord{}, false, nil
+	}
+	row := r.db.QueryRowContext(ctx, `
+		select listing, source, score, insights, ai_usage, duplicate, coalesce(report, ''), status, coalesce(failure_reason, '')
+		from listing_evaluations
+		where profile_id = $1
+			and telegram_chat_id = $2
+			and (bot_message_id = $3 or message_id = $3)
+		order by updated_at desc, id desc
+		limit 1
+	`, profileID, telegramChatID, messageID)
+
+	record, err := scanEvaluationRecord(row)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return domain.ListingEvaluationRecord{}, false, nil
+		}
+		return domain.ListingEvaluationRecord{}, false, err
+	}
+	return record, true, nil
+}
+
 func (r *Repository) SearchEvaluations(ctx context.Context, profileID string, filter domain.EvaluationSearchFilter) ([]domain.ListingEvaluationRecord, error) {
 	queryParts := []string{`
 		select listing, source, score, insights, ai_usage, duplicate, coalesce(report, ''), status, coalesce(failure_reason, '')
@@ -799,60 +885,10 @@ func (r *Repository) SearchEvaluations(ctx context.Context, profileID string, fi
 
 	var records []domain.ListingEvaluationRecord
 	for rows.Next() {
-		var record domain.ListingEvaluationRecord
-		var listingJSON []byte
-		var sourceJSON []byte
-		var scoreJSON []byte
-		var insightsJSON []byte
-		var aiUsageJSON []byte
-		var duplicateJSON []byte
-
-		err := rows.Scan(
-			&listingJSON,
-			&sourceJSON,
-			&scoreJSON,
-			&insightsJSON,
-			&aiUsageJSON,
-			&duplicateJSON,
-			&record.Report,
-			&record.Status,
-			&record.FailureReason,
-		)
+		record, err := scanEvaluationRecord(rows)
 		if err != nil {
 			return nil, err
 		}
-
-		if err := json.Unmarshal(listingJSON, &record.Listing); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal listing: %w", err)
-		}
-		if err := json.Unmarshal(sourceJSON, &record.Source); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal source: %w", err)
-		}
-		if len(scoreJSON) > 0 {
-			var score domain.ListingScore
-			if err := json.Unmarshal(scoreJSON, &score); err == nil {
-				record.Score = &score
-			}
-		}
-		if len(insightsJSON) > 0 {
-			var insights domain.ListingInsights
-			if err := json.Unmarshal(insightsJSON, &insights); err == nil {
-				record.Insights = &insights
-			}
-		}
-		if len(aiUsageJSON) > 0 {
-			var aiUsage domain.AIUsage
-			if err := json.Unmarshal(aiUsageJSON, &aiUsage); err == nil {
-				record.AIUsage = &aiUsage
-			}
-		}
-		if len(duplicateJSON) > 0 {
-			var duplicate any
-			if err := json.Unmarshal(duplicateJSON, &duplicate); err == nil {
-				record.Duplicate = duplicate
-			}
-		}
-
 		records = append(records, record)
 	}
 

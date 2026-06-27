@@ -24,16 +24,16 @@ import (
 )
 
 type Bot struct {
-	token       string
-	client      *http.Client
-	sessions    map[int64]*preferenceSession
-	store       ProfileStore
-	parser      preferenceparser.Service
-	geometry    preferenceparser.GeometryBuilder
-	mapRenderer googlemaps.StaticMapRenderer
-	mcpAgent    *mcpagent.Agent
-	mu          sync.Mutex
-	allowedChats []int64
+	token            string
+	client           *http.Client
+	sessions         map[int64]*preferenceSession
+	store            ProfileStore
+	parser           preferenceparser.Service
+	geometry         preferenceparser.GeometryBuilder
+	mapRenderer      googlemaps.StaticMapRenderer
+	mcpAgent         *mcpagent.Agent
+	mu               sync.Mutex
+	allowedChats     []int64
 	allowedUsernames []string
 }
 
@@ -305,18 +305,7 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 			Text:        reply,
 			ReplyMarkup: mainCommandKeyboard(),
 		}
-		shouldAttachMap := prefsChanged != nil
-		if !shouldAttachMap {
-			lowerText := strings.ToLower(text)
-			lowerReply := strings.ToLower(reply)
-			shouldAttachMap = strings.Contains(lowerText, "фильтр") ||
-				strings.Contains(lowerText, "настройк") ||
-				strings.Contains(lowerText, "локаци") ||
-				strings.Contains(lowerReply, "фильтр") ||
-				strings.Contains(lowerReply, "настройк") ||
-				strings.Contains(lowerReply, "локаци")
-		}
-		if shouldAttachMap {
+		if shouldAttachMCPMap(text, reply, prefsChanged != nil || areaChanged != nil) {
 			if saStore, ok := b.store.(interface {
 				LatestSearchAreaGeoJSON(ctx context.Context, profileID string) (string, bool, error)
 			}); ok {
@@ -454,6 +443,35 @@ func (b *Bot) channelList(ctx context.Context, chatID int64) ([]string, error) {
 	return lines, nil
 }
 
+func shouldAttachMCPMap(text, reply string, filtersChanged bool) bool {
+	if filtersChanged {
+		return true
+	}
+	return textMentionsSearchAreaMap(text) || textMentionsSearchAreaMap(reply) || textMentionsSearchAreaSettings(text) || textMentionsSearchAreaSettings(reply)
+}
+
+func textMentionsSearchAreaSettings(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "фильтр") ||
+		strings.Contains(lower, "настройк") ||
+		strings.Contains(lower, "локаци")
+}
+
+func textMentionsSearchAreaMap(text string) bool {
+	lower := strings.ToLower(text)
+	if !(strings.Contains(lower, "зон") || strings.Contains(lower, "област") || strings.Contains(lower, "гео") || strings.Contains(lower, "search area")) {
+		return false
+	}
+	return strings.Contains(lower, "карт") ||
+		strings.Contains(lower, "изображ") ||
+		strings.Contains(lower, "картин") ||
+		strings.Contains(lower, "фото") ||
+		strings.Contains(lower, "скрин") ||
+		strings.Contains(lower, "покаж") ||
+		strings.Contains(lower, "пришли") ||
+		strings.Contains(lower, "отправ")
+}
+
 func (b *Bot) subscribeChannel(ctx context.Context, chatID int64, text string) (string, error) {
 	parts := strings.Fields(text)
 	if len(parts) < 2 {
@@ -533,7 +551,7 @@ func (b *Bot) unsubscribeChannel(ctx context.Context, chatID int64, text string)
 func (b *Bot) debugMode(ctx context.Context, chatID int64, text string) (string, error) {
 	parts := strings.Fields(strings.TrimSpace(text))
 	profileID := profiles.IDForTelegramChat(chatID)
-	
+
 	if len(parts) == 1 {
 		profile, ok, err := b.store.GetProfile(ctx, profileID)
 		if err != nil {
@@ -582,7 +600,7 @@ func (b *Bot) debugMode(ctx context.Context, chatID int64, text string) (string,
 func (b *Bot) mcpMode(ctx context.Context, chatID int64, text string) (string, error) {
 	parts := strings.Fields(strings.TrimSpace(text))
 	profileID := profiles.IDForTelegramChat(chatID)
-	
+
 	if len(parts) == 1 {
 		profile, ok, err := b.store.GetProfile(ctx, profileID)
 		if err != nil {
@@ -657,7 +675,7 @@ func (b *Bot) saveReplyFeedback(ctx context.Context, message *models.Message) (s
 
 	profile, profileOk, profileErr := b.store.GetProfile(ctx, profiles.IDForTelegramChat(message.Chat.ID))
 	if profileErr == nil && profileOk && profiles.MCPModeEnabled(profile) && b.mcpAgent != nil {
-		reply, prefsChanged, areaChanged, agentErr := b.mcpAgent.ProcessFeedback(ctx, profile.ID, *listing, text)
+		reply, prefsChanged, areaChanged, agentErr := b.mcpAgent.ProcessFeedback(ctx, profile.ID, *listing, text, message.Chat.ID, message.ReplyToMessage.ID)
 		if agentErr != nil {
 			return "Отзыв сохранен, но ошибка агента: " + agentErr.Error(), true, nil
 		}
@@ -948,8 +966,8 @@ func sendDocumentBytesWithMarkup(ctx context.Context, api *telegrambot.Bot, chat
 
 func sendMessageWithReply(ctx context.Context, api *telegrambot.Bot, chatID int64, replyToMessageID int, text string) error {
 	_, err := api.SendMessage(ctx, &telegrambot.SendMessageParams{
-		ChatID: chatID,
-		Text:   markdownToHTML(text),
+		ChatID:    chatID,
+		Text:      markdownToHTML(text),
 		ParseMode: models.ParseModeHTML,
 		ReplyParameters: &models.ReplyParameters{
 			MessageID: replyToMessageID,
