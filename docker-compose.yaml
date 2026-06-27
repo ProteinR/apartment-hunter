@@ -31,6 +31,8 @@ services:
     environment: *app-environment
     volumes:
       - telegram-session:/app/.telegram
+    networks:
+      - coolify
 
   worker:
     build: .
@@ -40,6 +42,12 @@ services:
     environment: *app-environment
     volumes:
       - telegram-session:/app/.telegram
+    networks:
+      - coolify
+
+networks:
+  coolify:
+    external: true
 
 volumes:
   telegram-session:
