@@ -27,11 +27,19 @@ x-app-environment: &app-environment
   APARTMENT_HUNTER_GEOCODING_LOG_DIR: ${APARTMENT_HUNTER_GEOCODING_LOG_DIR:-/app/.telegram/logs/geocoding}
   APARTMENT_HUNTER_LOG_TO_STDOUT: ${APARTMENT_HUNTER_LOG_TO_STDOUT:-true}
 
+x-app-healthcheck: &app-healthcheck
+  test: ["CMD-SHELL", "pidof apartment-hunter >/dev/null"]
+  interval: 30s
+  timeout: 5s
+  retries: 3
+  start_period: 20s
+
 services:
   bot:
     build: .
     command: ["telegram"]
     environment: *app-environment
+    healthcheck: *app-healthcheck
     volumes:
       - telegram-session:/app/.telegram
     networks:
@@ -43,6 +51,7 @@ services:
       - worker
     command: ["telegram-process", "${APARTMENT_HUNTER_PROFILE_ID:-telegram_0}"]
     environment: *app-environment
+    healthcheck: *app-healthcheck
     volumes:
       - telegram-session:/app/.telegram
     networks:
