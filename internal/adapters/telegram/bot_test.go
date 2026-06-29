@@ -607,6 +607,12 @@ func TestClearAndResetCommands(t *testing.T) {
 	p := profiles.Profile{
 		ID:             profileID,
 		TelegramChatID: chatID,
+		Preferences: &domain.UserPreferences{
+			MinBudget:         400,
+			MaxBudget:         800,
+			RequireDishwasher: true,
+			RequireOven:       true,
+		},
 		MCPHistory: []profiles.MCPMessage{
 			{Role: "user", Content: "hello"},
 		},
@@ -614,17 +620,26 @@ func TestClearAndResetCommands(t *testing.T) {
 	if err := store.UpsertProfile(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
+	store.searchProfiles = append(store.searchProfiles, domain.UserSearchProfile{
+		UserID: profileID,
+		Preferences: domain.UserPreferences{
+			MinBudget:         400,
+			MaxBudget:         800,
+			RequireDishwasher: true,
+			RequireOven:       true,
+		},
+	})
 
 	// Send /clear
 	response, err := bot.handleTextResponse(chatID, "/clear")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(response.Text, "сброшены") {
+	if !strings.Contains(response.Text, "Сохраненные фильтры остались без изменений") {
 		t.Fatalf("unexpected clear reply: %q", response.Text)
 	}
 
-	// Verify session and history are cleared
+	// Verify session and history are cleared, while filters remain intact.
 	if bot.getSession(chatID) != nil {
 		t.Fatal("expected session to be cleared")
 	}
@@ -637,6 +652,12 @@ func TestClearAndResetCommands(t *testing.T) {
 	}
 	if len(profile.MCPHistory) != 0 {
 		t.Fatalf("expected MCP history to be empty, got %d messages", len(profile.MCPHistory))
+	}
+	if profile.Preferences == nil || !profile.Preferences.RequireDishwasher || !profile.Preferences.RequireOven {
+		t.Fatalf("expected preferences to be preserved, got %+v", profile.Preferences)
+	}
+	if len(store.searchProfiles) != 1 {
+		t.Fatalf("expected clear not to create empty search profiles, got %d", len(store.searchProfiles))
 	}
 }
 

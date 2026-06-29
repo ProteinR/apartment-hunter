@@ -33,6 +33,23 @@ func TestServiceBuildDraftNormalizesThenExtracts(t *testing.T) {
 	}
 }
 
+func TestNormalizePreferencesMirrorsApplianceFormats(t *testing.T) {
+	fromAmenities := NormalizePreferences(domain.UserPreferences{
+		RequiredAmenities: []string{"dishwasher", "oven"},
+	})
+	if !fromAmenities.RequireDishwasher || !fromAmenities.RequireOven {
+		t.Fatalf("expected required amenities to populate legacy flags: %+v", fromAmenities)
+	}
+
+	fromLegacy := NormalizePreferences(domain.UserPreferences{
+		RequireDishwasher: true,
+		RequireOven:       true,
+	})
+	if !containsString(fromLegacy.RequiredAmenities, "dishwasher") || !containsString(fromLegacy.RequiredAmenities, "oven") {
+		t.Fatalf("expected legacy flags to populate required amenities: %+v", fromLegacy)
+	}
+}
+
 type recordingNormalizer struct {
 	input  string
 	output string

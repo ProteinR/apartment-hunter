@@ -261,13 +261,8 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 				return textResponse{}, err
 			}
 		}
-		if err := b.store.SaveSearchProfile(context.Background(), domain.UserSearchProfile{
-			UserID: profileID,
-		}); err != nil {
-			return textResponse{}, err
-		}
 		return textResponse{
-			Text:        "Сессия общения и текущие настройки сброшены. Начинаем с чистого листа!",
+			Text:        "Контекст общения сброшен. Сохраненные фильтры остались без изменений.",
 			ReplyMarkup: mainCommandKeyboard(),
 		}, nil
 	}

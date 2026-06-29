@@ -15,6 +15,7 @@ import (
 
 	"apartment-hunter/internal/adapters/openaipreferences"
 	"apartment-hunter/internal/domain"
+	"apartment-hunter/internal/preferenceparser"
 	"apartment-hunter/internal/profiles"
 	"apartment-hunter/internal/sources"
 )
@@ -423,6 +424,7 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 			if err != nil {
 				toolResult = "error: failed to parse preferences JSON"
 			} else {
+				newPrefs = preferenceparser.NormalizePreferences(newPrefs)
 				profile.Preferences = &newPrefs
 				prefsChanged = &newPrefs
 				toolResult = "success"
@@ -840,6 +842,7 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 			if err != nil {
 				toolResult = "error: failed to parse preferences JSON"
 			} else {
+				newPrefs = preferenceparser.NormalizePreferences(newPrefs)
 				profile.Preferences = &newPrefs
 				prefsChanged = &newPrefs
 				toolResult = "success"

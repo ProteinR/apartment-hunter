@@ -102,6 +102,12 @@ func NormalizePreferences(prefs domain.UserPreferences) domain.UserPreferences {
 			prefs.RequireOven = true
 		}
 	}
+	if prefs.RequireDishwasher && !containsString(prefs.RequiredAmenities, "dishwasher") {
+		prefs.RequiredAmenities = append(prefs.RequiredAmenities, "dishwasher")
+	}
+	if prefs.RequireOven && !containsString(prefs.RequiredAmenities, "oven") {
+		prefs.RequiredAmenities = append(prefs.RequiredAmenities, "oven")
+	}
 	if prefs.LocationPreferences == nil && prefs.Locations != nil {
 		prefs.LocationPreferences = prefs.Locations
 	}
@@ -140,4 +146,13 @@ func NormalizePreferences(prefs domain.UserPreferences) domain.UserPreferences {
 		prefs.StopWords = []string{"юсдт", "usdt", "обмен", "обменяю", "обменять", "exchange"}
 	}
 	return prefs
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }

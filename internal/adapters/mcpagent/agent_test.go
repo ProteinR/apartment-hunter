@@ -167,6 +167,48 @@ func TestProcessCommandIncludesConnectedSourcesGuidance(t *testing.T) {
 	}
 }
 
+func TestProcessCommandNormalizesUpdatedPreferences(t *testing.T) {
+	store := &fakeProfileStore{profile: profiles.Profile{ID: "telegram_42"}}
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		var req chatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch requests {
+		case 1:
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"update_preferences","arguments":"{\"budget_min\":400,\"budget_max\":800,\"area_min\":45,\"required_amenities\":[\"dishwasher\",\"oven\"],\"stop_words\":[\"продажа\",\"покупка\"]}"}}]}}]}`))
+		case 2:
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Готово."}}]}`))
+		default:
+			t.Fatalf("unexpected request #%d", requests)
+		}
+	}))
+	defer server.Close()
+
+	agent := New("test-key", store)
+	agent.apiURL = server.URL
+
+	_, prefsChanged, _, err := agent.ProcessCommand(context.Background(), "telegram_42", "Добавь стоп слова о продаже либо покупке квартир")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prefsChanged == nil {
+		t.Fatal("expected preferences to be changed")
+	}
+	if !prefsChanged.RequireDishwasher || !prefsChanged.RequireOven {
+		t.Fatalf("expected legacy appliance flags to be normalized, got %+v", prefsChanged)
+	}
+	if prefsChanged.MinBudget != 400 || prefsChanged.MaxBudget != 800 || prefsChanged.MinAreaM2 != 45 {
+		t.Fatalf("expected legacy budget/area fields to be normalized, got %+v", prefsChanged)
+	}
+	if store.profile.Preferences == nil || !store.profile.Preferences.RequireDishwasher || !store.profile.Preferences.RequireOven {
+		t.Fatalf("expected stored preferences to keep appliance requirements, got %+v", store.profile.Preferences)
+	}
+}
+
 func TestProcessFeedbackCanGetListingEvaluationReport(t *testing.T) {
 	store := &fakeProfileStore{
 		profile: profiles.Profile{ID: "telegram_42", TelegramChatID: 42},
