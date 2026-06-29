@@ -15,4 +15,6 @@ COPY --from=build /bin/apartment-hunter /usr/local/bin/apartment-hunter
 COPY configs ./configs
 COPY examples ./examples
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD pidof apartment-hunter >/dev/null || exit 1
+
 ENTRYPOINT ["apartment-hunter"]
