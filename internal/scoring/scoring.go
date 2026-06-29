@@ -98,7 +98,7 @@ func NormalizeScoringPreferences(prefs domain.UserPreferences) domain.UserPrefer
 		prefs.MinAreaM2 = *prefs.AreaMin
 	}
 	for _, amenity := range prefs.RequiredAmenities {
-		switch strings.ToLower(strings.TrimSpace(amenity)) {
+		switch normalizeAmenitySlug(amenity) {
 		case "dishwasher":
 			prefs.RequireDishwasher = true
 		case "oven":
@@ -154,6 +154,19 @@ func NormalizeScoringPreferences(prefs domain.UserPreferences) domain.UserPrefer
 		}
 	}
 	return prefs
+}
+
+func normalizeAmenitySlug(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.NewReplacer("-", "_", " ", "_").Replace(value)
+	switch value {
+	case "dishwasher", "посудомойка", "посудомоечная_машина", "посудомоечная":
+		return "dishwasher"
+	case "oven", "духовка", "духовой_шкаф":
+		return "oven"
+	default:
+		return value
+	}
 }
 
 func normalizeRuleSlug(value string) string {

@@ -209,6 +209,70 @@ func TestProcessCommandNormalizesUpdatedPreferences(t *testing.T) {
 	}
 }
 
+func TestProcessCommandMergesPartialPreferenceUpdate(t *testing.T) {
+	areaMin := 45.0
+	budgetMin := 400
+	budgetMax := 800
+	store := &fakeProfileStore{profile: profiles.Profile{
+		ID: "telegram_42",
+		Preferences: &domain.UserPreferences{
+			MinBudget: 400,
+			MaxBudget: 800,
+			MinAreaM2: 45,
+			BudgetMin: &budgetMin,
+			BudgetMax: &budgetMax,
+			AreaMin:   &areaMin,
+			InteriorPreferences: domain.InteriorPreferences{
+				Style:  []string{"modern", "light_renovation"},
+				Reject: []string{"glossy_ceiling"},
+			},
+			RejectRules: []string{"windows_facing_neighbor_building"},
+			StopWords:   []string{"продажа", "покупка"},
+			Weights:     domain.PreferenceWeights{Location: 5, Interior: 4, View: 2, Price: 3, Amenities: 5},
+		},
+	}}
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		switch requests {
+		case 1:
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"update_preferences","arguments":"{\"required_amenities\":[\"dishwasher\",\"oven\"]}"}}]}}]}`))
+		case 2:
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Готово."}}]}`))
+		default:
+			t.Fatalf("unexpected request #%d", requests)
+		}
+	}))
+	defer server.Close()
+
+	agent := New("test-key", store)
+	agent.apiURL = server.URL
+
+	_, prefsChanged, _, err := agent.ProcessCommand(context.Background(), "telegram_42", "обнови")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prefsChanged == nil {
+		t.Fatal("expected preferences to be changed")
+	}
+	if !prefsChanged.RequireDishwasher || !prefsChanged.RequireOven {
+		t.Fatalf("expected appliance requirements to be enabled, got %+v", prefsChanged)
+	}
+	if prefsChanged.MinBudget != 400 || prefsChanged.MaxBudget != 800 || prefsChanged.MinAreaM2 != 45 {
+		t.Fatalf("expected existing budget and area to be preserved, got %+v", prefsChanged)
+	}
+	if len(prefsChanged.InteriorPreferences.Style) != 2 || prefsChanged.InteriorPreferences.Style[0] != "modern" {
+		t.Fatalf("expected existing interior preferences to be preserved, got %+v", prefsChanged.InteriorPreferences)
+	}
+	if len(prefsChanged.StopWords) != 2 || prefsChanged.StopWords[0] != "продажа" {
+		t.Fatalf("expected existing stop words to be preserved, got %+v", prefsChanged.StopWords)
+	}
+	if store.profile.Preferences == nil || !store.profile.Preferences.RequireDishwasher || !store.profile.Preferences.RequireOven {
+		t.Fatalf("expected stored preferences to include appliance requirements, got %+v", store.profile.Preferences)
+	}
+}
+
 func TestProcessFeedbackCanGetListingEvaluationReport(t *testing.T) {
 	store := &fakeProfileStore{
 		profile: profiles.Profile{ID: "telegram_42", TelegramChatID: 42},

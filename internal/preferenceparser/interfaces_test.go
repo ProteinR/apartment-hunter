@@ -48,6 +48,16 @@ func TestNormalizePreferencesMirrorsApplianceFormats(t *testing.T) {
 	if !containsString(fromLegacy.RequiredAmenities, "dishwasher") || !containsString(fromLegacy.RequiredAmenities, "oven") {
 		t.Fatalf("expected legacy flags to populate required amenities: %+v", fromLegacy)
 	}
+
+	fromRussianAmenities := NormalizePreferences(domain.UserPreferences{
+		RequiredAmenities: []string{"посудомоечная машина", "духовка"},
+	})
+	if !fromRussianAmenities.RequireDishwasher || !fromRussianAmenities.RequireOven {
+		t.Fatalf("expected Russian amenity names to populate legacy flags: %+v", fromRussianAmenities)
+	}
+	if !containsString(fromRussianAmenities.RequiredAmenities, "dishwasher") || !containsString(fromRussianAmenities.RequiredAmenities, "oven") {
+		t.Fatalf("expected Russian amenity names to be canonicalized: %+v", fromRussianAmenities.RequiredAmenities)
+	}
 }
 
 type recordingNormalizer struct {

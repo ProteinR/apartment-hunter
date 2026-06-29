@@ -2,6 +2,7 @@ package preferenceparser
 
 import (
 	"context"
+	"strings"
 
 	"apartment-hunter/internal/domain"
 )
@@ -94,11 +95,13 @@ func NormalizePreferences(prefs domain.UserPreferences) domain.UserPreferences {
 		value := prefs.MinAreaM2
 		prefs.AreaMin = &value
 	}
-	for _, amenity := range prefs.RequiredAmenities {
-		switch amenity {
+	for i, amenity := range prefs.RequiredAmenities {
+		switch normalizeAmenitySlug(amenity) {
 		case "dishwasher":
+			prefs.RequiredAmenities[i] = "dishwasher"
 			prefs.RequireDishwasher = true
 		case "oven":
+			prefs.RequiredAmenities[i] = "oven"
 			prefs.RequireOven = true
 		}
 	}
@@ -146,6 +149,19 @@ func NormalizePreferences(prefs domain.UserPreferences) domain.UserPreferences {
 		prefs.StopWords = []string{"юсдт", "usdt", "обмен", "обменяю", "обменять", "exchange"}
 	}
 	return prefs
+}
+
+func normalizeAmenitySlug(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.NewReplacer("-", "_", " ", "_").Replace(value)
+	switch value {
+	case "dishwasher", "посудомойка", "посудомоечная_машина", "посудомоечная":
+		return "dishwasher"
+	case "oven", "духовка", "духовой_шкаф":
+		return "oven"
+	default:
+		return value
+	}
 }
 
 func containsString(values []string, target string) bool {

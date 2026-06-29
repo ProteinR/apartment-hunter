@@ -419,12 +419,10 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 				toolResult = err.Error()
 			}
 		case "update_preferences":
-			var newPrefs domain.UserPreferences
-			err := json.Unmarshal([]byte(tc.Function.Arguments), &newPrefs)
+			newPrefs, err := mergePreferenceUpdate(profile.Preferences, tc.Function.Arguments)
 			if err != nil {
 				toolResult = "error: failed to parse preferences JSON"
 			} else {
-				newPrefs = preferenceparser.NormalizePreferences(newPrefs)
 				profile.Preferences = &newPrefs
 				prefsChanged = &newPrefs
 				toolResult = "success"
@@ -837,12 +835,10 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 				toolResult = err.Error()
 			}
 		case "update_preferences":
-			var newPrefs domain.UserPreferences
-			err := json.Unmarshal([]byte(tc.Function.Arguments), &newPrefs)
+			newPrefs, err := mergePreferenceUpdate(profile.Preferences, tc.Function.Arguments)
 			if err != nil {
 				toolResult = "error: failed to parse preferences JSON"
 			} else {
-				newPrefs = preferenceparser.NormalizePreferences(newPrefs)
 				profile.Preferences = &newPrefs
 				prefsChanged = &newPrefs
 				toolResult = "success"
@@ -972,6 +968,131 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 	}
 
 	return respMsg.Content, prefsChanged, areaChanged, nil
+}
+
+func mergePreferenceUpdate(existing *domain.UserPreferences, updateJSON string) (domain.UserPreferences, error) {
+	var patch domain.UserPreferences
+	if err := json.Unmarshal([]byte(updateJSON), &patch); err != nil {
+		return domain.UserPreferences{}, err
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(updateJSON), &fields); err != nil {
+		return domain.UserPreferences{}, err
+	}
+
+	merged := domain.UserPreferences{}
+	if existing != nil {
+		merged = preferenceparser.NormalizePreferences(*existing)
+	}
+
+	if hasField(fields, "budget_min") {
+		merged.BudgetMin = patch.BudgetMin
+		if patch.BudgetMin != nil {
+			merged.MinBudget = *patch.BudgetMin
+		} else {
+			merged.MinBudget = 0
+		}
+	}
+	if hasField(fields, "min_budget") {
+		merged.MinBudget = patch.MinBudget
+		if patch.MinBudget > 0 {
+			value := patch.MinBudget
+			merged.BudgetMin = &value
+		} else {
+			merged.BudgetMin = nil
+		}
+	}
+	if hasField(fields, "budget_max") {
+		merged.BudgetMax = patch.BudgetMax
+		if patch.BudgetMax != nil {
+			merged.MaxBudget = *patch.BudgetMax
+		} else {
+			merged.MaxBudget = 0
+		}
+	}
+	if hasField(fields, "max_budget") {
+		merged.MaxBudget = patch.MaxBudget
+		if patch.MaxBudget > 0 {
+			value := patch.MaxBudget
+			merged.BudgetMax = &value
+		} else {
+			merged.BudgetMax = nil
+		}
+	}
+	if hasField(fields, "area_min") {
+		merged.AreaMin = patch.AreaMin
+		if patch.AreaMin != nil {
+			merged.MinAreaM2 = *patch.AreaMin
+		} else {
+			merged.MinAreaM2 = 0
+		}
+	}
+	if hasField(fields, "min_area_m2") {
+		merged.MinAreaM2 = patch.MinAreaM2
+		if patch.MinAreaM2 > 0 {
+			value := patch.MinAreaM2
+			merged.AreaMin = &value
+		} else {
+			merged.AreaMin = nil
+		}
+	}
+	if hasField(fields, "area_max") {
+		merged.AreaMax = patch.AreaMax
+	}
+	if hasField(fields, "required_amenities") {
+		merged.RequiredAmenities = patch.RequiredAmenities
+		merged.RequireDishwasher = false
+		merged.RequireOven = false
+	}
+	if hasField(fields, "require_dishwasher") {
+		merged.RequireDishwasher = patch.RequireDishwasher
+	}
+	if hasField(fields, "require_oven") {
+		merged.RequireOven = patch.RequireOven
+	}
+	if hasField(fields, "preferred_amenities") {
+		merged.PreferredAmenities = patch.PreferredAmenities
+	}
+	if hasField(fields, "interior_preferences") {
+		merged.InteriorPreferences = patch.InteriorPreferences
+	}
+	if hasField(fields, "reject") {
+		merged.Reject = patch.Reject
+	}
+	if hasField(fields, "reject_rules") {
+		merged.RejectRules = patch.RejectRules
+	}
+	if hasField(fields, "location_preferences") {
+		merged.LocationPreferences = patch.LocationPreferences
+		merged.Locations = patch.LocationPreferences
+	}
+	if hasField(fields, "locations") {
+		merged.Locations = patch.Locations
+		merged.LocationPreferences = patch.Locations
+	}
+	if hasField(fields, "weights") {
+		merged.Weights = patch.Weights
+	}
+	if hasField(fields, "importance") {
+		merged.Importance = patch.Importance
+	}
+	if hasField(fields, "unresolved_location_rules") {
+		merged.UnresolvedLocationRules = patch.UnresolvedLocationRules
+	}
+	if hasField(fields, "has_search_area") {
+		merged.HasSearchArea = patch.HasSearchArea
+	}
+	if hasField(fields, "stop_words") {
+		merged.StopWords = patch.StopWords
+	}
+
+	return preferenceparser.NormalizePreferences(merged), nil
+}
+
+func hasField(fields map[string]json.RawMessage, name string) bool {
+	_, ok := fields[name]
+	return ok
 }
 
 func haversineDistance(lat1, lon1, lat2, lon2 float64) float64 {

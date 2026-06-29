@@ -98,6 +98,32 @@ func TestScoreUsesStructuredRequiredAmenities(t *testing.T) {
 	}
 }
 
+func TestScoreUsesRussianStructuredRequiredAmenities(t *testing.T) {
+	scorer := New(fakeEvaluator{insights: domain.ListingInsights{
+		HasDishwasher:   false,
+		HasOven:         true,
+		InteriorQuality: 0.7,
+		ViewQuality:     0.6,
+	}})
+	result := scorer.Score(domain.ApartmentListing{
+		Title:  "Russian schema amenities",
+		Price:  650,
+		AreaM2: 55,
+	}, domain.UserPreferences{
+		MaxBudget:         800,
+		MinAreaM2:         50,
+		RequiredAmenities: []string{"посудомоечная машина", "духовка"},
+		Weights:           domain.PreferenceWeights{Price: 1, Amenities: 1},
+	})
+
+	if result.PassedHardFilters {
+		t.Fatal("expected listing without dishwasher to fail Russian required amenities")
+	}
+	if !strings.Contains(strings.Join(result.RejectionReasons, ","), "dishwasher is required") {
+		t.Fatalf("expected dishwasher rejection, got %v", result.RejectionReasons)
+	}
+}
+
 func TestScoreUsesStructuredRejectRules(t *testing.T) {
 	scorer := New(fakeEvaluator{insights: domain.ListingInsights{
 		HasDishwasher:      true,
