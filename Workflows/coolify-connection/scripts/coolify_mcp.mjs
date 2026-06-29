@@ -57,8 +57,13 @@ async function post(url, token, payload, sessionId) {
   }
   return {
     headers: response.headers,
-    body: JSON.parse(text),
+    body: text ? parseMaybeSSE(text) : null,
   };
+}
+
+function parseMaybeSSE(text) {
+  const line = text.split(/\n/).find((value) => value.startsWith("data: "));
+  return JSON.parse(line ? line.slice(6) : text);
 }
 
 function redact(value) {

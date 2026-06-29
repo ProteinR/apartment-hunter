@@ -13,6 +13,20 @@ Use this skill when you need to understand how the Telegram bot works, how to fi
 - **Configuration**: Configured via the `TELEGRAM_BOT_TOKEN` environment variable in the `.env` file.
 - **Running the Bot**: Run the bot locally using `go run ./cmd/apartment-hunter telegram` or via Docker Compose (`docker compose up bot`).
 
+## Telegram MCP
+
+- **Endpoint**: `https://tg-mcp.memruk.dev/mcp`
+- **Authentication**: `Authorization: Bearer <token>`. Prefer `TELEGRAM_MCP_AUTH_TOKEN` in the current environment; never commit or persist the token in repo files.
+- **Helper**:
+
+```bash
+TELEGRAM_MCP_AUTH_TOKEN='...' node Workflows/telegram-bot-communication/scripts/telegram_mcp.mjs tools/list
+TELEGRAM_MCP_AUTH_TOKEN='...' node Workflows/telegram-bot-communication/scripts/telegram_mcp.mjs tools/call get_me
+TELEGRAM_MCP_AUTH_TOKEN='...' node Workflows/telegram-bot-communication/scripts/telegram_mcp.mjs tools/call send_message '{"chat_id":"Apartmenthuner_bot","message":"/mcp on"}'
+```
+
+The helper performs MCP `initialize`, sends `notifications/initialized`, supports JSON and SSE responses, and redacts token-like values in output.
+
 ## Bot Modes
 
 ### 1. Regular Mode (Default)
