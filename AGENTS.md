@@ -201,5 +201,5 @@ The repository contains a housing facts knowledge base in `housing_facts/` organ
 When users provide summaries, articles, or new facts, agents must:
 - Store the raw source text in `housing_facts/raw/<slug>.md`.
 - Extract and compile the insights to `housing_facts/wiki/general.md` and/or building-specific pages under `housing_facts/wiki/buildings/`.
-- Cross-reference compiled facts back to the raw source file using markdown links: `[[Source](file:///Users/dmemruk/development/go/apartment-hunter/housing_facts/raw/<file>.md#L<line>)]`.
+- Cross-reference compiled facts back to the raw source file using markdown links: `[[Source](file:///Users/dmemruk/development/services/apartment-hunter/housing_facts/raw/<file>.md#L<line>)]`.
 - **Token Optimization:** Avoid token-heavy ASCII or Unicode diagrams, directory trees with characters like `│` or `├──`, and horizontal lines. Use simple, compact markdown lists. Keep content highly dense and direct.
