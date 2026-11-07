@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"apartment-hunter/internal/cities"
 	"apartment-hunter/internal/dedup"
 	"apartment-hunter/internal/domain"
 	"apartment-hunter/internal/listingparser"
@@ -72,16 +73,17 @@ type PipelineLogEvent struct {
 }
 
 type Processor struct {
-	Prefs        domain.UserPreferences
-	Deduplicator dedup.ListingDeduplicator
-	Store        HistoryStore
-	Analyzer     AnalyzerWithUsage
-	PhotoLoader  PhotoLoader
-	Geocoder     ListingGeocoder
-	GeocodeLog   GeocodeLogger
-	PipelineLog  PipelineLogger
-	Location     LocationMatcher
+	Prefs          domain.UserPreferences
+	Deduplicator   dedup.ListingDeduplicator
+	Store          HistoryStore
+	Analyzer       AnalyzerWithUsage
+	PhotoLoader    PhotoLoader
+	Geocoder       ListingGeocoder
+	GeocodeLog     GeocodeLogger
+	PipelineLog    PipelineLogger
+	Location       LocationMatcher
 	FilterDisabled bool
+	City           cities.City
 }
 
 type ListingGeocoder interface {
@@ -99,6 +101,7 @@ type Result struct {
 func (p Processor) ProcessMessage(ctx context.Context, source domain.ListingSourceRef, message sources.ChannelMessage) (Result, error) {
 	started := time.Now()
 	listing := listingparser.FromChannelMessage(message)
+	listing.ID = ProfileScopedListingID(source.ProfileID, listing.ID)
 	source.ChannelID = message.ChannelID
 	source.ChannelName = message.ChannelName
 	source.ChannelUsername = message.ChannelUsername
@@ -313,12 +316,12 @@ func looksLikeApartmentListing(message sources.ChannelMessage, listing domain.Ap
 
 	// 3. Housing type signals
 	housingSignals := []string{
-		"квартир", // квартира, квартиру, квартиры, квартир
+		"квартир",    // квартира, квартиру, квартиры, квартир
 		"апартамент", // апартаменты, апартамент
-		"студи", // студия, студию, студии
-		"комнат", // комната, комнат, комнаты
-		"спальн", // спальня, спальни, спален
-		"новострой", // новостройка, новострой
+		"студи",      // студия, студию, студии
+		"комнат",     // комната, комнат, комнаты
+		"спальн",     // спальня, спальни, спален
+		"новострой",  // новостройка, новострой
 		"flat",
 		"apartment",
 		"studio",
@@ -383,7 +386,7 @@ func (p Processor) geocodeListing(ctx context.Context, source domain.ListingSour
 	if p.Geocoder == nil || listing.Latitude != 0 || listing.Longitude != 0 {
 		return listing
 	}
-	for _, candidate := range geocodeListingQueries(listing) {
+	for _, candidate := range geocodeListingQueries(listing, p.searchCity()) {
 		loc, err := p.Geocoder.Resolve(ctx, candidate.Query, candidate.MaxDistanceMeters)
 		p.logGeocodeAttempt(ctx, GeocodeLogEvent{
 			Time:              time.Now().UTC(),
@@ -409,6 +412,21 @@ func (p Processor) geocodeListing(ctx context.Context, source domain.ListingSour
 		return listing
 	}
 	return listing
+}
+
+func (p Processor) searchCity() cities.City {
+	if p.City.Key == "" {
+		return cities.Batumi
+	}
+	return p.City
+}
+
+func ProfileScopedListingID(profileID, listingID string) string {
+	profileID = strings.TrimSpace(profileID)
+	if profileID == "" || strings.HasPrefix(listingID, profileID+"/") {
+		return listingID
+	}
+	return profileID + "/" + listingID
 }
 
 func (p Processor) geocodeRequestQuery(query string) string {
@@ -472,14 +490,12 @@ var addressLinePattern = regexp.MustCompile(`(?i)(^|[\s,])(?:ул\.?|улиц[а
 var addressLabelPattern = regexp.MustCompile(`(?i)^\s*(?:address|адрес)\s*:\s*`)
 var streetCasePattern = regexp.MustCompile(`(?i)^улиц[еуы]`)
 
-const listingAddressSearchRadiusMeters = 15000
-
 type geocodeListingQuery struct {
 	Query             string
 	MaxDistanceMeters int
 }
 
-func geocodeListingQueries(listing domain.ApartmentListing) []geocodeListingQuery {
+func geocodeListingQueries(listing domain.ApartmentListing, city cities.City) []geocodeListingQuery {
 	var queries []geocodeListingQuery
 	seen := map[string]bool{}
 	addressFound := false
@@ -497,7 +513,7 @@ func geocodeListingQueries(listing domain.ApartmentListing) []geocodeListingQuer
 			return
 		}
 		addressFound = true
-		add(query+", Batumi, Georgia", listingAddressSearchRadiusMeters)
+		add(city.QueryWithRegion(query), city.ListingAddressSearchRadiusM)
 	}
 
 	for _, line := range strings.Split(listing.Description, "\n") {

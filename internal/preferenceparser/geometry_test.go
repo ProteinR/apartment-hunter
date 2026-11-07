@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"apartment-hunter/internal/cities"
 	"apartment-hunter/internal/domain"
 )
 
@@ -24,7 +25,7 @@ func TestPostGISGeometryBuilderBuildsRadiusMultiPolygon(t *testing.T) {
 		Segments: 12,
 	}
 
-	area, err := builder.BuildSearchGeometry(context.Background(), []domain.LocationPreference{{
+	area, err := builder.BuildSearchGeometry(context.Background(), cities.Batumi, []domain.LocationPreference{{
 		Name:               "6 May Park zone",
 		Type:               "radius_with_boundary",
 		CenterName:         "6 May Park, Batumi",
@@ -66,7 +67,7 @@ func TestPostGISGeometryBuilderAppliesKnownPushkinBoundaryWithoutStreetGeometry(
 		Segments: 24,
 	}
 
-	area, err := builder.BuildSearchGeometry(context.Background(), []domain.LocationPreference{{
+	area, err := builder.BuildSearchGeometry(context.Background(), cities.Batumi, []domain.LocationPreference{{
 		Name:            "парк 6 мая",
 		CenterName:      "парк 6 мая",
 		RadiusMeters:    &radius,
@@ -102,7 +103,7 @@ func TestPostGISGeometryBuilderAppliesPushkinBoundaryFromBoundaryRule(t *testing
 		Segments: 24,
 	}
 
-	area, err := builder.BuildSearchGeometry(context.Background(), []domain.LocationPreference{{
+	area, err := builder.BuildSearchGeometry(context.Background(), cities.Batumi, []domain.LocationPreference{{
 		Name:         "парк 6 мая",
 		CenterName:   "парк 6 мая",
 		RadiusMeters: &radius,
@@ -138,7 +139,7 @@ func TestPostGISGeometryBuilderAppliesSeaDistanceRule(t *testing.T) {
 		Segments: 24,
 	}
 
-	area, err := builder.BuildSearchGeometry(context.Background(), []domain.LocationPreference{{
+	area, err := builder.BuildSearchGeometry(context.Background(), cities.Batumi, []domain.LocationPreference{{
 		Name:         "Airport area",
 		CenterName:   "Airport area",
 		RadiusMeters: &radius,
@@ -169,7 +170,7 @@ func TestPostGISGeometryBuilderIncludesCoastalNewBoulevardArea(t *testing.T) {
 		Segments: 24,
 	}
 
-	area, err := builder.BuildSearchGeometry(context.Background(), []domain.LocationPreference{{
+	area, err := builder.BuildSearchGeometry(context.Background(), cities.Batumi, []domain.LocationPreference{{
 		Name:         "Новый бульвар",
 		CenterName:   "Новый бульвар",
 		RadiusMeters: &radius,
@@ -206,7 +207,7 @@ func TestPostGISGeometryBuilderUsesKnownSixMayParkCenter(t *testing.T) {
 		Segments: 24,
 	}
 
-	area, err := builder.BuildSearchGeometry(context.Background(), []domain.LocationPreference{{
+	area, err := builder.BuildSearchGeometry(context.Background(), cities.Batumi, []domain.LocationPreference{{
 		Name:         "парк 6 мая",
 		CenterName:   "парк 6 мая",
 		RadiusMeters: &radius,
@@ -235,7 +236,7 @@ func TestPostGISGeometryBuilderUsesKnownNewBoulevardCenter(t *testing.T) {
 		Segments: 24,
 	}
 
-	area, err := builder.BuildSearchGeometry(context.Background(), []domain.LocationPreference{{
+	area, err := builder.BuildSearchGeometry(context.Background(), cities.Batumi, []domain.LocationPreference{{
 		Name:         "Новый бульвар",
 		CenterName:   "Новый бульвар",
 		RadiusMeters: &radius,
@@ -319,4 +320,53 @@ func ringBounds(ring [][]float64) testBounds {
 		}
 	}
 	return bounds
+}
+
+type recordingGeoResolver struct {
+	place   *domain.ResolvedPlace
+	queries *[]string
+}
+
+func (r recordingGeoResolver) ResolvePlace(ctx context.Context, query string) (*domain.ResolvedPlace, error) {
+	*r.queries = append(*r.queries, query)
+	return r.place, nil
+}
+
+func (r recordingGeoResolver) ResolveStreet(ctx context.Context, query string) (*domain.ResolvedStreet, error) {
+	*r.queries = append(*r.queries, query)
+	return nil, nil
+}
+
+func TestPostGISGeometryBuilderResolvesTbilisiCenterWithoutBatumiShortcuts(t *testing.T) {
+	radius := 1500
+	var queries []string
+	builder := PostGISGeometryBuilder{
+		Resolver: recordingGeoResolver{place: &domain.ResolvedPlace{
+			Name:      "Vake Park, Tbilisi",
+			Latitude:  41.7118,
+			Longitude: 44.7476,
+		}, queries: &queries},
+		Segments: 12,
+	}
+
+	area, err := builder.BuildSearchGeometry(context.Background(), cities.Tbilisi, []domain.LocationPreference{{
+		Name:         "Vake Park",
+		Type:         "radius",
+		CenterName:   "Vake Park",
+		RadiusMeters: &radius,
+		RawText:      "около парка Ваке до 1.5 км, недалеко от моря и улицы Пушкина",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queries) != 1 || queries[0] != "Vake Park, Tbilisi, Georgia" {
+		t.Fatalf("expected one Tbilisi-scoped center query, got %+v", queries)
+	}
+	if len(area.UnresolvedRules) != 0 {
+		t.Fatalf("expected no unresolved rules, got %+v", area.UnresolvedRules)
+	}
+	bounds := ringBounds(firstGeoJSONRing(t, area.GeoJSON))
+	if bounds.minLng > 44.735 || bounds.maxLng < 44.760 {
+		t.Fatalf("expected an unclipped circle around Vake, got %+v", bounds)
+	}
 }

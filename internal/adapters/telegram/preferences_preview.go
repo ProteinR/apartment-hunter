@@ -4,25 +4,28 @@ import (
 	"fmt"
 	"strings"
 
+	"apartment-hunter/internal/cities"
 	"apartment-hunter/internal/domain"
 	"apartment-hunter/internal/preferenceparser"
 
 	"github.com/go-telegram/bot/models"
 )
 
-const preferencesStartMessage = `Опиши, какую квартиру ищем, одним сообщением. Можно писать обычным текстом: бюджет, район, площадь, что обязательно, что желательно и что точно не подходит.
+const preferencesStartMessage = `Опиши, какую квартиру ищем, одним сообщением. Можно писать обычным текстом: город (Батуми или Тбилиси), бюджет, район, площадь, что обязательно, что желательно и что точно не подходит.
 
 Например:
 Ищу квартиру в аренду в Батуми на долгий срок. Бюджет 400-650$, площадь от 50 м2. Обязательно нужна посудомойка и духовка. Хочу свежий светлый ремонт в нейтральных или пастельных тонах, без глянцевых потолков. Важно, чтобы окна не смотрели вплотную в соседний дом. Район: около парка 6 мая в радиусе 1 км, но не дальше улицы Пушкина, либо Новый бульвар до 1 км от моря.`
 
-const searchAreaEditInstructions = `Если зона на карте неправильная:
+func searchAreaEditInstructions(city cities.City) string {
+	return `Если зона на карте неправильная:
 1. Нажми "Изменить зону".
 2. Я пришлю текущий GeoJSON зоны.
-3. Открой geojson.io: https://geojson.io/#map=13/41.6461/41.6405
+3. Открой geojson.io: ` + city.GeoJSONEditorURL() + `
 4. Вставь полученный GeoJSON в правую панель JSON и поправь Polygon, Rectangle или Circle.
 5. Скопируй весь обновленный GeoJSON из правой панели JSON.
 6. Вернись в этот чат и отправь GeoJSON одним сообщением.
 7. Я обновлю карту, после этого нажми "Сохранить".`
+}
 
 func buildPreferencesPreview(draft preferenceparser.Draft) string {
 	return buildPreferencesPreviewWithOptions(draft, true)
@@ -49,6 +52,8 @@ func buildPreferencesPreviewWithOptions(draft preferenceparser.Draft, includeQue
 		fmt.Fprintf(&b, "Нормализованное описание:\n\n%s\n\n", displayFreeText(draft.NormalizedQuery, lang))
 	}
 	b.WriteString("Распознанные фильтры:\n\n")
+	city := cities.ForKey(prefs.City, cities.Batumi)
+	fmt.Fprintf(&b, "Город: %s (сменить: /city)\n", city.DisplayName)
 	if prefs.BudgetMin != nil || prefs.BudgetMax != nil {
 		b.WriteString("Бюджет: ")
 		switch {
@@ -84,7 +89,7 @@ func buildPreferencesPreviewWithOptions(draft preferenceparser.Draft, includeQue
 	} else {
 		appendList(&b, "Stop words", prefs.StopWords, lang)
 	}
-	fmt.Fprintf(&b, "\n%s\n", searchAreaEditInstructions)
+	fmt.Fprintf(&b, "\n%s\n", searchAreaEditInstructions(city))
 	b.WriteString("\nСохранить?")
 	return b.String()
 }

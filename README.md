@@ -135,10 +135,12 @@ TELEGRAM_PHONE=+995555000000 \
 TELEGRAM_SESSION_FILE=.telegram/userbot.session \
 TELEGRAM_MEDIA_DIR=.telegram/media \
 OPENAI_API_KEY=sk-... \
-  go run ./cmd/apartment-hunter telegram-process telegram_42
+  go run ./cmd/apartment-hunter telegram-process
 ```
 
-`telegram-process` не читает историю канала. Он держит Telegram userbot session открытой, получает `UpdateNewMessage` / `UpdateNewChannelMessage`, фильтрует события по подпискам профиля и анализирует только новые сообщения. В stdout должны появиться строки `Listening for new Telegram messages`, `Telegram notifications enabled/disabled`, `Processed ...` и `Sending notification ...` - по ним видно, что worker жив и что уведомление ушло в бот.
+`telegram-process` обслуживает всех пользователей с подписками на каналы (или только указанный profile id: `telegram-process telegram_42`). Он держит одну Telegram userbot session открытой, получает `UpdateNewMessage` / `UpdateNewChannelMessage` и для каждого сообщения запускает анализ отдельно для каждого профиля, подписанного на этот канал. Для каждой новой пары профиль/канал worker один раз дочитывает последние сообщения (раз в минуту проверяет новые подписки). В stdout должны появиться строки `Listening for new Telegram messages`, `Processed ... for telegram_...` и `Sending notification ...` - по ним видно, что worker жив и что уведомление ушло в бот.
+
+У каждого пользователя свой город поиска: Батуми или Тбилиси. Бот берет город из текста запроса (`Ищу квартиру в Тбилиси ...`), команда `/city tbilisi` меняет его и сбрасывает районы и зону поиска прошлого города. По городу выбирается регион геокодинга адресов из объявлений и построение зоны на карте.
 
 Подробные pipeline/geocoding события пишутся JSONL-файлами в `APARTMENT_HUNTER_PIPELINE_LOG_DIR` и `APARTMENT_HUNTER_GEOCODING_LOG_DIR`. Для продакшена/Coolify включите `APARTMENT_HUNTER_LOG_TO_STDOUT=true`, чтобы эти же JSONL-события дублировались в container logs.
 
@@ -166,26 +168,19 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Эта команда запускает Postgres и Telegram preferences bot. Если в `.env`
-задан `APARTMENT_HUNTER_PROFILE_ID` и заполнены `TELEGRAM_API_ID`,
-`TELEGRAM_API_HASH`, а также `TELEGRAM_PHONE` или `TELEGRAM_SESSION_STRING`,
-бот автоматически стартует worker в том же процессе. Если профиль, preferences
-или каналы еще не готовы, worker будет ждать и ретраиться, а бот продолжит
-работать. Сначала откройте бота в Telegram, отправьте `/start`, пройдите
+Эта команда запускает Postgres и Telegram preferences bot. Если заполнены
+`TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, а также `TELEGRAM_PHONE` или
+`TELEGRAM_SESSION_STRING`, бот автоматически стартует worker для всех
+пользователей в том же процессе. Пользователи без preferences или каналов
+пропускаются, пока не настроят поиск. Доступ к боту ограничивают
+`TELEGRAM_ALLOWED_CHAT_IDS` и `TELEGRAM_ALLOWED_USERNAMES` (через запятую);
+сообщения остальных бот молча игнорирует. Сначала откройте бота в Telegram, отправьте `/start`, пройдите
 интервью и добавьте каналы. Автоматического вступления нет: сначала вступите в
 подходящие чаты вручную, затем пришлите public ссылки или usernames:
 
 ```text
 https://t.me/example_channel
 @another_rent_channel
-```
-
-После этого укажите созданный profile id в `.env` и перезапустите compose, если
-профиль отличается от текущего значения:
-
-```bash
-APARTMENT_HUNTER_PROFILE_ID=telegram_42
-docker compose up --build
 ```
 
 Минимальные env переменные:
@@ -204,10 +199,10 @@ APARTMENT_HUNTER_GEOCODING_REGION=Batumi, Georgia
 
 Postgres доступен в compose как отдельный сервис `postgres`, данные хранятся в volume `postgres-data`. Profiles, preferences и channel subscriptions хранятся в Postgres. Telegram userbot session и временно скачанные media files живут в volume `telegram-session`.
 
-Для первого userbot login удобнее запустить worker интерактивно, чтобы ввести одноразовый Telegram code:
+Для первого userbot login удобнее запустить worker интерактивно, чтобы ввести одноразовый Telegram code (пока работает контейнер `bot`, второй worker не запускайте: оба обработают сообщения и уведомления придут дважды):
 
 ```bash
-docker compose run --rm worker telegram-process telegram_42
+docker compose run --rm worker telegram-process
 ```
 
 Если уже есть сгенерированный Telethon session string, можно задать его в `.env`:

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"apartment-hunter/internal/cities"
 	"apartment-hunter/internal/domain"
 )
 
@@ -16,7 +17,7 @@ type PostGISGeometryBuilder struct {
 	Segments int
 }
 
-func (b PostGISGeometryBuilder) BuildSearchGeometry(ctx context.Context, prefs []domain.LocationPreference) (*domain.GeoSearchArea, error) {
+func (b PostGISGeometryBuilder) BuildSearchGeometry(ctx context.Context, city cities.City, prefs []domain.LocationPreference) (*domain.GeoSearchArea, error) {
 	segments := b.Segments
 	if segments <= 0 {
 		segments = 48
@@ -33,7 +34,7 @@ func (b PostGISGeometryBuilder) BuildSearchGeometry(ctx context.Context, prefs [
 			}
 			continue
 		}
-		lat, lng, err := b.resolveCenter(ctx, loc)
+		lat, lng, err := b.resolveCenter(ctx, city, loc)
 		if err != nil {
 			return nil, err
 		}
@@ -42,12 +43,12 @@ func (b PostGISGeometryBuilder) BuildSearchGeometry(ctx context.Context, prefs [
 			continue
 		}
 		polygon := circlePolygon(lng, lat, radius, segments)
-		newBoulevardSeaArea := isNewBoulevardLocation(loc) && hasSeaDistanceRule(loc)
+		newBoulevardSeaArea := city.IsBatumi() && isNewBoulevardLocation(loc) && hasSeaDistanceRule(loc)
 		if newBoulevardSeaArea {
 			polygon = batumiNewBoulevardSeaArea()
 		}
 		appliedRules := map[string]bool{}
-		if clipped, ok, err := b.clipBoundaryStreet(ctx, polygon, loc, []float64{lng, lat}); err != nil {
+		if clipped, ok, err := b.clipBoundaryStreet(ctx, city, polygon, loc, []float64{lng, lat}); err != nil {
 			return nil, err
 		} else if ok {
 			polygon = clipped
@@ -55,7 +56,7 @@ func (b PostGISGeometryBuilder) BuildSearchGeometry(ctx context.Context, prefs [
 		}
 		if newBoulevardSeaArea {
 			appliedRules["sea"] = true
-		} else if clipped, ok := clipSeaDistanceRule(polygon, loc); ok {
+		} else if clipped, ok := clipSeaDistanceRule(city, polygon, loc); ok {
 			polygon = clipped
 			appliedRules["sea"] = true
 		}
@@ -86,12 +87,12 @@ func (b PostGISGeometryBuilder) BuildSearchGeometry(ctx context.Context, prefs [
 	return area, nil
 }
 
-func (b PostGISGeometryBuilder) clipBoundaryStreet(ctx context.Context, polygon [][]float64, loc domain.LocationPreference, keepPoint []float64) ([][]float64, bool, error) {
-	streetName, ok := boundaryStreetName(loc)
+func (b PostGISGeometryBuilder) clipBoundaryStreet(ctx context.Context, city cities.City, polygon [][]float64, loc domain.LocationPreference, keepPoint []float64) ([][]float64, bool, error) {
+	streetName, ok := boundaryStreetName(city, loc)
 	if !ok {
 		return polygon, false, nil
 	}
-	line, ok, err := b.resolveBoundaryLine(ctx, streetName)
+	line, ok, err := b.resolveBoundaryLine(ctx, city, streetName)
 	if err != nil || !ok {
 		return polygon, false, err
 	}
@@ -99,9 +100,9 @@ func (b PostGISGeometryBuilder) clipBoundaryStreet(ctx context.Context, polygon 
 	return clipped, true, nil
 }
 
-func (b PostGISGeometryBuilder) resolveBoundaryLine(ctx context.Context, streetName string) ([]geomPoint, bool, error) {
+func (b PostGISGeometryBuilder) resolveBoundaryLine(ctx context.Context, city cities.City, streetName string) ([]geomPoint, bool, error) {
 	if b.Resolver != nil {
-		street, err := b.Resolver.ResolveStreet(ctx, streetName)
+		street, err := b.Resolver.ResolveStreet(ctx, city.QueryWithRegion(streetName))
 		if err != nil {
 			return nil, false, err
 		}
@@ -111,23 +112,25 @@ func (b PostGISGeometryBuilder) resolveBoundaryLine(ctx context.Context, streetN
 			}
 		}
 	}
-	if isPushkinStreet(streetName) {
+	if city.IsBatumi() && isPushkinStreet(streetName) {
 		return knownPushkinBoundaryLine(), true, nil
 	}
 	return nil, false, nil
 }
 
-func (b PostGISGeometryBuilder) resolveCenter(ctx context.Context, loc domain.LocationPreference) (float64, float64, error) {
+func (b PostGISGeometryBuilder) resolveCenter(ctx context.Context, city cities.City, loc domain.LocationPreference) (float64, float64, error) {
 	if loc.Latitude != 0 || loc.Longitude != 0 {
 		return loc.Latitude, loc.Longitude, nil
 	}
-	if lat, lng, ok := knownBatumiCenter(loc); ok {
-		return lat, lng, nil
+	if city.IsBatumi() {
+		if lat, lng, ok := knownBatumiCenter(loc); ok {
+			return lat, lng, nil
+		}
 	}
 	if b.Resolver == nil {
 		return 0, 0, nil
 	}
-	place, err := b.Resolver.ResolvePlace(ctx, locationQuery(loc))
+	place, err := b.Resolver.ResolvePlace(ctx, city.QueryWithRegion(locationQuery(loc)))
 	if err != nil || place == nil {
 		return 0, 0, err
 	}
@@ -227,9 +230,12 @@ type geomPoint struct {
 	Lat float64
 }
 
-func boundaryStreetName(loc domain.LocationPreference) (string, bool) {
+func boundaryStreetName(city cities.City, loc domain.LocationPreference) (string, bool) {
 	if loc.BoundaryStreetName != nil && strings.TrimSpace(*loc.BoundaryStreetName) != "" {
 		return strings.TrimSpace(*loc.BoundaryStreetName), true
+	}
+	if !city.IsBatumi() {
+		return "", false
 	}
 	for _, text := range append([]string{loc.RawText, stringValue(loc.BoundaryRule)}, loc.UnresolvedRules...) {
 		if isPushkinStreet(text) {
@@ -272,8 +278,8 @@ func unresolvedRulesAfterApplied(rules []string, applied map[string]bool) []stri
 	return unresolved
 }
 
-func clipSeaDistanceRule(polygon [][]float64, loc domain.LocationPreference) ([][]float64, bool) {
-	if !hasSeaDistanceRule(loc) {
+func clipSeaDistanceRule(city cities.City, polygon [][]float64, loc domain.LocationPreference) ([][]float64, bool) {
+	if !city.IsBatumi() || !hasSeaDistanceRule(loc) {
 		return polygon, false
 	}
 	clipped := clipPolygonByConvexPolygon(polygon, batumiOneKilometerSeaCorridor())

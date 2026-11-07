@@ -56,13 +56,20 @@ There are two userbot paths in `internal/adapters/telegramuserbot/client.go`:
 - writes the updated cursor with `UpdateProfileChannelCursor`;
 - prints JSON previews; it does not run the full evaluation pipeline.
 
-`telegram-process` in `internal/adapters/cli/cli.go`:
+`telegram-process [profile_id]` and the worker goroutine of the `telegram` command serve every profile that has `profile_channels` rows (or only `profile_id` when given). The logic lives in `internal/adapters/cli/listing_worker.go`:
 
-- loads the profile, preferences, and channel subscriptions;
-- builds an `evaluation.Processor`;
-- first runs `catchUpTelegramHistory`, then starts `reader.Listen`.
+- one `reader.Listen` session; `listingWorker.HandleLiveMessage` loads the subscribed profiles for each message and runs the pipeline separately for every profile subscribed to that channel;
+- `CatchUpNewSubscriptions` runs at start and then every minute; it fetches recent history (empty cursor, subscription `Limit`, default 50) once per new profile/channel pair, and only after the profile has preferences; a failing pair (private channel, wrong username) is retried with exponential backoff up to 6 hours to protect the shared userbot session from flood limits;
+- processing is serialized and skips messages already in `listing_evaluations` via `EvaluationExists(profileID, channelID, messageID)`;
+- `profile_channels.cursor` is not advanced.
 
-Important current behavior: `catchUpTelegramHistory` fetches recent messages from each subscription using an empty cursor and the subscription `Limit` (default 50). It skips already-processed messages via `EvaluationExists(profileID, channelID, messageID)`. It does not advance `profile_channels.cursor`. If a message seems "stuck", check `listing_evaluations` for that profile/channel/message and check whether `channel_id` changed from username to numeric Telegram id after resolve.
+If a message seems "stuck", check `listing_evaluations` for that profile/channel/message and check whether `channel_id` changed from username to numeric Telegram id after resolve.
+
+Evaluation `listing_id` values are profile-scoped (`<profile_id>/<channel>:<message>`, see `evaluation.ProfileScopedListingID`), so two profiles on one channel keep separate records; rows saved before 2026-11 are unscoped. Image dedup only compares fingerprints of the same profile (`dedup.ProfileScopedRepository` → `ListImageFingerprintsForProfile`, which also includes legacy unscoped images whose evaluation belongs to that profile).
+
+## Search Cities
+
+Each profile searches in one city stored as `city` (`batumi` or `tbilisi`) inside its preferences JSON; see `internal/cities`. An empty value means Batumi. The bot takes the city from the query text, otherwise keeps the profile's current city; `/city tbilisi` switches it and clears the previous city's districts and search area, so the user sets districts again via `/preferences`. The city drives listing address geocoding (region suffix and max distance from the city center), search-area geometry, the geojson.io link and MCP `resolve_address`. Batumi-only shortcuts (Pushkin boundary, New Boulevard, 6 May park, 1 km sea corridor) apply only to Batumi profiles. A stored search area is inherited on save only within the same city.
 
 Live messages are filtered by `profileSubscribedToMessage`, which matches subscriptions against both channel id and username after trimming `@` and lowercasing.
 
@@ -165,7 +172,7 @@ For subscription or offset issues:
 - Check `.logs/pipeline/pipeline-YYYY-MM-DD.jsonl` for `received`, skip-adjacent stages, final `saved` status, and notification stages.
 - Confirm `profiles.id = telegram_<chat_id>` exists and has `preferences`.
 - Inspect `profile_channels` for username, numeric `channel_id`, `cursor`, and `limit_count`.
-- For `telegram-process`, inspect `listing_evaluations` rather than only `profile_channels.cursor`.
+- Inspect `listing_evaluations` rather than only `profile_channels.cursor`.
 - Compare subscription username/id with incoming `ChannelMessage.ChannelID` and `ChannelUsername`.
 - Remember `Fetch` resolves public username to numeric Telegram channel id.
 

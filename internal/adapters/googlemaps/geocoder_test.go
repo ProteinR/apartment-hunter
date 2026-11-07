@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"apartment-hunter/internal/cities"
 )
 
 func TestGeocoderResolvesFirstResult(t *testing.T) {
@@ -76,6 +78,53 @@ func TestGeocoderRejectsResultOutsideDefaultRegionRadius(t *testing.T) {
 	}
 	if loc.Latitude != 0 || loc.Longitude != 0 || loc.Name != "" {
 		t.Fatalf("expected out-of-radius result to be ignored, got %+v", loc)
+	}
+}
+
+func TestGeocoderForTbilisiAcceptsTbilisiResultAndAppendsTbilisiRegion(t *testing.T) {
+	var requestedAddress string
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requestedAddress = r.URL.Query().Get("address")
+		body := `{
+			"status": "OK",
+			"results": [{
+				"formatted_address": "Lermontov Street 14, Tbilisi, Georgia",
+				"geometry": {"location": {"lat": 41.7151, "lng": 44.8271}}
+			}]
+		}`
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+		}, nil
+	})
+
+	base := NewGeocoder("test-key", "Batumi, Georgia")
+	base.Client = &http.Client{Transport: transport}
+	geocoder := base.ForCity(cities.Tbilisi)
+
+	loc, err := geocoder.Resolve(context.Background(), "Lermontov Street 14", 25000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requestedAddress != "Lermontov Street 14, Tbilisi, Georgia" {
+		t.Fatalf("unexpected requested address %q", requestedAddress)
+	}
+	if loc.Latitude == 0 || loc.Longitude == 0 {
+		t.Fatalf("expected Tbilisi result to be accepted, got %+v", loc)
+	}
+	if base.DefaultRegion != "Batumi, Georgia" {
+		t.Fatalf("ForCity must not mutate the base geocoder, got %q", base.DefaultRegion)
+	}
+}
+
+func TestGeocoderKeepsQueryThatNamesACity(t *testing.T) {
+	geocoder := NewGeocoder("test-key", "Batumi, Georgia")
+	if got := geocoder.RequestQuery("Vake Tbilisi"); got != "Vake Tbilisi" {
+		t.Fatalf("unexpected query %q", got)
+	}
+	if got := geocoder.RequestQuery("Vake Park"); got != "Vake Park, Batumi, Georgia" {
+		t.Fatalf("unexpected query %q", got)
 	}
 }
 

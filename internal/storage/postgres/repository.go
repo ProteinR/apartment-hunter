@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"apartment-hunter/internal/cities"
 	"apartment-hunter/internal/dedup"
 	"apartment-hunter/internal/domain"
 	"apartment-hunter/internal/profiles"
@@ -157,27 +158,27 @@ func (r *Repository) SaveSearchProfile(ctx context.Context, profile domain.UserS
 		limit 1
 	`, profile.UserID).Scan(&latestPreferencesJSON, &latestSearchAreaWKT)
 
+	var latestPrefs domain.UserPreferences
+	latestPrefsKnown := latestErr == nil && json.Unmarshal(latestPreferencesJSON, &latestPrefs) == nil
+
 	var searchAreaWKT string
 	if profile.SearchArea != nil && strings.TrimSpace(profile.SearchArea.WKT) != "" {
 		searchAreaWKT = profile.SearchArea.WKT
-	} else if latestErr == nil && latestSearchAreaWKT.Valid {
+	} else if latestPrefsKnown && latestSearchAreaWKT.Valid && sameSearchCity(latestPrefs, profile.Preferences) {
 		searchAreaWKT = latestSearchAreaWKT.String
 	}
 
-	if latestErr == nil {
-		var latestPrefs domain.UserPreferences
-		if unmarshalErr := json.Unmarshal(latestPreferencesJSON, &latestPrefs); unmarshalErr == nil {
-			wktMatches := false
-			if !latestSearchAreaWKT.Valid && searchAreaWKT == "" {
-				wktMatches = true
-			} else if latestSearchAreaWKT.Valid && searchAreaWKT != "" {
-				wktMatches = latestSearchAreaWKT.String == searchAreaWKT
-			}
+	if latestPrefsKnown {
+		wktMatches := false
+		if !latestSearchAreaWKT.Valid && searchAreaWKT == "" {
+			wktMatches = true
+		} else if latestSearchAreaWKT.Valid && searchAreaWKT != "" {
+			wktMatches = latestSearchAreaWKT.String == searchAreaWKT
+		}
 
-			if wktMatches && reflect.DeepEqual(latestPrefs, profile.Preferences) {
-				// Duplicate detected. Skip inserting.
-				return nil
-			}
+		if wktMatches && reflect.DeepEqual(latestPrefs, profile.Preferences) {
+			// Duplicate detected. Skip inserting.
+			return nil
 		}
 	}
 
@@ -193,6 +194,10 @@ func (r *Repository) SaveSearchProfile(ctx context.Context, profile domain.UserS
 		values ($1, $2, $3, $4, case when $5::text is null then null else ST_GeomFromText($5, 4326) end)
 	`, profile.UserID, profile.RawQuery, profile.NormalizedQuery, preferencesJSON, searchAreaWKTVal)
 	return err
+}
+
+func sameSearchCity(left, right domain.UserPreferences) bool {
+	return cities.ForKey(left.City, cities.Batumi).Key == cities.ForKey(right.City, cities.Batumi).Key
 }
 
 func (r *Repository) LatestSearchAreaGeoJSON(ctx context.Context, profileID string) (string, bool, error) {
@@ -266,6 +271,27 @@ func (r *Repository) MatchesListingLocation(ctx context.Context, profileID strin
 		return false, "listing location is outside preferred search area", nil
 	}
 	return true, "", nil
+}
+
+func (r *Repository) ListSubscribedProfileIDs(ctx context.Context) ([]string, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		select distinct profile_id
+		from profile_channels
+		order by profile_id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 func (r *Repository) UpsertProfileChannel(ctx context.Context, profileID string, sub profiles.ChannelSubscription) (bool, error) {
@@ -618,6 +644,26 @@ func (r *Repository) ListImageFingerprints(ctx context.Context) ([]dedup.StoredL
 	if err != nil {
 		return nil, err
 	}
+	return scanImageFingerprints(rows)
+}
+
+func (r *Repository) ListImageFingerprintsForProfile(ctx context.Context, profileID string) ([]dedup.StoredListingImage, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		select id::text, listing_id, source_image_url, hashes, created_at
+		from listing_images
+		where starts_with(listing_id, $1 || '/')
+			or listing_id in (
+				select listing_id from listing_evaluations where profile_id = $1
+			)
+		order by created_at asc
+	`, profileID)
+	if err != nil {
+		return nil, err
+	}
+	return scanImageFingerprints(rows)
+}
+
+func scanImageFingerprints(rows *sql.Rows) ([]dedup.StoredListingImage, error) {
 	defer rows.Close()
 
 	var out []dedup.StoredListingImage

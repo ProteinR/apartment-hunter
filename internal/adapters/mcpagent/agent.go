@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"apartment-hunter/internal/adapters/openaipreferences"
+	"apartment-hunter/internal/cities"
 	"apartment-hunter/internal/domain"
 	"apartment-hunter/internal/preferenceparser"
 	"apartment-hunter/internal/profiles"
@@ -179,7 +180,7 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 4. Включать/выключать фильтрацию с помощью set_filtering_status.
 5. Работать с географией: находить координаты по адресу (resolve_address), вычислять расстояние в метрах (calculate_distance) и обновлять зону поиска напрямую с помощью GeoJSON (update_search_area).
 6. Управлять списком стоп-слов в поле stop_words (добавлять или удалять слова, по которым нужно отсеивать объявления о квартирах).
-7. Просматривать публичные Telegram-каналы и группы, доступные аккаунту userbot, с помощью list_available_telegram_chats, чтобы предложить релевантные источники для отслеживания. Предлагай только те варианты, которые выглядят связанными с арендой, недвижимостью, Batumi/Батуми, apartment/rent/real estate. Если подходящих мало или нет, так и скажи.
+7. Просматривать публичные Telegram-каналы и группы, доступные аккаунту userbot, с помощью list_available_telegram_chats, чтобы предложить релевантные источники для отслеживания. Предлагай только те варианты, которые выглядят связанными с арендой, недвижимостью в городе поиска пользователя (поле city в Preferences: batumi — Батуми, tbilisi — Тбилиси; если пусто — Батуми), apartment/rent/real estate. Если подходящих мало или нет, так и скажи. Город поиска меняется командой /city, например /city tbilisi.
 8. Получать полный отчет по конкретному объявлению из локальной базы с помощью get_listing_evaluation_report, если пользователь спрашивает, почему объявление прошло/не прошло фильтры, или ссылается на сообщение бота.
 
 Веди диалог живо, эмпатично и профессионально. Задавай уточняющие вопросы, если пожелания размыты (например, "хочу бабушкин вариант" -> предложи добавить "soviet" в reject_rules).
@@ -251,7 +252,7 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 			Type: "function",
 			Function: chatFunction{
 				Name:        "resolve_address",
-				Description: "Находит географические координаты (latitude, longitude) и имя места для текстового адреса или названия объекта (например, 'Батуми, проспект Руставели 10').",
+				Description: "Находит географические координаты (latitude, longitude) и имя места для текстового адреса или названия объекта (например, 'проспект Руставели 10'; город поиска пользователя подставляется автоматически).",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -435,7 +436,7 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 			if a.geocoder == nil {
 				toolResult = "error: geocoder is not configured"
 			} else {
-				loc, err := a.geocoder.Resolve(ctx, args.Address, 0)
+				loc, err := a.geocoder.Resolve(ctx, profileSearchCity(profile).QueryWithRegion(args.Address), 0)
 				if err != nil {
 					toolResult = "error: " + err.Error()
 				} else if loc.Latitude == 0 && loc.Longitude == 0 {
@@ -683,7 +684,7 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 			Type: "function",
 			Function: chatFunction{
 				Name:        "resolve_address",
-				Description: "Находит географические координаты (latitude, longitude) и имя места для текстового адреса или названия объекта (например, 'Батуми, проспект Руставели 10').",
+				Description: "Находит географические координаты (latitude, longitude) и имя места для текстового адреса или названия объекта (например, 'проспект Руставели 10'; город поиска пользователя подставляется автоматически).",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -851,7 +852,7 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 			if a.geocoder == nil {
 				toolResult = "error: geocoder is not configured"
 			} else {
-				loc, err := a.geocoder.Resolve(ctx, args.Address, 0)
+				loc, err := a.geocoder.Resolve(ctx, profileSearchCity(profile).QueryWithRegion(args.Address), 0)
 				if err != nil {
 					toolResult = "error: " + err.Error()
 				} else if loc.Latitude == 0 && loc.Longitude == 0 {
@@ -968,6 +969,13 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 	}
 
 	return respMsg.Content, prefsChanged, areaChanged, nil
+}
+
+func profileSearchCity(profile profiles.Profile) cities.City {
+	if profile.Preferences == nil {
+		return cities.Batumi
+	}
+	return cities.ForKey(profile.Preferences.City, cities.Batumi)
 }
 
 func mergePreferenceUpdate(existing *domain.UserPreferences, updateJSON string) (domain.UserPreferences, error) {

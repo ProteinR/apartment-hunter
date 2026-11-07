@@ -14,6 +14,7 @@ import (
 
 	"apartment-hunter/internal/adapters/googlemaps"
 	"apartment-hunter/internal/adapters/mcpagent"
+	"apartment-hunter/internal/cities"
 	"apartment-hunter/internal/domain"
 	"apartment-hunter/internal/preferenceparser"
 	"apartment-hunter/internal/profiles"
@@ -35,6 +36,7 @@ type Bot struct {
 	mu               sync.Mutex
 	allowedChats     []int64
 	allowedUsernames []string
+	defaultCity      cities.City
 }
 
 type ProfileStore interface {
@@ -104,9 +106,10 @@ func WithAllowedUsernames(usernames []string) Option {
 
 func New(token, outputDir string, opts ...Option) *Bot {
 	bot := &Bot{
-		token:    token,
-		client:   &http.Client{Timeout: 20 * time.Second},
-		sessions: map[int64]*preferenceSession{},
+		token:       token,
+		client:      &http.Client{Timeout: 20 * time.Second},
+		sessions:    map[int64]*preferenceSession{},
+		defaultCity: cities.Batumi,
 	}
 	for _, opt := range opts {
 		opt(bot)
@@ -247,6 +250,10 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 		reply, err := b.debugMode(context.Background(), chatID, text)
 		return textResponse{Text: reply, ReplyMarkup: mainCommandKeyboard()}, err
 	}
+	if text == "/city" || strings.HasPrefix(text, "/city ") {
+		reply, err := b.cityCommand(context.Background(), chatID, text)
+		return textResponse{Text: reply, ReplyMarkup: mainCommandKeyboard()}, err
+	}
 	if strings.HasPrefix(text, "/mcp") {
 		reply, err := b.mcpMode(context.Background(), chatID, text)
 		return textResponse{Text: reply, ReplyMarkup: mainCommandKeyboard()}, err
@@ -328,6 +335,7 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 		if err != nil {
 			return textResponse{}, err
 		}
+		draft.Preferences.City = b.draftCity(context.Background(), chatID, text, draft.Preferences.City).Key
 		searchArea, err := b.prepareDraftGeometry(context.Background(), &draft)
 		if err != nil {
 			return textResponse{}, err
@@ -341,7 +349,7 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 		if looksLikeSearchAreaGeoJSON(text) {
 			area, err := searchAreaFromGeoJSON(text)
 			if err != nil {
-				return textResponse{Text: "Не смог разобрать GeoJSON: " + err.Error() + "\n\n" + searchAreaEditInstructions, ReplyMarkup: confirmationKeyboard()}, nil
+				return textResponse{Text: "Не смог разобрать GeoJSON: " + err.Error() + "\n\n" + searchAreaEditInstructions(b.cityOf(session.Draft.Preferences)), ReplyMarkup: confirmationKeyboard()}, nil
 			}
 			session.SearchArea = area
 			b.setSession(chatID, session)
@@ -360,7 +368,7 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 			b.setSession(chatID, session)
 			return textResponse{Text: "Отправь исправленный запрос одним сообщением.", ReplyMarkup: mainCommandKeyboard()}, nil
 		case "edit_area":
-			return searchAreaEditResponse(session.SearchArea), nil
+			return searchAreaEditResponse(session.SearchArea, b.cityOf(session.Draft.Preferences)), nil
 		case "cancel":
 			b.deleteSession(chatID)
 			return textResponse{Text: "Настройка отменена.", ReplyMarkup: mainCommandKeyboard()}, nil
@@ -390,7 +398,7 @@ func (b *Bot) afterPreferencesSavedMessage(ctx context.Context, chatID int64) (s
 		lines = append(lines, "Можно добавить еще: пришли t.me/name или @name, по одному или несколько сразу.")
 	} else {
 		lines = append(lines, "Пока источников нет. Пришли, например:")
-		lines = append(lines, "https://t.me/batumi_rentals")
+		lines = append(lines, "https://t.me/rent_channel")
 		lines = append(lines, "@another_rent_channel")
 	}
 	lines = append(lines, "")
@@ -404,7 +412,7 @@ func (b *Bot) listChannels(ctx context.Context, chatID int64) (string, error) {
 		return "", err
 	}
 	if len(channels) == 0 {
-		return "Источники пока не подключены.\n\nВступи вручную в подходящие Telegram-чаты/группы, затем пришли сюда public ссылки или usernames, например:\nhttps://t.me/batumi_rentals\n@another_rent_channel\n\nАвтоматически вступать в чаты я не буду.", nil
+		return "Источники пока не подключены.\n\nВступи вручную в подходящие Telegram-чаты/группы, затем пришли сюда public ссылки или usernames, например:\nhttps://t.me/rent_channel\n@another_rent_channel\n\nАвтоматически вступать в чаты я не буду.", nil
 	}
 	lines := []string{"Подключенные источники:"}
 	lines = append(lines, channels...)
@@ -785,7 +793,7 @@ func (b *Bot) prepareDraftGeometry(ctx context.Context, draft *preferenceparser.
 	if b.geometry == nil || draft == nil {
 		return nil, nil
 	}
-	area, err := b.geometry.BuildSearchGeometry(ctx, draft.Preferences.LocationPreferences)
+	area, err := b.geometry.BuildSearchGeometry(ctx, b.cityOf(draft.Preferences), draft.Preferences.LocationPreferences)
 	if err != nil {
 		return nil, err
 	}
@@ -813,22 +821,23 @@ func (b *Bot) preferencesPreviewResponse(ctx context.Context, draft preferencepa
 	return response
 }
 
-func searchAreaEditResponse(area *domain.GeoSearchArea) textResponse {
+func searchAreaEditResponse(area *domain.GeoSearchArea, city cities.City) textResponse {
+	editorURL := city.GeoJSONEditorURL()
 	if area == nil || strings.TrimSpace(area.GeoJSON) == "" {
 		return textResponse{
-			Text:        "Текущая зона пока не построена автоматически.\n\nОткрой geojson.io, нарисуй Polygon/MultiPolygon, скопируй весь GeoJSON из правой панели JSON и отправь его сюда одним сообщением.\n\n" + batumiGeoJSONEditorURL,
+			Text:        "Текущая зона пока не построена автоматически.\n\nОткрой geojson.io, нарисуй Polygon/MultiPolygon, скопируй весь GeoJSON из правой панели JSON и отправь его сюда одним сообщением.\n\n" + editorURL,
 			ReplyMarkup: confirmationKeyboard(),
 		}
 	}
 	geoJSON := prettyGeoJSON(area.GeoJSON)
 	header := "Текущий GeoJSON зоны:\n\n"
-	footer := "\n\nОткрой geojson.io, вставь этот JSON в правую панель JSON, поправь зону, затем скопируй весь обновленный GeoJSON и отправь его сюда одним сообщением.\n\n" + batumiGeoJSONEditorURL
+	footer := "\n\nОткрой geojson.io, вставь этот JSON в правую панель JSON, поправь зону, затем скопируй весь обновленный GeoJSON и отправь его сюда одним сообщением.\n\n" + editorURL
 	text := header + "```json\n" + geoJSON + "\n```" + footer
 	if len([]rune(text)) <= 3900 {
 		return textResponse{Text: text, ReplyMarkup: confirmationKeyboard()}
 	}
 	return textResponse{
-		Text:             "Текущий GeoJSON зоны во вложении search-area.geojson.\n\nОткрой geojson.io, загрузи файл через Open > File или скопируй содержимое файла в правую панель JSON, поправь зону, затем отправь обновленный GeoJSON сюда одним сообщением.\n\n" + batumiGeoJSONEditorURL,
+		Text:             "Текущий GeoJSON зоны во вложении search-area.geojson.\n\nОткрой geojson.io, загрузи файл через Open > File или скопируй содержимое файла в правую панель JSON, поправь зону, затем отправь обновленный GeoJSON сюда одним сообщением.\n\n" + editorURL,
 		ReplyMarkup:      confirmationKeyboard(),
 		DocumentFilename: "search-area.geojson",
 		DocumentBytes:    []byte(geoJSON),
@@ -845,6 +854,9 @@ func (b *Bot) saveProfile(ctx context.Context, chatID int64, prefs domain.UserPr
 
 func (b *Bot) saveDraft(ctx context.Context, chatID int64, draft preferenceparser.Draft, area *domain.GeoSearchArea) error {
 	userID := profiles.IDForTelegramChat(chatID)
+	if _, ok := cities.Find(draft.Preferences.City); !ok {
+		draft.Preferences.City = b.profileCity(ctx, chatID).Key
+	}
 	if area == nil && b.geometry != nil {
 		built, err := b.prepareDraftGeometry(ctx, &draft)
 		if err != nil {
@@ -862,6 +874,62 @@ func (b *Bot) saveDraft(ctx context.Context, chatID int64, draft preferenceparse
 		return err
 	}
 	return b.saveProfile(ctx, chatID, draft.Preferences)
+}
+
+func (b *Bot) cityOf(prefs domain.UserPreferences) cities.City {
+	return cities.ForKey(prefs.City, b.defaultCity)
+}
+
+func (b *Bot) profileCity(ctx context.Context, chatID int64) cities.City {
+	profile, ok, err := b.store.GetProfile(ctx, profiles.IDForTelegramChat(chatID))
+	if err != nil || !ok || profile.Preferences == nil {
+		return b.defaultCity
+	}
+	return b.cityOf(*profile.Preferences)
+}
+
+func (b *Bot) draftCity(ctx context.Context, chatID int64, rawQuery, parsedCity string) cities.City {
+	if city, ok := cities.LastMentioned(rawQuery); ok {
+		return city
+	}
+	if city, ok := cities.Find(parsedCity); ok {
+		return city
+	}
+	return b.profileCity(ctx, chatID)
+}
+
+func (b *Bot) cityCommand(ctx context.Context, chatID int64, text string) (string, error) {
+	requested := strings.TrimSpace(strings.TrimPrefix(text, "/city"))
+	current := b.profileCity(ctx, chatID)
+	if requested == "" {
+		return fmt.Sprintf("Город поиска: %s.\n\nСменить: /city tbilisi или /city batumi (доступны: %s).", current.DisplayName, cities.SupportedDisplayNames()), nil
+	}
+	city, ok := cities.Find(requested)
+	if !ok {
+		return fmt.Sprintf("Не знаю город %q. Доступны: %s.", requested, cities.SupportedDisplayNames()), nil
+	}
+	profile, found, err := b.store.GetProfile(ctx, profiles.IDForTelegramChat(chatID))
+	if err != nil {
+		return "", err
+	}
+	if !found || profile.Preferences == nil {
+		return fmt.Sprintf("Фильтров пока нет. Отправь /preferences и укажи в запросе город: %s.", city.DisplayName), nil
+	}
+	if city.Key == current.Key {
+		return fmt.Sprintf("Город поиска уже %s.", city.DisplayName), nil
+	}
+	b.deleteSession(chatID)
+	prefs := *profile.Preferences
+	prefs.City = city.Key
+	prefs.LocationPreferences = nil
+	prefs.Locations = nil
+	prefs.UnresolvedLocationRules = nil
+	prefs.HasSearchArea = false
+	draft := preferenceparser.Draft{RawQuery: "/city " + city.Key, Preferences: prefs}
+	if err := b.saveDraft(ctx, chatID, draft, &domain.GeoSearchArea{SRID: 4326}); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Город поиска: %s. Районы и зона поиска от прошлого города сброшены, сейчас подходят объявления из любого района. Чтобы задать районы, отправь /preferences с описанием поиска.", city.DisplayName), nil
 }
 
 func (b *Bot) getSession(chatID int64) *preferenceSession {

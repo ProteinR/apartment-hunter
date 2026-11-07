@@ -55,6 +55,7 @@ Controls notification frequency for processed listings:
 ## Useful Bot Commands
 
 - `/start` or `/preferences` - Begin/restart step-by-step preference setup.
+- `/city`, `/city tbilisi`, `/city batumi` - Show or switch the profile's search city; switching rebuilds the search area.
 - `/channels` - Show the list of connected Telegram channel subscriptions.
 - `/subscribe @channel_username` - Subscribe to a source.
 - `/unsubscribe @channel_username` - Unsubscribe from a source.

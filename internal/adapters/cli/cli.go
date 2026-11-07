@@ -20,6 +20,7 @@ import (
 	"apartment-hunter/internal/adapters/telegram"
 	"apartment-hunter/internal/adapters/telegramuserbot"
 	"apartment-hunter/internal/adapters/visionmock"
+	"apartment-hunter/internal/cities"
 	"apartment-hunter/internal/dedup"
 	"apartment-hunter/internal/domain"
 	"apartment-hunter/internal/evaluation"
@@ -80,9 +81,9 @@ func (a App) Run(args []string) error {
 		}
 		return a.telegramRead(profileID)
 	case "telegram-process":
-		profileID, err := profileIDArg(args, "telegram-process")
-		if err != nil {
-			return err
+		profileID := ""
+		if len(args) > 1 {
+			profileID = strings.TrimSpace(args[len(args)-1])
 		}
 		return a.telegramProcess(profileID)
 	case "help", "-h", "--help":
@@ -92,7 +93,7 @@ func (a App) Run(args []string) error {
 	}
 }
 
-func (a App) telegramProcess(profileID string) error {
+func (a App) telegramProcess(onlyProfileID string) error {
 	reader, err := telegramuserbot.FromEnv(a.In)
 	if err != nil {
 		return err
@@ -101,7 +102,7 @@ func (a App) telegramProcess(profileID string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	return a.telegramProcessWithContext(ctx, profileID, reader)
+	return a.telegramProcessWithContext(ctx, onlyProfileID, reader)
 }
 
 func (a App) telegram(args []string) error {
@@ -122,18 +123,14 @@ func (a App) telegram(args []string) error {
 	}
 	defer store.Close()
 
-	if profileID := strings.TrimSpace(os.Getenv("APARTMENT_HUNTER_PROFILE_ID")); profileID != "" {
-		if reason := telegramWorkerDisabledReason(); reason != "" {
-			fmt.Fprintf(a.Out, "Telegram worker not started: %s\n", reason)
-		} else {
-			go func() {
-				if err := a.runTelegramWorker(ctx, profileID); err != nil {
-					fmt.Fprintf(a.Err, "Telegram worker failed for %s: %v\n", profileID, err)
-				}
-			}()
-		}
+	if reason := telegramWorkerDisabledReason(); reason != "" {
+		fmt.Fprintf(a.Out, "Telegram worker not started: %s\n", reason)
 	} else {
-		fmt.Fprintf(a.Out, "Telegram worker not started: APARTMENT_HUNTER_PROFILE_ID is not set\n")
+		go func() {
+			if err := a.runTelegramWorker(ctx, ""); err != nil {
+				fmt.Fprintf(a.Err, "Telegram worker failed: %v\n", err)
+			}
+		}()
 	}
 
 	nlpParser, err := openaipreferences.FromEnv()
@@ -210,21 +207,21 @@ func (a App) telegram(args []string) error {
 	return err
 }
 
-func (a App) runTelegramWorker(ctx context.Context, profileID string) error {
+func (a App) runTelegramWorker(ctx context.Context, onlyProfileID string) error {
 	reader, err := telegramuserbot.FromEnv(a.In)
 	if err != nil {
 		return err
 	}
 
 	for {
-		err := a.telegramProcessWithContext(ctx, profileID, reader)
+		err := a.telegramProcessWithContext(ctx, onlyProfileID, reader)
 		if ctx.Err() != nil {
 			return nil
 		}
 		if err == nil {
 			return nil
 		}
-		fmt.Fprintf(a.Err, "Telegram worker stopped for %s: %v; retrying in 15s\n", profileID, err)
+		fmt.Fprintf(a.Err, "Telegram worker stopped: %v; retrying in 15s\n", err)
 		timer := time.NewTimer(15 * time.Second)
 		select {
 		case <-ctx.Done():
@@ -248,12 +245,69 @@ func telegramWorkerDisabledReason() string {
 	return ""
 }
 
-func (a App) telegramProcessWithContext(ctx context.Context, profileID string, reader *telegramuserbot.Client) error {
+func (a App) telegramProcessWithContext(parent context.Context, onlyProfileID string, reader *telegramuserbot.Client) error {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
 	store, err := openPostgresStore(ctx)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
+	if onlyProfileID != "" {
+		if err := requireProcessableProfile(ctx, store, onlyProfileID); err != nil {
+			return err
+		}
+	}
+
+	analyzer, err := openaivision.FromEnv()
+	if err != nil {
+		return err
+	}
+	pipeline := listingPipeline{
+		store:       store,
+		reader:      reader,
+		analyzer:    analyzer,
+		geocoder:    newGoogleGeocoder(),
+		defaultCity: cities.Batumi,
+		geocodeLog:  newGeocodeLogger(a.Out),
+		pipelineLog: newPipelineLogger(a.Out),
+		botToken:    strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
+		mapRenderer: googlemaps.StaticMapRenderer{APIKey: strings.TrimSpace(os.Getenv("APARTMENT_HUNTER_GOOGLE_MAPS_API_KEY"))},
+		out:         a.Out,
+		errOut:      a.Err,
+	}
+	worker := &listingWorker{
+		store:           store,
+		history:         reader,
+		albumText:       reader,
+		process:         pipeline.process,
+		onlyProfileID:   onlyProfileID,
+		out:             a.Out,
+		errOut:          a.Err,
+		caughtUp:        map[string]bool{},
+		catchUpFailures: map[string]catchUpFailure{},
+	}
+	if onlyProfileID != "" {
+		fmt.Fprintf(a.Out, "Listening for new Telegram messages for %s\n", onlyProfileID)
+	} else {
+		fmt.Fprintf(a.Out, "Listening for new Telegram messages for all subscribed profiles\n")
+	}
+	if pipeline.botToken == "" {
+		fmt.Fprintf(a.Out, "Telegram notifications disabled: TELEGRAM_BOT_TOKEN is not set\n")
+	}
+	catchUpDone := make(chan struct{})
+	go func() {
+		defer close(catchUpDone)
+		worker.CatchUpNewSubscriptions(ctx)
+		worker.RunSubscriptionCatchUp(ctx, subscriptionCatchUpInterval)
+	}()
+	err = reader.Listen(ctx, worker.HandleLiveMessage)
+	cancel()
+	<-catchUpDone
+	return err
+}
+
+func requireProcessableProfile(ctx context.Context, store *pgstore.Repository, profileID string) error {
 	profile, ok, err := store.GetProfile(ctx, profileID)
 	if err != nil {
 		return err
@@ -267,101 +321,92 @@ func (a App) telegramProcessWithContext(ctx context.Context, profileID string, r
 	if len(profile.Channels) == 0 {
 		return fmt.Errorf("profile %q has no telegram channels configured", profileID)
 	}
+	return nil
+}
 
-	analyzer, err := openaivision.FromEnv()
+type listingPipeline struct {
+	store       *pgstore.Repository
+	reader      *telegramuserbot.Client
+	analyzer    evaluation.AnalyzerWithUsage
+	geocoder    *googlemaps.Geocoder
+	defaultCity cities.City
+	geocodeLog  evaluation.GeocodeLogger
+	pipelineLog evaluation.PipelineLogger
+	botToken    string
+	mapRenderer googlemaps.StaticMapRenderer
+	out         io.Writer
+	errOut      io.Writer
+}
+
+func (p listingPipeline) processorFor(profile profiles.Profile) evaluation.Processor {
+	city := cities.ForKey(profile.Preferences.City, p.defaultCity)
+	processor := evaluation.Processor{
+		Prefs:          *profile.Preferences,
+		FilterDisabled: profiles.FilterDisabled(profile),
+		City:           city,
+		Deduplicator:   dedup.NewService(dedup.NewImageHasher(), dedup.ProfileScopedRepository(p.store, profile.ID)),
+		Store:          p.store,
+		Analyzer:       p.analyzer,
+		PhotoLoader:    p.reader,
+		GeocodeLog:     p.geocodeLog,
+		PipelineLog:    p.pipelineLog,
+		Location:       p.store,
+	}
+	if p.geocoder != nil {
+		processor.Geocoder = p.geocoder.ForCity(city)
+	}
+	return processor
+}
+
+func (p listingPipeline) process(ctx context.Context, profile profiles.Profile, message sources.ChannelMessage) error {
+	processor := p.processorFor(profile)
+	source := domain.ListingSourceRef{
+		Source:         "telegram",
+		ProfileID:      profile.ID,
+		TelegramChatID: profile.TelegramChatID,
+	}
+	result, err := processor.ProcessMessage(ctx, source, message)
 	if err != nil {
 		return err
 	}
-	pipelineLog := newPipelineLogger(a.Out)
-	processor := evaluation.Processor{
-		Prefs:        *profile.Preferences,
-		Deduplicator: dedup.NewService(dedup.NewImageHasher(), store),
-		Store:        store,
-		Analyzer:     analyzer,
-		PhotoLoader:  reader,
-		Geocoder:     newGoogleGeocoder(),
-		GeocodeLog:   newGeocodeLogger(a.Out),
-		PipelineLog:  pipelineLog,
-		Location:     store,
-	}
-
-	botToken := strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN"))
-	mapRenderer := googlemaps.StaticMapRenderer{APIKey: strings.TrimSpace(os.Getenv("APARTMENT_HUNTER_GOOGLE_MAPS_API_KEY"))}
-	fmt.Fprintf(a.Out, "Listening for new Telegram messages for %s\n", profileID)
-	if botToken == "" || profile.TelegramChatID == 0 {
-		fmt.Fprintf(a.Out, "Telegram notifications disabled: bot token set=%t, chat id=%d\n", botToken != "", profile.TelegramChatID)
-	} else {
-		fmt.Fprintf(a.Out, "Telegram notifications enabled for chat %d, debug mode=%t\n", profile.TelegramChatID, profiles.DebugModeEnabled(profile))
-	}
-	handleMessage := func(ctx context.Context, message sources.ChannelMessage) error {
-		profile, ok, err := store.GetProfile(ctx, profileID)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return fmt.Errorf("profile %q not found", profileID)
-		}
-		if profile.Preferences == nil {
-			return fmt.Errorf("profile %q has no preferences configured; run /start in the Telegram bot first", profileID)
-		}
-		if !profileSubscribedToMessage(profile, message) {
-			return nil
-		}
-		message = enrichGroupedAlbumText(ctx, reader, message, a.Err)
-		if strings.TrimSpace(message.Text) == "" && len(message.Photos) == 0 {
-			return nil
-		}
-		processor.Prefs = *profile.Preferences
-		processor.FilterDisabled = profiles.FilterDisabled(profile)
-		source := domain.ListingSourceRef{
-			Source:         "telegram",
-			ProfileID:      profileID,
-			TelegramChatID: profile.TelegramChatID,
-		}
-		result, err := processor.ProcessMessage(ctx, source, message)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(a.Out, "Processed %s/%d: %s\n", message.ChannelID, message.MessageID, result.Record.Status)
-		if botToken != "" && profile.TelegramChatID != 0 && shouldSendTelegramNotification(profile, result.Record) {
-			fmt.Fprintf(a.Out, "Sending notification for %s/%d to chat %d\n", message.ChannelID, message.MessageID, profile.TelegramChatID)
-			notificationText := evaluation.NotificationText(result.Record)
-			var botMessageID int
-			var err error
-			if mapImage, ok, mapErr := listingSearchAreaMapImage(ctx, store, mapRenderer, result.Record); mapErr != nil {
-				fmt.Fprintf(a.Err, "Telegram map skipped for %s/%d: %v\n", message.ChannelID, message.MessageID, mapErr)
-			} else if ok {
-				if telegramCaptionFits(notificationText) {
-					botMessageID, err = telegram.SendPhotoBytesMessageID(ctx, botToken, profile.TelegramChatID, "search-area-map.png", mapImage, notificationText)
-					if err != nil {
-						fmt.Fprintf(a.Err, "Telegram map notification failed for %s/%d: %v\n", message.ChannelID, message.MessageID, err)
-					}
-				} else {
-					if err := telegram.SendPhotoBytes(ctx, botToken, profile.TelegramChatID, "search-area-map.png", mapImage, "Гео: квартира и зеленая зона поиска"); err != nil {
-						fmt.Fprintf(a.Err, "Telegram map send failed for %s/%d: %v\n", message.ChannelID, message.MessageID, err)
-					}
-				}
-			}
-			if botMessageID == 0 {
-				botMessageID, err = telegram.SendTextMessageID(ctx, botToken, profile.TelegramChatID, notificationText)
-				if err != nil {
-					logPipelineEvent(ctx, pipelineLog, result.Record, "notification_sent", "failed", err.Error())
-					return err
-				}
-			}
-			if err := store.UpdateEvaluationNotificationMessageID(ctx, result.Record.Listing.ID, botMessageID); err != nil {
-				logPipelineEvent(ctx, pipelineLog, result.Record, "notification_saved", "failed", err.Error())
-				return err
-			}
-			logPipelineEvent(ctx, pipelineLog, result.Record, "notification_sent", "sent", "")
-			logPipelineEvent(ctx, pipelineLog, result.Record, "notification_saved", "saved", "")
-		}
+	fmt.Fprintf(p.out, "Processed %s/%d for %s: %s\n", message.ChannelID, message.MessageID, profile.ID, result.Record.Status)
+	if p.botToken == "" || profile.TelegramChatID == 0 || !shouldSendTelegramNotification(profile, result.Record) {
 		return nil
 	}
-	if err := a.catchUpTelegramHistory(ctx, profileID, reader, store, handleMessage); err != nil {
+	return p.notify(ctx, profile, message, result.Record)
+}
+
+func (p listingPipeline) notify(ctx context.Context, profile profiles.Profile, message sources.ChannelMessage, record domain.ListingEvaluationRecord) error {
+	fmt.Fprintf(p.out, "Sending notification for %s/%d to chat %d\n", message.ChannelID, message.MessageID, profile.TelegramChatID)
+	notificationText := evaluation.NotificationText(record)
+	var botMessageID int
+	var err error
+	if mapImage, ok, mapErr := listingSearchAreaMapImage(ctx, p.store, p.mapRenderer, record); mapErr != nil {
+		fmt.Fprintf(p.errOut, "Telegram map skipped for %s/%d: %v\n", message.ChannelID, message.MessageID, mapErr)
+	} else if ok {
+		if telegramCaptionFits(notificationText) {
+			botMessageID, err = telegram.SendPhotoBytesMessageID(ctx, p.botToken, profile.TelegramChatID, "search-area-map.png", mapImage, notificationText)
+			if err != nil {
+				fmt.Fprintf(p.errOut, "Telegram map notification failed for %s/%d: %v\n", message.ChannelID, message.MessageID, err)
+			}
+		} else if err := telegram.SendPhotoBytes(ctx, p.botToken, profile.TelegramChatID, "search-area-map.png", mapImage, "Гео: квартира и зеленая зона поиска"); err != nil {
+			fmt.Fprintf(p.errOut, "Telegram map send failed for %s/%d: %v\n", message.ChannelID, message.MessageID, err)
+		}
+	}
+	if botMessageID == 0 {
+		botMessageID, err = telegram.SendTextMessageID(ctx, p.botToken, profile.TelegramChatID, notificationText)
+		if err != nil {
+			logPipelineEvent(ctx, p.pipelineLog, record, "notification_sent", "failed", err.Error())
+			return err
+		}
+	}
+	if err := p.store.UpdateEvaluationNotificationMessageID(ctx, record.Listing.ID, botMessageID); err != nil {
+		logPipelineEvent(ctx, p.pipelineLog, record, "notification_saved", "failed", err.Error())
 		return err
 	}
-	return reader.Listen(ctx, handleMessage)
+	logPipelineEvent(ctx, p.pipelineLog, record, "notification_sent", "sent", "")
+	logPipelineEvent(ctx, p.pipelineLog, record, "notification_saved", "saved", "")
+	return nil
 }
 
 func telegramCaptionFits(text string) bool {
@@ -398,51 +443,6 @@ func enrichGroupedAlbumText(ctx context.Context, resolver albumTextResolver, mes
 		message.Text = text
 	}
 	return message
-}
-
-func (a App) catchUpTelegramHistory(ctx context.Context, profileID string, reader *telegramuserbot.Client, store *pgstore.Repository, handler telegramuserbot.MessageHandler) error {
-	profile, ok, err := store.GetProfile(ctx, profileID)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return fmt.Errorf("profile %q not found", profileID)
-	}
-	if len(profile.Channels) == 0 {
-		return nil
-	}
-
-	for _, sub := range profile.Channels {
-		limit := sub.Limit
-		if limit <= 0 {
-			limit = 50
-		}
-		fmt.Fprintf(a.Out, "Catching up Telegram history for @%s, limit=%d\n", subscriptionName(sub), limit)
-		messages, _, err := reader.Fetch(ctx, sub.Source, sources.Cursor{}, limit)
-		if err != nil {
-			return err
-		}
-		if err := store.UpdateProfileChannelSource(ctx, profileID, sub.Source, resolvedChannelSource(sub.Source, messages)); err != nil {
-			return err
-		}
-		for i := len(messages) - 1; i >= 0; i-- {
-			message := messages[i]
-			if strings.TrimSpace(message.Text) == "" && len(message.Photos) == 0 {
-				continue
-			}
-			exists, err := store.EvaluationExists(ctx, profileID, message.ChannelID, message.MessageID)
-			if err != nil {
-				return err
-			}
-			if exists {
-				continue
-			}
-			if err := handler(ctx, message); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
 }
 
 func resolvedChannelSource(fallback sources.ChannelRef, messages []sources.ChannelMessage) sources.ChannelRef {
@@ -788,6 +788,6 @@ func (a App) printHelp() error {
   apartment-hunter score sample_listing.json preferences.yaml
   DATABASE_URL=... TELEGRAM_BOT_TOKEN=... apartment-hunter telegram
   DATABASE_URL=... TELEGRAM_API_ID=... TELEGRAM_API_HASH=... TELEGRAM_PHONE=... apartment-hunter telegram-read profile_id
-  DATABASE_URL=... TELEGRAM_API_ID=... TELEGRAM_API_HASH=... TELEGRAM_PHONE=... apartment-hunter telegram-process profile_id`)
+  DATABASE_URL=... TELEGRAM_API_ID=... TELEGRAM_API_HASH=... TELEGRAM_PHONE=... apartment-hunter telegram-process [profile_id]`)
 	return err
 }

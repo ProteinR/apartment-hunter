@@ -357,7 +357,7 @@ func listingPrompt(listing domain.ApartmentListing) string {
 		AreaM2      float64     `json:"area_m2"`
 		Photos      []photoMeta `json:"photos"`
 	}{
-		ID:          listing.ID,
+		ID:          listingIDWithoutProfile(listing.ID),
 		Title:       listing.Title,
 		Description: listing.Description,
 		District:    listing.District,
@@ -557,4 +557,11 @@ func envFloat(name string, fallback float64) float64 {
 		return fallback
 	}
 	return parsed
+}
+
+func listingIDWithoutProfile(listingID string) string {
+	if index := strings.Index(listingID, "/"); index >= 0 {
+		return listingID[index+1:]
+	}
+	return listingID
 }

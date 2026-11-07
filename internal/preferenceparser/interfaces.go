@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 
+	"apartment-hunter/internal/cities"
 	"apartment-hunter/internal/domain"
 )
 
@@ -25,7 +26,7 @@ type GeoResolver interface {
 }
 
 type GeometryBuilder interface {
-	BuildSearchGeometry(ctx context.Context, prefs []domain.LocationPreference) (*domain.GeoSearchArea, error)
+	BuildSearchGeometry(ctx context.Context, city cities.City, prefs []domain.LocationPreference) (*domain.GeoSearchArea, error)
 }
 
 type Service struct {

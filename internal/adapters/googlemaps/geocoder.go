@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"apartment-hunter/internal/cities"
 	"apartment-hunter/internal/domain"
 	"apartment-hunter/internal/geocoding"
 )
@@ -29,6 +30,12 @@ func NewGeocoder(apiKey, defaultRegion string) *Geocoder {
 		Language:      "en",
 		Client:        &http.Client{Timeout: 10 * time.Second},
 	}
+}
+
+func (g *Geocoder) ForCity(city cities.City) *Geocoder {
+	scoped := *g
+	scoped.DefaultRegion = city.GeocodingRegion
+	return &scoped
 }
 
 func (g *Geocoder) Resolve(ctx context.Context, query string, maxDistanceMeters int) (domain.LocationPreference, error) {
@@ -114,6 +121,9 @@ func (g *Geocoder) queryWithRegion(query string) string {
 	if g.DefaultRegion == "" || strings.Contains(query, ",") {
 		return query
 	}
+	if _, namesCity := cities.LastMentioned(query); namesCity {
+		return query
+	}
 	return query + ", " + g.DefaultRegion
 }
 
@@ -122,12 +132,11 @@ func (g *Geocoder) RequestQuery(query string) string {
 }
 
 func defaultRegionCenter(region string) (float64, float64, bool) {
-	switch strings.ToLower(strings.TrimSpace(region)) {
-	case "batumi, georgia", "batumi":
-		return 41.64610, 41.64049, true
-	default:
+	city, ok := cities.Find(region)
+	if !ok {
 		return 0, 0, false
 	}
+	return city.Latitude, city.Longitude, true
 }
 
 func haversineMeters(lat1, lon1, lat2, lon2 float64) float64 {

@@ -1,6 +1,7 @@
 package domain
 
 type UserPreferences struct {
+	City              string               `json:"city,omitempty"`
 	MinBudget         int                  `json:"min_budget"`
 	MaxBudget         int                  `json:"max_budget"`
 	MinAreaM2         float64              `json:"min_area_m2"`

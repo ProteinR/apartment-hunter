@@ -49,7 +49,7 @@ services:
     build: .
     profiles:
       - worker
-    command: ["telegram-process", "${APARTMENT_HUNTER_PROFILE_ID:-telegram_0}"]
+    command: ["telegram-process"]
     environment: *app-environment
     healthcheck: *app-healthcheck
     volumes:

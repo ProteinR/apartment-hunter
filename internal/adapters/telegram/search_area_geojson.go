@@ -9,8 +9,6 @@ import (
 	"apartment-hunter/internal/domain"
 )
 
-const batumiGeoJSONEditorURL = "https://geojson.io/#map=13/41.6461/41.6405"
-
 type geoJSONGeometry struct {
 	Type        string          `json:"type"`
 	Coordinates json.RawMessage `json:"coordinates,omitempty"`

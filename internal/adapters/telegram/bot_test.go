@@ -10,6 +10,7 @@ import (
 
 	"apartment-hunter/internal/adapters/googlemaps"
 	"apartment-hunter/internal/adapters/mcpagent"
+	"apartment-hunter/internal/cities"
 	"apartment-hunter/internal/domain"
 	"apartment-hunter/internal/preferenceparser"
 	"apartment-hunter/internal/profiles"
@@ -122,6 +123,84 @@ func (s *fakeProfileStore) SearchEvaluations(ctx context.Context, profileID stri
 
 func (s *fakeProfileStore) GetEvaluationByTelegramMessage(ctx context.Context, profileID string, telegramChatID int64, messageID int) (domain.ListingEvaluationRecord, bool, error) {
 	return domain.ListingEvaluationRecord{}, false, nil
+}
+
+func TestHandleTextDetectsTbilisiFromQueryAndBuildsTbilisiGeometry(t *testing.T) {
+	store := newFakeProfileStore()
+	var builtCities []string
+	parser := preferenceparser.Service{
+		Normalizer: fakeNormalizer{normalized: "Тбилиси, Ваке, до 900 USD"},
+		Extractor: fakeExtractor{prefs: domain.UserPreferences{
+			BudgetMax: intPtr(900),
+			LocationPreferences: []domain.LocationPreference{{
+				CenterName:   "Vake Park",
+				RadiusMeters: intPtr(1500),
+				Type:         "radius",
+			}},
+		}},
+	}
+	bot := New("test-token", t.TempDir(), WithProfileStore(store), WithPreferencesParser(parser), WithGeometryBuilder(fakeGeometryBuilder{cities: &builtCities}))
+	chatID := int64(77)
+
+	if _, err := bot.HandleText(chatID, "/preferences"); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := bot.HandleText(chatID, "Ищу квартиру в Тбилиси около парка Ваке, до 900$")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reply, "Город: Тбилиси") || !strings.Contains(reply, cities.Tbilisi.GeoJSONEditorURL()) {
+		t.Fatalf("expected Tbilisi city and editor link in preview, got %q", reply)
+	}
+	if _, err := bot.HandleText(chatID, "Save"); err != nil {
+		t.Fatal(err)
+	}
+	profile := store.profiles[profiles.IDForTelegramChat(chatID)]
+	if profile.Preferences == nil || profile.Preferences.City != cities.Tbilisi.Key {
+		t.Fatalf("expected saved Tbilisi city, got %+v", profile.Preferences)
+	}
+	if len(builtCities) == 0 || builtCities[0] != cities.Tbilisi.Key {
+		t.Fatalf("expected geometry built for Tbilisi, got %+v", builtCities)
+	}
+}
+
+func TestCityCommandSwitchesCityAndClearsPreviousCityLocations(t *testing.T) {
+	store := newFakeProfileStore()
+	chatID := int64(78)
+	profileID := profiles.IDForTelegramChat(chatID)
+	store.profiles[profileID] = profiles.Profile{ID: profileID, TelegramChatID: chatID, Preferences: &domain.UserPreferences{
+		MaxBudget: 700,
+		LocationPreferences: []domain.LocationPreference{{
+			Name:         "6 May Park",
+			Latitude:     41.6480,
+			Longitude:    41.6285,
+			RadiusMeters: intPtr(1000),
+		}},
+		HasSearchArea: true,
+	}}
+	bot := New("test-token", t.TempDir(), WithProfileStore(store), WithGeometryBuilder(fakeGeometryBuilder{geoJSON: testSearchAreaGeoJSON}))
+
+	reply, err := bot.HandleText(chatID, "/city")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reply, "Город поиска: Батуми") {
+		t.Fatalf("expected default Batumi, got %q", reply)
+	}
+	reply, err = bot.HandleText(chatID, "/city тбилиси")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reply, "Город поиска: Тбилиси") {
+		t.Fatalf("unexpected reply %q", reply)
+	}
+	saved := store.profiles[profileID].Preferences
+	if saved.City != cities.Tbilisi.Key || len(saved.LocationPreferences) != 0 || saved.HasSearchArea {
+		t.Fatalf("expected Tbilisi without Batumi locations, got %+v", saved)
+	}
+	if len(store.searchProfiles) != 1 || store.searchProfiles[0].SearchArea == nil || store.searchProfiles[0].SearchArea.WKT != "" {
+		t.Fatalf("expected one search profile with an explicitly empty area, got %+v", store.searchProfiles)
+	}
 }
 
 func TestHandleTextParsesPreviewsAndSavesPreferences(t *testing.T) {
@@ -382,7 +461,7 @@ func TestAwaitingConfirmationAcceptsGeoJSONSearchArea(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(reply, "Если зона на карте неправильная") || !strings.Contains(reply, batumiGeoJSONEditorURL) {
+	if !strings.Contains(reply, "Если зона на карте неправильная") || !strings.Contains(reply, cities.Batumi.GeoJSONEditorURL()) {
 		t.Fatalf("expected updated preview with editor link, got %q", reply)
 	}
 
@@ -441,7 +520,7 @@ func TestEditAreaReturnsCurrentGeoJSON(t *testing.T) {
 	}
 	if !strings.Contains(response.Text, "Текущий GeoJSON зоны") ||
 		!strings.Contains(response.Text, `"type": "MultiPolygon"`) ||
-		!strings.Contains(response.Text, batumiGeoJSONEditorURL) {
+		!strings.Contains(response.Text, cities.Batumi.GeoJSONEditorURL()) {
 		t.Fatalf("expected current GeoJSON edit instructions, got %q", response.Text)
 	}
 	if len(response.DocumentBytes) != 0 {
@@ -458,11 +537,11 @@ func TestEditAreaReturnsLargeCurrentGeoJSONAsDocument(t *testing.T) {
 		area.GeoJSON = strings.Replace(area.GeoJSON, "]]]]}", "],[[[41.622000,41.642000],[41.623000,41.642000],[41.623000,41.643000],[41.622000,41.643000],[41.622000,41.642000]]]]}", 1)
 	}
 
-	response := searchAreaEditResponse(area)
+	response := searchAreaEditResponse(area, cities.Batumi)
 	if response.DocumentFilename != "search-area.geojson" || len(response.DocumentBytes) == 0 {
 		t.Fatalf("expected large GeoJSON document, got filename=%q bytes=%d", response.DocumentFilename, len(response.DocumentBytes))
 	}
-	if !strings.Contains(response.Text, "во вложении search-area.geojson") || !strings.Contains(response.Text, batumiGeoJSONEditorURL) {
+	if !strings.Contains(response.Text, "во вложении search-area.geojson") || !strings.Contains(response.Text, cities.Batumi.GeoJSONEditorURL()) {
 		t.Fatalf("unexpected document caption %q", response.Text)
 	}
 }
@@ -745,9 +824,13 @@ func (e fakeExtractor) Extract(ctx context.Context, normalizedInput string) (*do
 
 type fakeGeometryBuilder struct {
 	geoJSON string
+	cities  *[]string
 }
 
-func (b fakeGeometryBuilder) BuildSearchGeometry(ctx context.Context, prefs []domain.LocationPreference) (*domain.GeoSearchArea, error) {
+func (b fakeGeometryBuilder) BuildSearchGeometry(ctx context.Context, city cities.City, prefs []domain.LocationPreference) (*domain.GeoSearchArea, error) {
+	if b.cities != nil {
+		*b.cities = append(*b.cities, city.Key)
+	}
 	return &domain.GeoSearchArea{SRID: 4326, GeoJSON: b.geoJSON}, nil
 }
 

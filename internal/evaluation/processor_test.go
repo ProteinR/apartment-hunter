@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"apartment-hunter/internal/cities"
 	"apartment-hunter/internal/domain"
 	"apartment-hunter/internal/sources"
 )
@@ -309,7 +310,7 @@ func TestGeocodeListingQueriesAvoidsFullTextFallbackWhenAddressFound(t *testing.
 		Description: "#сдам квартиру 1+1 по улице Грибоедова,21\n" +
 			"✅56 м2\n" +
 			"Цена 700$ аренда на год",
-	})
+	}, cities.Batumi)
 
 	if len(queries) != 1 {
 		t.Fatalf("expected only explicit address query, got %+v", queries)
@@ -319,6 +320,39 @@ func TestGeocodeListingQueriesAvoidsFullTextFallbackWhenAddressFound(t *testing.
 	}
 	if queries[0].MaxDistanceMeters != 15000 {
 		t.Fatalf("expected Batumi search radius 15000, got %d", queries[0].MaxDistanceMeters)
+	}
+}
+
+func TestGeocodeListingQueriesUsesTbilisiRegionForTbilisiProfile(t *testing.T) {
+	queries := geocodeListingQueries(domain.ApartmentListing{
+		Title:       "Telegram listing",
+		Description: "Сдается квартира\n📍 Chavchavadze Avenue 37\n800$",
+	}, cities.Tbilisi)
+
+	if len(queries) != 1 {
+		t.Fatalf("expected only explicit address query, got %+v", queries)
+	}
+	if queries[0].Query != "Chavchavadze Avenue 37, Tbilisi, Georgia" {
+		t.Fatalf("unexpected query %q", queries[0].Query)
+	}
+	if queries[0].MaxDistanceMeters != cities.Tbilisi.ListingAddressSearchRadiusM {
+		t.Fatalf("expected Tbilisi search radius, got %d", queries[0].MaxDistanceMeters)
+	}
+}
+
+func TestProcessMessageScopesListingIDByProfile(t *testing.T) {
+	processor := Processor{}
+
+	result, err := processor.ProcessMessage(context.Background(), domain.ListingSourceRef{ProfileID: "telegram_2"}, sources.ChannelMessage{
+		ChannelID: "tbilisi_rent",
+		MessageID: 7,
+		Text:      "Hello everyone",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Record.Listing.ID != "telegram_2/tbilisi_rent:7" {
+		t.Fatalf("unexpected listing id %q", result.Record.Listing.ID)
 	}
 }
 
