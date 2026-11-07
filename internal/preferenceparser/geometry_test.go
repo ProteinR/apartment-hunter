@@ -370,3 +370,47 @@ func TestPostGISGeometryBuilderResolvesTbilisiCenterWithoutBatumiShortcuts(t *te
 		t.Fatalf("expected an unclipped circle around Vake, got %+v", bounds)
 	}
 }
+
+func TestPostGISGeometryBuilderUsesDefaultRadiusForDistrictWithoutRadius(t *testing.T) {
+	var queries []string
+	builder := PostGISGeometryBuilder{
+		Resolver: recordingGeoResolver{place: &domain.ResolvedPlace{
+			Name:      "Saburtalo, Tbilisi",
+			Latitude:  41.7272,
+			Longitude: 44.7525,
+		}, queries: &queries},
+		Segments: 12,
+	}
+
+	area, err := builder.BuildSearchGeometry(context.Background(), cities.Tbilisi, []domain.LocationPreference{
+		{Name: "Сабуртало", Type: "area", CenterName: "Сабуртало", RawText: "район Сабуртало"},
+		{Name: "", RawText: "где-нибудь"},
+		{Name: "Тбилиси", CenterName: "Тбилиси", RawText: "в Тбилиси"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queries) != 1 || queries[0] != "Сабуртало, Tbilisi, Georgia" {
+		t.Fatalf("expected one Tbilisi-scoped district query, got %+v", queries)
+	}
+	if strings.TrimSpace(area.GeoJSON) == "" {
+		t.Fatalf("expected a district zone, got none (unresolved %+v)", area.UnresolvedRules)
+	}
+	bounds := ringBounds(firstGeoJSONRing(t, area.GeoJSON))
+	if bounds.minLat > 41.715 || bounds.maxLat < 41.739 {
+		t.Fatalf("expected a %d m circle around Saburtalo, got %+v", DefaultDistrictRadiusMeters, bounds)
+	}
+}
+
+func TestIsWholeCityLocationRespectsExplicitRadius(t *testing.T) {
+	radius := 2000
+	if !IsWholeCityLocation(domain.LocationPreference{Name: "Батуми"}) {
+		t.Fatal("expected a bare city name to mean the whole city")
+	}
+	if IsWholeCityLocation(domain.LocationPreference{Name: "Батуми", RadiusMeters: &radius}) {
+		t.Fatal("expected a city center with an explicit radius to build a zone")
+	}
+	if IsWholeCityLocation(domain.LocationPreference{Name: "Ваке"}) {
+		t.Fatal("expected a district not to mean the whole city")
+	}
+}

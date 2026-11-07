@@ -121,6 +121,7 @@ func appendLocations(b *strings.Builder, locations []domain.LocationPreference, 
 		return
 	}
 	b.WriteString("Районы:\n")
+	allWholeCity := true
 	for _, loc := range locations {
 		name := loc.RawText
 		if strings.TrimSpace(name) == "" {
@@ -129,10 +130,17 @@ func appendLocations(b *strings.Builder, locations []domain.LocationPreference, 
 		if strings.TrimSpace(name) == "" {
 			name = loc.Name
 		}
+		if preferenceparser.IsWholeCityLocation(loc) {
+			fmt.Fprintf(b, "* %s, весь город\n", displayPreferenceValue(name, lang))
+			continue
+		}
+		allWholeCity = false
 		if loc.RadiusMeters != nil {
 			fmt.Fprintf(b, "* %s, радиус %d м\n", displayPreferenceValue(name, lang), *loc.RadiusMeters)
+		} else if loc.MaxDistanceMeters > 0 {
+			fmt.Fprintf(b, "* %s, радиус %d м\n", displayPreferenceValue(name, lang), loc.MaxDistanceMeters)
 		} else {
-			fmt.Fprintf(b, "* %s\n", displayPreferenceValue(name, lang))
+			fmt.Fprintf(b, "* %s, примерно %d м от центра\n", displayPreferenceValue(name, lang), preferenceparser.DefaultDistrictRadiusMeters)
 		}
 		if loc.BoundaryStreetName != nil && strings.TrimSpace(*loc.BoundaryStreetName) != "" {
 			rule := ""
@@ -145,6 +153,9 @@ func appendLocations(b *strings.Builder, locations []domain.LocationPreference, 
 			}
 			fmt.Fprintf(b, "* ограничение: %s%s\n", rule, street)
 		}
+	}
+	if !hasSearchArea && !allWholeCity {
+		b.WriteString("* Зону на карте построить не удалось, поэтому фильтр по району не применится. Уточни район или нажми \"Изменить зону\".\n")
 	}
 }
 

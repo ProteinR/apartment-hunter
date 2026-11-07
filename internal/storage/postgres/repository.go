@@ -162,8 +162,8 @@ func (r *Repository) SaveSearchProfile(ctx context.Context, profile domain.UserS
 	latestPrefsKnown := latestErr == nil && json.Unmarshal(latestPreferencesJSON, &latestPrefs) == nil
 
 	var searchAreaWKT string
-	if profile.SearchArea != nil && strings.TrimSpace(profile.SearchArea.WKT) != "" {
-		searchAreaWKT = profile.SearchArea.WKT
+	if profile.SearchArea != nil {
+		searchAreaWKT = strings.TrimSpace(profile.SearchArea.WKT)
 	} else if latestPrefsKnown && latestSearchAreaWKT.Valid && sameSearchCity(latestPrefs, profile.Preferences) {
 		searchAreaWKT = latestSearchAreaWKT.String
 	}

@@ -39,6 +39,12 @@ type AvailableChat struct {
 	Kind     string `json:"kind"`
 }
 
+type ChannelAccess struct {
+	Found  bool
+	Title  string
+	Member bool
+}
+
 type Cursor struct {
 	LastMessageID int `json:"last_message_id"`
 }

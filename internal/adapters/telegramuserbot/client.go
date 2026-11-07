@@ -22,6 +22,7 @@ import (
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 )
 
 type Config struct {
@@ -39,7 +40,25 @@ type Client struct {
 	cfg Config
 	mu  sync.Mutex
 	tg  *telegram.Client
+
+	accountMu       sync.Mutex
+	accountID       int64
+	accountFailedAt time.Time
+	accountErr      error
+
+	channelAccessMu    sync.Mutex
+	channelAccessCache map[string]cachedChannelAccess
 }
+
+type cachedChannelAccess struct {
+	access    sources.ChannelAccess
+	checkedAt time.Time
+}
+
+const (
+	accountRetryInterval = 10 * time.Minute
+	channelAccessTTL     = 10 * time.Minute
+)
 
 type MessageHandler func(ctx context.Context, message sources.ChannelMessage) error
 
@@ -141,6 +160,97 @@ func processableUpdateMessage(raw tg.MessageClass) (*tg.Message, bool) {
 		return nil, false
 	}
 	return message, true
+}
+
+func (c *Client) AccountUserID(ctx context.Context) (int64, error) {
+	c.accountMu.Lock()
+	defer c.accountMu.Unlock()
+	if c.accountID != 0 {
+		return c.accountID, nil
+	}
+	if c.accountErr != nil && time.Since(c.accountFailedAt) < accountRetryInterval {
+		return 0, c.accountErr
+	}
+	storage, err := c.sessionStorage(ctx)
+	if err != nil {
+		return 0, err
+	}
+	client := telegram.NewClient(c.cfg.AppID, c.cfg.AppHash, telegram.Options{
+		SessionStorage: storage,
+		NoUpdates:      true,
+	})
+	err = client.Run(ctx, func(ctx context.Context) error {
+		if err := requireAuthorized(ctx, client); err != nil {
+			return err
+		}
+		self, err := client.Self(ctx)
+		if err != nil {
+			return err
+		}
+		c.accountID = self.ID
+		return nil
+	})
+	if err != nil {
+		c.accountErr = err
+		c.accountFailedAt = time.Now()
+	}
+	return c.accountID, err
+}
+
+func (c *Client) ChannelAccess(ctx context.Context, username string) (sources.ChannelAccess, error) {
+	username = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(username), "@"))
+	c.channelAccessMu.Lock()
+	defer c.channelAccessMu.Unlock()
+	if cached, ok := c.channelAccessCache[username]; ok && time.Since(cached.checkedAt) < channelAccessTTL {
+		return cached.access, nil
+	}
+	storage, err := c.sessionStorage(ctx)
+	if err != nil {
+		return sources.ChannelAccess{}, err
+	}
+	client := telegram.NewClient(c.cfg.AppID, c.cfg.AppHash, telegram.Options{
+		SessionStorage: storage,
+		NoUpdates:      true,
+	})
+	var access sources.ChannelAccess
+	err = client.Run(ctx, func(ctx context.Context) error {
+		if err := requireAuthorized(ctx, client); err != nil {
+			return err
+		}
+		resolved, err := client.API().ContactsResolveUsername(ctx, &tg.ContactsResolveUsernameRequest{Username: username})
+		if tgerr.Is(err, "USERNAME_NOT_OCCUPIED", "USERNAME_INVALID") {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		for _, chat := range resolved.Chats {
+			if channel, ok := chat.(*tg.Channel); ok {
+				access = sources.ChannelAccess{Found: true, Title: channel.Title, Member: !channel.Left}
+				return nil
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return sources.ChannelAccess{}, err
+	}
+	if c.channelAccessCache == nil {
+		c.channelAccessCache = map[string]cachedChannelAccess{}
+	}
+	c.channelAccessCache[username] = cachedChannelAccess{access: access, checkedAt: time.Now()}
+	return access, nil
+}
+
+func requireAuthorized(ctx context.Context, client *telegram.Client) error {
+	status, err := client.Auth().Status(ctx)
+	if err != nil {
+		return err
+	}
+	if !status.Authorized {
+		return fmt.Errorf("telegram userbot session is not authorized")
+	}
+	return nil
 }
 
 func (c *Client) ListAvailableChats(ctx context.Context, limit int) ([]sources.AvailableChat, error) {

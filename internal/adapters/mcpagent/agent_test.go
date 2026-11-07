@@ -46,7 +46,12 @@ func (s *fakeProfileStore) GetEvaluationByTelegramMessage(ctx context.Context, p
 }
 
 type fakeChatLister struct {
-	limit int
+	limit     int
+	accountID int64
+}
+
+func (l *fakeChatLister) AccountUserID(ctx context.Context) (int64, error) {
+	return l.accountID, nil
 }
 
 func (l *fakeChatLister) ListAvailableChats(ctx context.Context, limit int) ([]sources.AvailableChat, error) {
@@ -58,8 +63,8 @@ func (l *fakeChatLister) ListAvailableChats(ctx context.Context, limit int) ([]s
 }
 
 func TestProcessCommandCanListAvailableTelegramChats(t *testing.T) {
-	store := &fakeProfileStore{profile: profiles.Profile{ID: "telegram_42"}}
-	lister := &fakeChatLister{}
+	store := &fakeProfileStore{profile: profiles.Profile{ID: "telegram_42", TelegramChatID: 42}}
+	lister := &fakeChatLister{accountID: 42}
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
@@ -386,5 +391,114 @@ func TestMergePreferenceUpdateChangesCityOnlyWhenPatchNamesOne(t *testing.T) {
 	}
 	if ignored.City != "tbilisi" {
 		t.Fatalf("expected unsupported city to be ignored, got %q", ignored.City)
+	}
+}
+
+func TestProcessCommandHidesUserbotChatsFromOtherUsers(t *testing.T) {
+	store := &fakeProfileStore{profile: profiles.Profile{ID: "telegram_7", TelegramChatID: 7}}
+	lister := &fakeChatLister{accountID: 42}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req chatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		for _, tool := range req.Tools {
+			if tool.Function.Name == "list_available_telegram_chats" {
+				t.Fatalf("expected no userbot chat tool for another user")
+			}
+		}
+		if strings.Contains(req.Messages[0].Content, "list_available_telegram_chats") {
+			t.Fatalf("expected no userbot chat guidance for another user")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if req.Messages[len(req.Messages)-1].Role == "tool" {
+			if req.Messages[len(req.Messages)-1].Content != "unknown function" {
+				t.Fatalf("expected the hidden tool to be refused, got %q", req.Messages[len(req.Messages)-1].Content)
+			}
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Пришли @username канала."}}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"list_available_telegram_chats","arguments":"{}"}}]}}]}`))
+	}))
+	defer server.Close()
+
+	agent := New("test-key", store)
+	agent.apiURL = server.URL
+	agent.SetTelegramChatLister(lister)
+
+	if _, _, _, err := agent.ProcessCommand(context.Background(), "telegram_7", "Какие чаты можно отслеживать?"); err != nil {
+		t.Fatal(err)
+	}
+	if lister.limit != 0 {
+		t.Fatalf("expected userbot chats not to be listed, got limit %d", lister.limit)
+	}
+}
+
+func TestProcessCommandChainsToolCallsAcrossRounds(t *testing.T) {
+	store := &fakeProfileStore{profile: profiles.Profile{ID: "telegram_42", TelegramChatID: 42, Preferences: &domain.UserPreferences{}}}
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		var req chatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch requests {
+		case 1:
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"calculate_distance","arguments":"{\"lat1\":41.7,\"lon1\":44.7,\"lat2\":41.71,\"lon2\":44.7}"}}]}}]}`))
+		case 2:
+			if len(req.Tools) == 0 {
+				t.Fatalf("expected tools to stay available for a second round")
+			}
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_2","type":"function","function":{"name":"update_preferences","arguments":"{\"budget_max\":700}"}}]}}]}`))
+		default:
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Готово."}}]}`))
+		}
+	}))
+	defer server.Close()
+
+	agent := New("test-key", store)
+	agent.apiURL = server.URL
+
+	reply, prefs, _, err := agent.ProcessCommand(context.Background(), "telegram_42", "Поставь бюджет 700")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != "Готово." || prefs == nil || prefs.BudgetMax == nil || *prefs.BudgetMax != 700 || requests != 3 {
+		t.Fatalf("expected chained update, got reply=%q prefs=%+v requests=%d", reply, prefs, requests)
+	}
+}
+
+func TestProcessCommandStopsOfferingToolsAfterRoundLimit(t *testing.T) {
+	store := &fakeProfileStore{profile: profiles.Profile{ID: "telegram_42", TelegramChatID: 42}}
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		var req chatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if req.ToolChoice == "none" {
+			if len(req.Tools) == 0 {
+				t.Fatalf("expected tools to stay defined alongside tool history")
+			}
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Итог."}}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call","type":"function","function":{"name":"calculate_distance","arguments":"{}"}}]}}]}`))
+	}))
+	defer server.Close()
+
+	agent := New("test-key", store)
+	agent.apiURL = server.URL
+
+	reply, _, _, err := agent.ProcessCommand(context.Background(), "telegram_42", "Посчитай")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != "Итог." || requests != maxAgentToolRounds+1 {
+		t.Fatalf("expected a final answer after %d tool rounds, got %q after %d requests", maxAgentToolRounds, reply, requests)
 	}
 }

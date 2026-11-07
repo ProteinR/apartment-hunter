@@ -143,18 +143,31 @@ func (a App) telegram(args []string) error {
 	}
 	geometry := preferenceparser.PostGISGeometryBuilder{Resolver: newGoogleGeocoder()}
 	mapRenderer := googlemaps.StaticMapRenderer{APIKey: strings.TrimSpace(os.Getenv("APARTMENT_HUNTER_GOOGLE_MAPS_API_KEY"))}
+	var userbot *telegramuserbot.Client
+	if reason := telegramWorkerDisabledReason(); reason == "" {
+		if userbot, err = telegramuserbot.FromEnv(a.In); err != nil {
+			fmt.Fprintf(a.Err, "Failed to initialize Telegram userbot client: %v\n", err)
+			userbot = nil
+		}
+	}
 	mcpAgent, err := mcpagent.FromEnv(store)
 	if err != nil {
 		fmt.Fprintf(a.Err, "Failed to initialize MCP agent: %v\n", err)
 	} else if mcpAgent != nil {
 		mcpAgent.SetGeocoder(newGoogleGeocoder())
-		if reason := telegramWorkerDisabledReason(); reason == "" {
-			if chatLister, err := telegramuserbot.FromEnv(a.In); err != nil {
-				fmt.Fprintf(a.Err, "Failed to initialize Telegram chat lister: %v\n", err)
-			} else {
-				mcpAgent.SetTelegramChatLister(chatLister)
-			}
+		if userbot != nil {
+			mcpAgent.SetTelegramChatLister(userbot)
 		}
+	}
+	botOptions := []telegram.Option{
+		telegram.WithPreferencesParser(prefsParser),
+		telegram.WithGeometryBuilder(geometry),
+		telegram.WithSearchAreaMapRenderer(mapRenderer),
+		telegram.WithProfileStore(store),
+		telegram.WithMCPAgent(mcpAgent),
+	}
+	if userbot != nil {
+		botOptions = append(botOptions, telegram.WithChannelAccessChecker(userbot))
 	}
 	fmt.Fprintf(a.Out, "Telegram bot started. Saving profiles to Postgres\n")
 
@@ -194,15 +207,11 @@ func (a App) telegram(args []string) error {
 		}
 	}
 
-	err = telegram.New(token, outputDir,
-		telegram.WithPreferencesParser(prefsParser),
-		telegram.WithGeometryBuilder(geometry),
-		telegram.WithSearchAreaMapRenderer(mapRenderer),
-		telegram.WithProfileStore(store),
-		telegram.WithMCPAgent(mcpAgent),
+	botOptions = append(botOptions,
 		telegram.WithAllowedChats(allowedChatIDs),
 		telegram.WithAllowedUsernames(allowedUsernames),
-	).Run(ctx.Done())
+	)
+	err = telegram.New(token, outputDir, botOptions...).Run(ctx.Done())
 	stop()
 	return err
 }

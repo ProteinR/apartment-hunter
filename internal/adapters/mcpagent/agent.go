@@ -21,6 +21,12 @@ import (
 	"apartment-hunter/internal/sources"
 )
 
+const (
+	maxAgentToolRounds   = 4
+	accountLookupTimeout = 10 * time.Second
+	emptyAgentReply      = "Не получилось довести действие до конца. Сформулируй просьбу иначе или проверь фильтры командой /preferences."
+)
+
 type ProfileStore interface {
 	GetProfile(ctx context.Context, id string) (profiles.Profile, bool, error)
 	UpsertProfile(ctx context.Context, profile profiles.Profile) error
@@ -34,6 +40,7 @@ type Geocoder interface {
 
 type TelegramChatLister interface {
 	ListAvailableChats(ctx context.Context, limit int) ([]sources.AvailableChat, error)
+	AccountUserID(ctx context.Context) (int64, error)
 }
 
 type Agent struct {
@@ -94,6 +101,16 @@ func (a *Agent) SetTelegramChatLister(chatLister TelegramChatLister) {
 	a.chatLister = chatLister
 }
 
+func (a *Agent) mayListTelegramChats(ctx context.Context, profile profiles.Profile) bool {
+	if a.chatLister == nil || profile.TelegramChatID == 0 {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, accountLookupTimeout)
+	defer cancel()
+	accountID, err := a.chatLister.AccountUserID(ctx)
+	return err == nil && accountID == profile.TelegramChatID
+}
+
 func FromEnv(store ProfileStore) (*Agent, error) {
 	apiKey := strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY"))
 	if apiKey == "" {
@@ -106,9 +123,10 @@ func FromEnv(store ProfileStore) (*Agent, error) {
 }
 
 type chatRequest struct {
-	Model    string        `json:"model"`
-	Messages []chatMessage `json:"messages"`
-	Tools    []chatTool    `json:"tools,omitempty"`
+	Model      string        `json:"model"`
+	Messages   []chatMessage `json:"messages"`
+	Tools      []chatTool    `json:"tools,omitempty"`
+	ToolChoice string        `json:"tool_choice,omitempty"`
 }
 
 type chatMessage struct {
@@ -172,6 +190,14 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 		return "", nil, nil, err
 	}
 
+	canListChats := a.mayListTelegramChats(ctx, profile)
+	chatSourcesAbility := "Подсказывать, как подключить новый источник: пользователь сам находит публичный Telegram-канал или группу с объявлениями и присылает @username или ссылку t.me/name."
+	chatSourcesNote := ""
+	if canListChats {
+		chatSourcesAbility = "Просматривать публичные Telegram-каналы и группы, доступные аккаунту userbot, с помощью list_available_telegram_chats, чтобы предложить релевантные источники для отслеживания. Предлагай только те варианты, которые выглядят связанными с арендой, недвижимостью в городе поиска пользователя, apartment/rent/real estate. Если подходящих мало или нет, так и скажи."
+		chatSourcesNote = "- Инструмент list_available_telegram_chats показывает доступные userbot-аккаунту чаты для выбора новых источников; это НЕ список уже подключенных источников поиска.\n"
+	}
+
 	systemPrompt := fmt.Sprintf(`Ты - персональный ассистент по поиску квартир (MCP Agent). Твоя цель — помочь пользователю сформировать идеальные фильтры для поиска жилья.
 Ты можешь:
 1. Рассказывать пользователю, какие у него сейчас стоят настройки и как ты видишь его идеальную квартиру.
@@ -180,7 +206,7 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 4. Включать/выключать фильтрацию с помощью set_filtering_status.
 5. Работать с географией: находить координаты по адресу (resolve_address), вычислять расстояние в метрах (calculate_distance) и обновлять зону поиска напрямую с помощью GeoJSON (update_search_area).
 6. Управлять списком стоп-слов в поле stop_words (добавлять или удалять слова, по которым нужно отсеивать объявления о квартирах).
-7. Просматривать публичные Telegram-каналы и группы, доступные аккаунту userbot, с помощью list_available_telegram_chats, чтобы предложить релевантные источники для отслеживания. Предлагай только те варианты, которые выглядят связанными с арендой, недвижимостью в городе поиска пользователя, apartment/rent/real estate. Если подходящих мало или нет, так и скажи.
+7. %s
 8. Получать полный отчет по конкретному объявлению из локальной базы с помощью get_listing_evaluation_report, если пользователь спрашивает, почему объявление прошло/не прошло фильтры, или ссылается на сообщение бота.
 9. Город поиска хранится в поле city в Preferences: batumi — Батуми, tbilisi — Тбилиси, пусто — Батуми. Меняй city через update_preferences только когда пользователь явно просит искать в другом городе; во всех остальных вызовах update_preferences передавай текущее значение city или null. При смене города районы и зона поиска прошлого города сбрасываются: в том же вызове передай location_preferences: [] или только районы нового города, которые назвал пользователь, и не вызывай update_search_area — зону нового города можно нарисовать следующим сообщением. Пользователь также может сменить город командой /city tbilisi или /city batumi.
 
@@ -193,13 +219,12 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 - Если в состоянии настроек заполнен ключ "SearchArea" (даже если текстовые предпочтения по районам пусты), это ОЗНАЧАЕТ, что локация для поиска задана (пользователь ограничил поиск гео-зоной на карте). В этом случае НИКОГДА не пиши, что локация не задана или что предпочтений по районам нет. Указывай, что поиск идет в границах заданной области/зоны поиска на карте.
 - Если пользователь просит показать/прислать карту, картинку, фото или изображение зоны поиска и "SearchArea" заполнен, отвечай коротко, что прикрепляешь изображение текущей зоны поиска. НЕ говори, что не можешь отрисовать или сгенерировать карту: Telegram-бот прикрепит изображение автоматически.
 - Если пользователь спрашивает, какие чаты/каналы/источники сейчас читаются, отслеживаются или подключены, отвечай строго по "ConnectedSources" из текущего состояния. Если список пустой, скажи, что источники пока не подключены. НЕ говори, что ты не подключен к списку чатов.
-- Инструмент list_available_telegram_chats показывает доступные userbot-аккаунту чаты для выбора новых источников; это НЕ список уже подключенных источников поиска.
-- Если пользователь хочет сам нарисовать зону поиска, обязательно дай ему пошаговую инструкцию: 1) Открыть сайт geojson.io, 2) Нарисовать полигон с помощью инструмента рисования (Draw a polygon), 3) Скопировать сгенерированный JSON (справа) и прислать тебе в чат в виде текста или файла.
+%s- Если пользователь хочет сам нарисовать зону поиска, обязательно дай ему пошаговую инструкцию: 1) Открыть сайт geojson.io, 2) Нарисовать полигон с помощью инструмента рисования (Draw a polygon), 3) Скопировать сгенерированный JSON (справа) и прислать тебе в чат в виде текста или файла.
 
 Текущее состояние настроек:
 %s
 
-Отвечай в дружелюбном тоне.`, string(state))
+Отвечай в дружелюбном тоне.`, chatSourcesAbility, chatSourcesNote, string(state))
 
 	messages := []chatMessage{
 		{Role: "system", Content: systemPrompt},
@@ -362,7 +387,10 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 				},
 			},
 		},
-		{
+	}
+
+	if canListChats {
+		tools = append(tools, chatTool{
 			Type: "function",
 			Function: chatFunction{
 				Name:        "list_available_telegram_chats",
@@ -377,7 +405,7 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 					},
 				},
 			},
-		},
+		})
 	}
 
 	reqBody := chatRequest{
@@ -391,176 +419,170 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 		return "", nil, nil, err
 	}
 
-	if len(respMsg.ToolCalls) == 0 {
-		now := time.Now()
-		profile.MCPHistory = append(profile.MCPHistory, profiles.MCPMessage{Role: "user", Content: text, CreatedAt: now})
-		profile.MCPHistory = append(profile.MCPHistory, profiles.MCPMessage{Role: "assistant", Content: respMsg.Content, CreatedAt: now})
-		if len(profile.MCPHistory) > 10 {
-			profile.MCPHistory = profile.MCPHistory[len(profile.MCPHistory)-10:]
-		}
-		if err := a.store.UpsertProfile(ctx, profile); err != nil {
-			return "", nil, nil, fmt.Errorf("failed to save mcp history: %w", err)
-		}
-		return respMsg.Content, nil, nil, nil
-	}
-
 	var prefsChanged *domain.UserPreferences
 	var areaChanged *domain.GeoSearchArea
 
-	// Apply tool calls
-	messages = append(messages, respMsg)
-	for _, tc := range respMsg.ToolCalls {
-		var toolResult string
-		switch tc.Function.Name {
-		case "set_filtering_status":
-			var args struct {
-				Enabled bool `json:"enabled"`
-			}
-			json.Unmarshal([]byte(tc.Function.Arguments), &args)
-			disabled := !args.Enabled
-			profile.FilterDisabled = &disabled
-			err = a.store.UpsertProfile(ctx, profile)
-			if err == nil {
-				toolResult = "success"
-			} else {
-				toolResult = err.Error()
-			}
-		case "update_preferences":
-			newPrefs, err := mergePreferenceUpdate(profile.Preferences, tc.Function.Arguments)
-			if err != nil {
-				toolResult = "error: failed to parse preferences JSON"
-			} else {
-				profile.Preferences = &newPrefs
-				prefsChanged = &newPrefs
-				toolResult = "success"
-			}
-		case "resolve_address":
-			var args struct {
-				Address string `json:"address"`
-				City    string `json:"city"`
-			}
-			json.Unmarshal([]byte(tc.Function.Arguments), &args)
-			if a.geocoder == nil {
-				toolResult = "error: geocoder is not configured"
-			} else {
-				loc, err := a.geocoder.Resolve(ctx, cities.ForKey(args.City, profileSearchCity(profile)).QueryWithRegion(args.Address), 0)
+	for round := 1; len(respMsg.ToolCalls) > 0 && round <= maxAgentToolRounds; round++ {
+		messages = append(messages, respMsg)
+		for _, tc := range respMsg.ToolCalls {
+			var toolResult string
+			switch tc.Function.Name {
+			case "set_filtering_status":
+				var args struct {
+					Enabled bool `json:"enabled"`
+				}
+				json.Unmarshal([]byte(tc.Function.Arguments), &args)
+				disabled := !args.Enabled
+				profile.FilterDisabled = &disabled
+				err = a.store.UpsertProfile(ctx, profile)
+				if err == nil {
+					toolResult = "success"
+				} else {
+					toolResult = err.Error()
+				}
+			case "update_preferences":
+				newPrefs, err := mergePreferenceUpdate(profile.Preferences, tc.Function.Arguments)
+				if err != nil {
+					toolResult = "error: failed to parse preferences JSON"
+				} else {
+					profile.Preferences = &newPrefs
+					prefsChanged = &newPrefs
+					toolResult = "success"
+				}
+			case "resolve_address":
+				var args struct {
+					Address string `json:"address"`
+					City    string `json:"city"`
+				}
+				json.Unmarshal([]byte(tc.Function.Arguments), &args)
+				if a.geocoder == nil {
+					toolResult = "error: geocoder is not configured"
+				} else {
+					loc, err := a.geocoder.Resolve(ctx, cities.ForKey(args.City, profileSearchCity(profile)).QueryWithRegion(args.Address), 0)
+					if err != nil {
+						toolResult = "error: " + err.Error()
+					} else if loc.Latitude == 0 && loc.Longitude == 0 {
+						toolResult = "error: address not found"
+					} else {
+						resBytes, _ := json.Marshal(map[string]any{
+							"name":      loc.Name,
+							"latitude":  loc.Latitude,
+							"longitude": loc.Longitude,
+						})
+						toolResult = string(resBytes)
+					}
+				}
+			case "calculate_distance":
+				var args struct {
+					Lat1 float64 `json:"lat1"`
+					Lon1 float64 `json:"lon1"`
+					Lat2 float64 `json:"lat2"`
+					Lon2 float64 `json:"lon2"`
+				}
+				json.Unmarshal([]byte(tc.Function.Arguments), &args)
+				dist := haversineDistance(args.Lat1, args.Lon1, args.Lat2, args.Lon2)
+				resBytes, _ := json.Marshal(map[string]any{
+					"distance_meters": int(dist),
+				})
+				toolResult = string(resBytes)
+			case "update_search_area":
+				var args struct {
+					GeoJSON string `json:"geojson"`
+				}
+				json.Unmarshal([]byte(tc.Function.Arguments), &args)
+				area, err := parseGeoJSONArea(args.GeoJSON)
 				if err != nil {
 					toolResult = "error: " + err.Error()
-				} else if loc.Latitude == 0 && loc.Longitude == 0 {
-					toolResult = "error: address not found"
 				} else {
-					resBytes, _ := json.Marshal(map[string]any{
-						"name":      loc.Name,
-						"latitude":  loc.Latitude,
-						"longitude": loc.Longitude,
-					})
+					areaChanged = area
+					toolResult = "success"
+				}
+			case "search_local_listings":
+				var args struct {
+					Status   string `json:"status"`
+					Query    string `json:"query"`
+					MinPrice int    `json:"min_price"`
+					MaxPrice int    `json:"max_price"`
+					Location string `json:"location"`
+					Limit    int    `json:"limit"`
+				}
+				json.Unmarshal([]byte(tc.Function.Arguments), &args)
+				filter := domain.EvaluationSearchFilter{
+					Status:   args.Status,
+					Query:    args.Query,
+					MinPrice: args.MinPrice,
+					MaxPrice: args.MaxPrice,
+					Location: args.Location,
+					Limit:    args.Limit,
+				}
+				records, err := a.store.SearchEvaluations(ctx, profileID, filter)
+				if err != nil {
+					toolResult = "error: " + err.Error()
+				} else {
+					resBytes, _ := json.Marshal(records)
 					toolResult = string(resBytes)
 				}
+			case "get_listing_evaluation_report":
+				var args struct {
+					MessageID      int   `json:"message_id"`
+					TelegramChatID int64 `json:"telegram_chat_id"`
+				}
+				json.Unmarshal([]byte(tc.Function.Arguments), &args)
+				chatID := args.TelegramChatID
+				if chatID == 0 {
+					chatID = profile.TelegramChatID
+				}
+				record, ok, err := a.store.GetEvaluationByTelegramMessage(ctx, profileID, chatID, args.MessageID)
+				if err != nil {
+					toolResult = "error: " + err.Error()
+				} else if !ok {
+					toolResult = "not found"
+				} else {
+					resBytes, _ := json.Marshal(record)
+					toolResult = string(resBytes)
+				}
+			case "list_available_telegram_chats":
+				var args struct {
+					Limit int `json:"limit"`
+				}
+				json.Unmarshal([]byte(tc.Function.Arguments), &args)
+				if !canListChats {
+					toolResult = "unknown function"
+				} else if a.chatLister == nil {
+					toolResult = "error: telegram chat lister is not configured"
+				} else {
+					chats, err := a.chatLister.ListAvailableChats(ctx, args.Limit)
+					if err != nil {
+						toolResult = "error: " + err.Error()
+					} else {
+						resBytes, _ := json.Marshal(chats)
+						toolResult = string(resBytes)
+					}
+				}
+			default:
+				toolResult = "unknown function"
 			}
-		case "calculate_distance":
-			var args struct {
-				Lat1 float64 `json:"lat1"`
-				Lon1 float64 `json:"lon1"`
-				Lat2 float64 `json:"lat2"`
-				Lon2 float64 `json:"lon2"`
-			}
-			json.Unmarshal([]byte(tc.Function.Arguments), &args)
-			dist := haversineDistance(args.Lat1, args.Lon1, args.Lat2, args.Lon2)
-			resBytes, _ := json.Marshal(map[string]any{
-				"distance_meters": int(dist),
+
+			messages = append(messages, chatMessage{
+				Role:       "tool",
+				ToolCallID: tc.ID,
+				Name:       tc.Function.Name,
+				Content:    toolResult,
 			})
-			toolResult = string(resBytes)
-		case "update_search_area":
-			var args struct {
-				GeoJSON string `json:"geojson"`
-			}
-			json.Unmarshal([]byte(tc.Function.Arguments), &args)
-			area, err := parseGeoJSONArea(args.GeoJSON)
-			if err != nil {
-				toolResult = "error: " + err.Error()
-			} else {
-				areaChanged = area
-				toolResult = "success"
-			}
-		case "search_local_listings":
-			var args struct {
-				Status   string `json:"status"`
-				Query    string `json:"query"`
-				MinPrice int    `json:"min_price"`
-				MaxPrice int    `json:"max_price"`
-				Location string `json:"location"`
-				Limit    int    `json:"limit"`
-			}
-			json.Unmarshal([]byte(tc.Function.Arguments), &args)
-			filter := domain.EvaluationSearchFilter{
-				Status:   args.Status,
-				Query:    args.Query,
-				MinPrice: args.MinPrice,
-				MaxPrice: args.MaxPrice,
-				Location: args.Location,
-				Limit:    args.Limit,
-			}
-			records, err := a.store.SearchEvaluations(ctx, profileID, filter)
-			if err != nil {
-				toolResult = "error: " + err.Error()
-			} else {
-				resBytes, _ := json.Marshal(records)
-				toolResult = string(resBytes)
-			}
-		case "get_listing_evaluation_report":
-			var args struct {
-				MessageID      int   `json:"message_id"`
-				TelegramChatID int64 `json:"telegram_chat_id"`
-			}
-			json.Unmarshal([]byte(tc.Function.Arguments), &args)
-			chatID := args.TelegramChatID
-			if chatID == 0 {
-				chatID = profile.TelegramChatID
-			}
-			record, ok, err := a.store.GetEvaluationByTelegramMessage(ctx, profileID, chatID, args.MessageID)
-			if err != nil {
-				toolResult = "error: " + err.Error()
-			} else if !ok {
-				toolResult = "not found"
-			} else {
-				resBytes, _ := json.Marshal(record)
-				toolResult = string(resBytes)
-			}
-		case "list_available_telegram_chats":
-			var args struct {
-				Limit int `json:"limit"`
-			}
-			json.Unmarshal([]byte(tc.Function.Arguments), &args)
-			if a.chatLister == nil {
-				toolResult = "error: telegram chat lister is not configured"
-			} else {
-				chats, err := a.chatLister.ListAvailableChats(ctx, args.Limit)
-				if err != nil {
-					toolResult = "error: " + err.Error()
-				} else {
-					resBytes, _ := json.Marshal(chats)
-					toolResult = string(resBytes)
-				}
-			}
-		default:
-			toolResult = "unknown function"
 		}
 
-		messages = append(messages, chatMessage{
-			Role:       "tool",
-			ToolCallID: tc.ID,
-			Name:       tc.Function.Name,
-			Content:    toolResult,
-		})
+		reqBody.Messages = messages
+		if round >= maxAgentToolRounds {
+			reqBody.ToolChoice = "none"
+		}
+		respMsg, err = a.makeChatRequest(ctx, reqBody)
+		if err != nil {
+			return "", nil, nil, err
+		}
 	}
 
-	// Final request to get summary
-	reqBody.Messages = messages
-	reqBody.Tools = nil
-
-	respMsg, err = a.makeChatRequest(ctx, reqBody)
-	if err != nil {
-		return "", nil, nil, err
+	if strings.TrimSpace(respMsg.Content) == "" {
+		respMsg.Content = emptyAgentReply
 	}
 
 	// Update sliding window history
@@ -814,160 +836,152 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 		return "", nil, nil, err
 	}
 
-	if len(respMsg.ToolCalls) == 0 {
-		now := time.Now()
-		profile.MCPHistory = append(profile.MCPHistory, profiles.MCPMessage{Role: "user", Content: "[Отзыв на объявление] " + feedbackText, CreatedAt: now})
-		profile.MCPHistory = append(profile.MCPHistory, profiles.MCPMessage{Role: "assistant", Content: respMsg.Content, CreatedAt: now})
-		if len(profile.MCPHistory) > 10 {
-			profile.MCPHistory = profile.MCPHistory[len(profile.MCPHistory)-10:]
-		}
-		if err := a.store.UpsertProfile(ctx, profile); err != nil {
-			return "", nil, nil, fmt.Errorf("failed to save mcp history: %w", err)
-		}
-		return respMsg.Content, nil, nil, nil
-	}
-
 	var prefsChanged *domain.UserPreferences
 	var areaChanged *domain.GeoSearchArea
 
-	// Apply tool calls
-	messages = append(messages, respMsg)
-	for _, tc := range respMsg.ToolCalls {
-		var toolResult string
-		switch tc.Function.Name {
-		case "set_filtering_status":
-			var args struct {
-				Enabled bool `json:"enabled"`
-			}
-			json.Unmarshal([]byte(tc.Function.Arguments), &args)
-			disabled := !args.Enabled
-			profile.FilterDisabled = &disabled
-			err = a.store.UpsertProfile(ctx, profile)
-			if err == nil {
-				toolResult = "success"
-			} else {
-				toolResult = err.Error()
-			}
-		case "update_preferences":
-			newPrefs, err := mergePreferenceUpdate(profile.Preferences, tc.Function.Arguments)
-			if err != nil {
-				toolResult = "error: failed to parse preferences JSON"
-			} else {
-				profile.Preferences = &newPrefs
-				prefsChanged = &newPrefs
-				toolResult = "success"
-			}
-		case "resolve_address":
-			var args struct {
-				Address string `json:"address"`
-				City    string `json:"city"`
-			}
-			json.Unmarshal([]byte(tc.Function.Arguments), &args)
-			if a.geocoder == nil {
-				toolResult = "error: geocoder is not configured"
-			} else {
-				loc, err := a.geocoder.Resolve(ctx, cities.ForKey(args.City, profileSearchCity(profile)).QueryWithRegion(args.Address), 0)
+	for round := 1; len(respMsg.ToolCalls) > 0 && round <= maxAgentToolRounds; round++ {
+		messages = append(messages, respMsg)
+		for _, tc := range respMsg.ToolCalls {
+			var toolResult string
+			switch tc.Function.Name {
+			case "set_filtering_status":
+				var args struct {
+					Enabled bool `json:"enabled"`
+				}
+				json.Unmarshal([]byte(tc.Function.Arguments), &args)
+				disabled := !args.Enabled
+				profile.FilterDisabled = &disabled
+				err = a.store.UpsertProfile(ctx, profile)
+				if err == nil {
+					toolResult = "success"
+				} else {
+					toolResult = err.Error()
+				}
+			case "update_preferences":
+				newPrefs, err := mergePreferenceUpdate(profile.Preferences, tc.Function.Arguments)
+				if err != nil {
+					toolResult = "error: failed to parse preferences JSON"
+				} else {
+					profile.Preferences = &newPrefs
+					prefsChanged = &newPrefs
+					toolResult = "success"
+				}
+			case "resolve_address":
+				var args struct {
+					Address string `json:"address"`
+					City    string `json:"city"`
+				}
+				json.Unmarshal([]byte(tc.Function.Arguments), &args)
+				if a.geocoder == nil {
+					toolResult = "error: geocoder is not configured"
+				} else {
+					loc, err := a.geocoder.Resolve(ctx, cities.ForKey(args.City, profileSearchCity(profile)).QueryWithRegion(args.Address), 0)
+					if err != nil {
+						toolResult = "error: " + err.Error()
+					} else if loc.Latitude == 0 && loc.Longitude == 0 {
+						toolResult = "error: address not found"
+					} else {
+						resBytes, _ := json.Marshal(map[string]any{
+							"name":      loc.Name,
+							"latitude":  loc.Latitude,
+							"longitude": loc.Longitude,
+						})
+						toolResult = string(resBytes)
+					}
+				}
+			case "calculate_distance":
+				var args struct {
+					Lat1 float64 `json:"lat1"`
+					Lon1 float64 `json:"lon1"`
+					Lat2 float64 `json:"lat2"`
+					Lon2 float64 `json:"lon2"`
+				}
+				json.Unmarshal([]byte(tc.Function.Arguments), &args)
+				dist := haversineDistance(args.Lat1, args.Lon1, args.Lat2, args.Lon2)
+				resBytes, _ := json.Marshal(map[string]any{
+					"distance_meters": int(dist),
+				})
+				toolResult = string(resBytes)
+			case "update_search_area":
+				var args struct {
+					GeoJSON string `json:"geojson"`
+				}
+				json.Unmarshal([]byte(tc.Function.Arguments), &args)
+				area, err := parseGeoJSONArea(args.GeoJSON)
 				if err != nil {
 					toolResult = "error: " + err.Error()
-				} else if loc.Latitude == 0 && loc.Longitude == 0 {
-					toolResult = "error: address not found"
 				} else {
-					resBytes, _ := json.Marshal(map[string]any{
-						"name":      loc.Name,
-						"latitude":  loc.Latitude,
-						"longitude": loc.Longitude,
-					})
+					areaChanged = area
+					toolResult = "success"
+				}
+			case "search_local_listings":
+				var args struct {
+					Status   string `json:"status"`
+					Query    string `json:"query"`
+					MinPrice int    `json:"min_price"`
+					MaxPrice int    `json:"max_price"`
+					Location string `json:"location"`
+					Limit    int    `json:"limit"`
+				}
+				json.Unmarshal([]byte(tc.Function.Arguments), &args)
+				filter := domain.EvaluationSearchFilter{
+					Status:   args.Status,
+					Query:    args.Query,
+					MinPrice: args.MinPrice,
+					MaxPrice: args.MaxPrice,
+					Location: args.Location,
+					Limit:    args.Limit,
+				}
+				records, err := a.store.SearchEvaluations(ctx, profileID, filter)
+				if err != nil {
+					toolResult = "error: " + err.Error()
+				} else {
+					resBytes, _ := json.Marshal(records)
 					toolResult = string(resBytes)
 				}
+			case "get_listing_evaluation_report":
+				var args struct {
+					MessageID      int   `json:"message_id"`
+					TelegramChatID int64 `json:"telegram_chat_id"`
+				}
+				json.Unmarshal([]byte(tc.Function.Arguments), &args)
+				chatID := args.TelegramChatID
+				if chatID == 0 {
+					chatID = profile.TelegramChatID
+				}
+				record, ok, err := a.store.GetEvaluationByTelegramMessage(ctx, profileID, chatID, args.MessageID)
+				if err != nil {
+					toolResult = "error: " + err.Error()
+				} else if !ok {
+					toolResult = "not found"
+				} else {
+					resBytes, _ := json.Marshal(record)
+					toolResult = string(resBytes)
+				}
+			default:
+				toolResult = "unknown function"
 			}
-		case "calculate_distance":
-			var args struct {
-				Lat1 float64 `json:"lat1"`
-				Lon1 float64 `json:"lon1"`
-				Lat2 float64 `json:"lat2"`
-				Lon2 float64 `json:"lon2"`
-			}
-			json.Unmarshal([]byte(tc.Function.Arguments), &args)
-			dist := haversineDistance(args.Lat1, args.Lon1, args.Lat2, args.Lon2)
-			resBytes, _ := json.Marshal(map[string]any{
-				"distance_meters": int(dist),
+
+			messages = append(messages, chatMessage{
+				Role:       "tool",
+				ToolCallID: tc.ID,
+				Name:       tc.Function.Name,
+				Content:    toolResult,
 			})
-			toolResult = string(resBytes)
-		case "update_search_area":
-			var args struct {
-				GeoJSON string `json:"geojson"`
-			}
-			json.Unmarshal([]byte(tc.Function.Arguments), &args)
-			area, err := parseGeoJSONArea(args.GeoJSON)
-			if err != nil {
-				toolResult = "error: " + err.Error()
-			} else {
-				areaChanged = area
-				toolResult = "success"
-			}
-		case "search_local_listings":
-			var args struct {
-				Status   string `json:"status"`
-				Query    string `json:"query"`
-				MinPrice int    `json:"min_price"`
-				MaxPrice int    `json:"max_price"`
-				Location string `json:"location"`
-				Limit    int    `json:"limit"`
-			}
-			json.Unmarshal([]byte(tc.Function.Arguments), &args)
-			filter := domain.EvaluationSearchFilter{
-				Status:   args.Status,
-				Query:    args.Query,
-				MinPrice: args.MinPrice,
-				MaxPrice: args.MaxPrice,
-				Location: args.Location,
-				Limit:    args.Limit,
-			}
-			records, err := a.store.SearchEvaluations(ctx, profileID, filter)
-			if err != nil {
-				toolResult = "error: " + err.Error()
-			} else {
-				resBytes, _ := json.Marshal(records)
-				toolResult = string(resBytes)
-			}
-		case "get_listing_evaluation_report":
-			var args struct {
-				MessageID      int   `json:"message_id"`
-				TelegramChatID int64 `json:"telegram_chat_id"`
-			}
-			json.Unmarshal([]byte(tc.Function.Arguments), &args)
-			chatID := args.TelegramChatID
-			if chatID == 0 {
-				chatID = profile.TelegramChatID
-			}
-			record, ok, err := a.store.GetEvaluationByTelegramMessage(ctx, profileID, chatID, args.MessageID)
-			if err != nil {
-				toolResult = "error: " + err.Error()
-			} else if !ok {
-				toolResult = "not found"
-			} else {
-				resBytes, _ := json.Marshal(record)
-				toolResult = string(resBytes)
-			}
-		default:
-			toolResult = "unknown function"
 		}
 
-		messages = append(messages, chatMessage{
-			Role:       "tool",
-			ToolCallID: tc.ID,
-			Name:       tc.Function.Name,
-			Content:    toolResult,
-		})
+		reqBody.Messages = messages
+		if round >= maxAgentToolRounds {
+			reqBody.ToolChoice = "none"
+		}
+		respMsg, err = a.makeChatRequest(ctx, reqBody)
+		if err != nil {
+			return "", nil, nil, err
+		}
 	}
 
-	// Final request to get summary
-	reqBody.Messages = messages
-	reqBody.Tools = nil
-
-	respMsg, err = a.makeChatRequest(ctx, reqBody)
-	if err != nil {
-		return "", nil, nil, err
+	if strings.TrimSpace(respMsg.Content) == "" {
+		respMsg.Content = emptyAgentReply
 	}
 
 	// Update sliding window history

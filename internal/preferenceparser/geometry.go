@@ -17,6 +17,16 @@ type PostGISGeometryBuilder struct {
 	Segments int
 }
 
+const DefaultDistrictRadiusMeters = 1500
+
+func IsWholeCityLocation(loc domain.LocationPreference) bool {
+	if radiusMeters(loc) > 0 || loc.Latitude != 0 || loc.Longitude != 0 {
+		return false
+	}
+	_, ok := cities.Find(locationQuery(loc))
+	return ok
+}
+
 func (b PostGISGeometryBuilder) BuildSearchGeometry(ctx context.Context, city cities.City, prefs []domain.LocationPreference) (*domain.GeoSearchArea, error) {
 	segments := b.Segments
 	if segments <= 0 {
@@ -28,11 +38,14 @@ func (b PostGISGeometryBuilder) BuildSearchGeometry(ctx context.Context, city ci
 	for i := range prefs {
 		loc := prefs[i]
 		radius := radiusMeters(loc)
-		if radius <= 0 {
-			if loc.Type == "area" && strings.TrimSpace(loc.CenterName) != "" {
-				unresolved = append(unresolved, "area requires polygon resolution: "+loc.CenterName)
-			}
+		if IsWholeCityLocation(loc) {
 			continue
+		}
+		if radius <= 0 {
+			if locationQuery(loc) == "" && loc.Latitude == 0 && loc.Longitude == 0 {
+				continue
+			}
+			radius = DefaultDistrictRadiusMeters
 		}
 		lat, lng, err := b.resolveCenter(ctx, city, loc)
 		if err != nil {

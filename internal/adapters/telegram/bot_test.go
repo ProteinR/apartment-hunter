@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"apartment-hunter/internal/adapters/googlemaps"
 	"apartment-hunter/internal/adapters/mcpagent"
@@ -15,6 +16,7 @@ import (
 	"apartment-hunter/internal/domain"
 	"apartment-hunter/internal/preferenceparser"
 	"apartment-hunter/internal/profiles"
+	"apartment-hunter/internal/sources"
 
 	"github.com/go-telegram/bot/models"
 )
@@ -280,7 +282,7 @@ func TestHandleTextParsesPreviewsAndSavesPreferences(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(reply, "Готово, фильтры сохранены.") ||
-		!strings.Contains(reply, "Теперь нужны источники объявлений.") ||
+		!strings.Contains(reply, "Теперь нужны источники объявлений") ||
 		!strings.Contains(reply, "не вступаю в чаты автоматически") {
 		t.Fatalf("unexpected save reply %q", reply)
 	}
@@ -466,8 +468,8 @@ func TestMCPMessageMentioningAnotherCityKeepsStoredCity(t *testing.T) {
 	if saved.City != cities.Batumi.Key || len(saved.LocationPreferences) != 1 {
 		t.Fatalf("expected Batumi with its locations, got %+v", saved)
 	}
-	if len(builtCities) != 1 || builtCities[0] != cities.Batumi.Key {
-		t.Fatalf("expected Batumi geometry, got %+v", builtCities)
+	if len(builtCities) != 0 || store.searchProfiles[len(store.searchProfiles)-1].SearchArea != nil {
+		t.Fatalf("expected the stored Batumi area to be kept without a rebuild, got %+v", builtCities)
 	}
 }
 
@@ -536,8 +538,8 @@ func TestMCPExplicitBatumiForLegacyProfileIsNotASwitch(t *testing.T) {
 	if saved.City != cities.Batumi.Key || len(saved.LocationPreferences) != 1 || strings.Contains(response.Text, "Город поиска") {
 		t.Fatalf("expected unchanged Batumi search, got %+v %q", saved, response.Text)
 	}
-	if len(builtCities) != 1 || builtCities[0] != cities.Batumi.Key {
-		t.Fatalf("expected Batumi geometry, got %+v", builtCities)
+	if len(builtCities) != 0 || store.searchProfiles[len(store.searchProfiles)-1].SearchArea != nil {
+		t.Fatalf("expected the stored Batumi area to be kept without a rebuild, got %+v", builtCities)
 	}
 }
 
@@ -558,6 +560,26 @@ func TestMCPCitySwitchWithNewLocationsBuildsNewCityGeometry(t *testing.T) {
 	}
 	if len(builtCities) != 1 || builtCities[0] != cities.Tbilisi.Key {
 		t.Fatalf("expected Tbilisi geometry, got %+v", builtCities)
+	}
+}
+
+func TestMCPRemovingLocationsClearsSearchArea(t *testing.T) {
+	store := newFakeProfileStore()
+	profile := batumiMCPProfile(48)
+	store.profiles[profile.ID] = profile
+	newScriptedAgentServer(t, `{"location_preferences":[]}`)
+	bot := New("test-token", t.TempDir(), WithProfileStore(store), WithMCPAgent(mcpagent.New("test-key", store)), WithGeometryBuilder(preferenceparser.PostGISGeometryBuilder{}))
+
+	if _, err := bot.handleTextResponse(48, "Убери ограничение по району"); err != nil {
+		t.Fatal(err)
+	}
+	saved := store.profiles[profile.ID].Preferences
+	if len(saved.LocationPreferences) != 0 || saved.HasSearchArea {
+		t.Fatalf("expected no locations and no area flag, got %+v", saved)
+	}
+	last := store.searchProfiles[len(store.searchProfiles)-1]
+	if last.SearchArea == nil || last.SearchArea.WKT != "" {
+		t.Fatalf("expected an explicitly empty search area, got %+v", last.SearchArea)
 	}
 }
 
@@ -1086,5 +1108,168 @@ func TestAllowedChatsFilter(t *testing.T) {
 		if session == nil || session.State != "awaiting_query" {
 			t.Fatalf("expected session to be created for allowed username, got: %v", session)
 		}
+	}
+}
+
+func TestPreferencesSessionTakesPriorityOverMCPMode(t *testing.T) {
+	store := newFakeProfileStore()
+	profile := batumiMCPProfile(49)
+	store.profiles[profile.ID] = profile
+	agentCalls := 0
+	agentServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		agentCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Агент ответил."}}]}`))
+	}))
+	defer agentServer.Close()
+	t.Setenv("OPENAI_BASE_URL", agentServer.URL)
+	parser := preferenceparser.Service{
+		Normalizer: fakeNormalizer{normalized: "До 700 USD"},
+		Extractor:  fakeExtractor{prefs: domain.UserPreferences{BudgetMax: intPtr(700)}},
+	}
+	bot := New("test-token", t.TempDir(), WithProfileStore(store), WithPreferencesParser(parser), WithMCPAgent(mcpagent.New("test-key", store)))
+
+	if _, err := bot.HandleText(49, "/preferences"); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := bot.HandleText(49, "До 700$")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agentCalls != 0 || !strings.Contains(reply, "Сохранить?") {
+		t.Fatalf("expected the preferences preview instead of the agent, got %d agent calls and %q", agentCalls, reply)
+	}
+	if reply, err = bot.HandleText(49, "Сохранить"); err != nil || !strings.Contains(reply, "Готово, фильтры сохранены.") {
+		t.Fatalf("expected save confirmation, got %q %v", reply, err)
+	}
+	if reply, err = bot.HandleText(49, "Что у меня в фильтрах?"); err != nil || reply != "Агент ответил." || agentCalls != 1 {
+		t.Fatalf("expected the agent after the session ends, got %q %v", reply, err)
+	}
+}
+
+type fakeChannelAccess map[string]sources.ChannelAccess
+
+func (f fakeChannelAccess) ChannelAccess(ctx context.Context, username string) (sources.ChannelAccess, error) {
+	return f[username], nil
+}
+
+func TestSubscriptionReportsChannelAccess(t *testing.T) {
+	store := newFakeProfileStore()
+	checker := fakeChannelAccess{
+		"joined_rent":  {Found: true, Title: "Joined Rent", Member: true},
+		"foreign_rent": {Found: true, Title: "Foreign Rent"},
+	}
+	bot := New("test-token", t.TempDir(), WithProfileStore(store), WithChannelAccessChecker(checker))
+
+	reply, err := bot.HandleText(42, "@joined_rent @foreign_rent @missing_rent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"Добавлен @joined_rent\n",
+		"Добавлен @foreign_rent. Аккаунт-читатель владельца бота не состоит в этом чате",
+		"Не нашел публичный канал или группу @missing_rent",
+	} {
+		if !strings.Contains(reply, expected) {
+			t.Fatalf("expected %q in reply:\n%s", expected, reply)
+		}
+	}
+	profile, _, _ := store.GetProfile(context.Background(), "telegram_42")
+	if len(profile.Channels) != 2 || profile.Channels[0].Source.Title != "Joined Rent" {
+		t.Fatalf("expected two subscriptions with resolved titles, got %+v", profile.Channels)
+	}
+}
+
+func TestMarkdownToHTMLKeepsUsernamesURLsAndBullets(t *testing.T) {
+	cases := map[string]string{
+		"Добавлен @definitely_not_a_real_channel_xyz123":                       "Добавлен @definitely_not_a_real_channel_xyz123",
+		"https://t.me/rent_channel_one и @another_rent_channel":                "https://t.me/rent_channel_one и @another_rent_channel",
+		"Районы:\n* Ваке\n* Сабуртало\n":                                       "Районы:\n* Ваке\n* Сабуртало\n",
+		"**Бюджет**: до *700* $ и _важно_":                                     "<b>Бюджет</b>: до <i>700</i> $ и <i>важно</i>",
+		"snake_case_name и a < b":                                              "snake_case_name и a &lt; b",
+		"`code_with_underscores` [сайт](https://geojson.io/#map=13/41.7/44.8)": "<code>code_with_underscores</code> <a href=\"https://geojson.io/#map=13/41.7/44.8\">сайт</a>",
+		"```json\n{\"a_b\": 1}\n```":                                           "<pre>{&#34;a_b&#34;: 1}\n</pre>",
+		"## Итог":                                                              "<b>Итог</b>",
+	}
+	for input, want := range cases {
+		if got := markdownToHTML(input); got != want {
+			t.Errorf("markdownToHTML(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestMCPEditRebuildsLegacyLocationsWithoutStoredArea(t *testing.T) {
+	store := newFakeProfileStore()
+	profile := batumiMCPProfile(50)
+	profile.Preferences.HasSearchArea = false
+	store.profiles[profile.ID] = profile
+	newScriptedAgentServer(t, `{"budget_max":800}`)
+	var builtCities []string
+	bot := New("test-token", t.TempDir(), WithProfileStore(store), WithMCPAgent(mcpagent.New("test-key", store)), WithGeometryBuilder(fakeGeometryBuilder{geoJSON: testSearchAreaGeoJSON, cities: &builtCities}))
+
+	if _, err := bot.handleTextResponse(50, "Бюджет до 800$"); err != nil {
+		t.Fatal(err)
+	}
+	if len(builtCities) != 1 || !store.profiles[profile.ID].Preferences.HasSearchArea {
+		t.Fatalf("expected the missing zone to be built, got %+v", builtCities)
+	}
+}
+
+func TestMCPEditKeepsHandDrawnAreaWithoutLocations(t *testing.T) {
+	store := newFakeProfileStore()
+	profile := batumiMCPProfile(51)
+	profile.Preferences.LocationPreferences = nil
+	store.profiles[profile.ID] = profile
+	newScriptedAgentServer(t, `{"budget_max":800,"location_preferences":[]}`)
+	var builtCities []string
+	bot := New("test-token", t.TempDir(), WithProfileStore(store), WithMCPAgent(mcpagent.New("test-key", store)), WithGeometryBuilder(fakeGeometryBuilder{geoJSON: testSearchAreaGeoJSON, cities: &builtCities}))
+
+	if _, err := bot.handleTextResponse(51, "Бюджет до 800$"); err != nil {
+		t.Fatal(err)
+	}
+	if len(builtCities) != 0 || store.searchProfiles[len(store.searchProfiles)-1].SearchArea != nil {
+		t.Fatalf("expected the hand-drawn area to be inherited, got %+v", builtCities)
+	}
+}
+
+func TestExpiredPreferenceSessionIsDropped(t *testing.T) {
+	bot := New("test-token", t.TempDir(), WithProfileStore(newFakeProfileStore()))
+	bot.setSession(52, &preferenceSession{State: "awaiting_query"})
+	bot.sessions[52].StartedAt = time.Now().Add(-preferenceSessionTTL - time.Minute)
+	if bot.getSession(52) != nil {
+		t.Fatal("expected an expired session to be dropped")
+	}
+}
+
+func TestMCPEditWithEchoedLocationsKeepsStoredArea(t *testing.T) {
+	store := newFakeProfileStore()
+	profile := batumiMCPProfile(53)
+	store.profiles[profile.ID] = profile
+	newScriptedAgentServer(t, `{"stop_words":["студия"],"location_preferences":[{"name":"Парк 6 мая","type":null,"center_name":"6 May Park","radius_meters":1000,"boundary_street_name":null,"boundary_rule":null,"geometry_wkt":null,"google_place_id":null,"confidence":0.7,"raw_text":"около парка","unresolved_rules":[]}]}`)
+	var builtCities []string
+	bot := New("test-token", t.TempDir(), WithProfileStore(store), WithMCPAgent(mcpagent.New("test-key", store)), WithGeometryBuilder(fakeGeometryBuilder{geoJSON: testSearchAreaGeoJSON, cities: &builtCities}))
+
+	if _, err := bot.handleTextResponse(53, "Добавь стоп-слово студия"); err != nil {
+		t.Fatal(err)
+	}
+	if len(builtCities) != 0 || store.searchProfiles[len(store.searchProfiles)-1].SearchArea != nil {
+		t.Fatalf("expected the stored area to be kept, got %+v", builtCities)
+	}
+}
+
+func TestStartInMCPModeKeepsAgentRouting(t *testing.T) {
+	store := newFakeProfileStore()
+	profile := batumiMCPProfile(54)
+	store.profiles[profile.ID] = profile
+	bot := New("test-token", t.TempDir(), WithProfileStore(store))
+
+	if _, err := bot.HandleText(54, "/start"); err != nil {
+		t.Fatal(err)
+	}
+	if bot.getSession(54) != nil {
+		t.Fatal("expected /start in MCP mode not to open a preferences session")
+	}
+	if _, err := bot.HandleText(54, "/preferences"); err != nil || bot.getSession(54) == nil {
+		t.Fatalf("expected /preferences to open a session, got %v", err)
 	}
 }

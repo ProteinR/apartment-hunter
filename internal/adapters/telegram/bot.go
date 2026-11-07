@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +39,11 @@ type Bot struct {
 	allowedChats     []int64
 	allowedUsernames []string
 	defaultCity      cities.City
+	channelAccess    ChannelAccessChecker
+}
+
+type ChannelAccessChecker interface {
+	ChannelAccess(ctx context.Context, username string) (sources.ChannelAccess, error)
 }
 
 type ProfileStore interface {
@@ -49,6 +56,7 @@ type ProfileStore interface {
 }
 
 type preferenceSession struct {
+	StartedAt  time.Time
 	State      string
 	Draft      preferenceparser.Draft
 	SearchArea *domain.GeoSearchArea
@@ -101,6 +109,12 @@ func WithAllowedChats(ids []int64) Option {
 func WithAllowedUsernames(usernames []string) Option {
 	return func(bot *Bot) {
 		bot.allowedUsernames = usernames
+	}
+}
+
+func WithChannelAccessChecker(checker ChannelAccessChecker) Option {
+	return func(bot *Bot) {
+		bot.channelAccess = checker
 	}
 }
 
@@ -255,6 +269,7 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 		return textResponse{Text: reply, ReplyMarkup: mainCommandKeyboard()}, err
 	}
 	if strings.HasPrefix(text, "/mcp") {
+		b.deleteSession(chatID)
 		reply, err := b.mcpMode(context.Background(), chatID, text)
 		return textResponse{Text: reply, ReplyMarkup: mainCommandKeyboard()}, err
 	}
@@ -278,12 +293,15 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 		return textResponse{Text: reply, ReplyMarkup: mainCommandKeyboard()}, err
 	}
 	if text == "/start" || text == "/preferences" || text == "/restart" {
-		b.setSession(chatID, &preferenceSession{State: "awaiting_query"})
+		if text != "/start" || !b.mcpModeEnabled(chatID) {
+			b.setSession(chatID, &preferenceSession{State: "awaiting_query"})
+		}
 		return textResponse{Text: preferencesStartMessage, ReplyMarkup: mainCommandKeyboard()}, nil
 	}
 
+	session := b.getSession(chatID)
 	profile, ok, err := b.store.GetProfile(context.Background(), profiles.IDForTelegramChat(chatID))
-	if err == nil && ok && profiles.MCPModeEnabled(profile) {
+	if session == nil && err == nil && ok && profiles.MCPModeEnabled(profile) {
 		if b.mcpAgent == nil {
 			return textResponse{Text: "Агент MCP не настроен."}, nil
 		}
@@ -300,6 +318,10 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 				draft.Preferences = *profile.Preferences
 			}
 			cityNote, area := b.applyAgentCityChange(profile, &draft, areaChanged)
+			area, err = b.agentSearchArea(context.Background(), profile, &draft, area)
+			if err != nil {
+				return textResponse{Text: "Ошибка построения зоны поиска: " + err.Error()}, nil
+			}
 			if err := b.saveDraft(context.Background(), chatID, draft, area); err != nil {
 				return textResponse{Text: "Ошибка сохранения новых фильтров: " + err.Error()}, nil
 			}
@@ -324,7 +346,6 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 		return resp, nil
 	}
 
-	session := b.getSession(chatID)
 	if session == nil {
 		return textResponse{Text: "Выберите команду кнопкой ниже или отправьте /preferences, чтобы настроить поиск квартиры.", ReplyMarkup: mainCommandKeyboard()}, nil
 	}
@@ -354,6 +375,7 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 				return textResponse{Text: "Не смог разобрать GeoJSON: " + err.Error() + "\n\n" + searchAreaEditInstructions(b.cityOf(session.Draft.Preferences)), ReplyMarkup: confirmationKeyboard()}, nil
 			}
 			session.SearchArea = area
+			session.Draft.Preferences.HasSearchArea = true
 			b.setSession(chatID, session)
 			return b.preferencesPreviewResponse(context.Background(), session.Draft, session.SearchArea), nil
 		}
@@ -391,7 +413,9 @@ func (b *Bot) afterPreferencesSavedMessage(ctx context.Context, chatID int64) (s
 	var lines []string
 	lines = append(lines, "Готово, фильтры сохранены.")
 	lines = append(lines, "")
-	lines = append(lines, "Теперь нужны источники объявлений. Я не вступаю в чаты автоматически: вступи в подходящие Telegram-чаты/группы вручную со своего аккаунта, а сюда пришли public ссылки или usernames.")
+	lines = append(lines, "Теперь нужны источники объявлений: публичные Telegram-каналы и группы с арендой. Пришли сюда ссылки t.me/name или @username.")
+	lines = append(lines, "")
+	lines = append(lines, readerAccountNote)
 	lines = append(lines, "")
 	if len(channels) > 0 {
 		lines = append(lines, "Уже подключены:")
@@ -414,7 +438,7 @@ func (b *Bot) listChannels(ctx context.Context, chatID int64) (string, error) {
 		return "", err
 	}
 	if len(channels) == 0 {
-		return "Источники пока не подключены.\n\nВступи вручную в подходящие Telegram-чаты/группы, затем пришли сюда public ссылки или usernames, например:\nhttps://t.me/rent_channel\n@another_rent_channel\n\nАвтоматически вступать в чаты я не буду.", nil
+		return "Источники пока не подключены.\n\nПришли публичные ссылки или usernames Telegram-каналов и групп с объявлениями, например:\nhttps://t.me/rent_channel\n@another_rent_channel\n\n" + readerAccountNote, nil
 	}
 	lines := []string{"Подключенные источники:"}
 	lines = append(lines, channels...)
@@ -507,12 +531,29 @@ func (b *Bot) subscribeChannelsFromText(ctx context.Context, chatID int64, text 
 		added = append(added, reply)
 	}
 	lines := append([]string{"Источники обновлены:"}, added...)
-	lines = append(lines, "", "Важно: я не вступаю в чаты автоматически. Убедись, что аккаунт, которым запущен worker, уже вступил в эти чаты/группы.", "Список источников: /channels")
+	lines = append(lines, "", readerAccountNote, "Список источников: /channels")
 	return strings.Join(lines, "\n"), nil
 }
 
 func (b *Bot) upsertChannel(ctx context.Context, chatID int64, username, title string) (string, error) {
 	username = strings.TrimPrefix(strings.TrimSpace(username), "@")
+	accessNote := ""
+	if b.channelAccess != nil {
+		checkCtx, cancel := context.WithTimeout(ctx, channelAccessTimeout)
+		access, err := b.channelAccess.ChannelAccess(checkCtx, username)
+		cancel()
+		switch {
+		case err != nil:
+			accessNote = ". Не смог проверить доступ к этому чату, проверю позже при чтении."
+		case !access.Found:
+			return "Не нашел публичный канал или группу @" + username + ". Проверь username.", nil
+		case !access.Member:
+			accessNote = ". Аккаунт-читатель владельца бота не состоит в этом чате, поэтому новые объявления оттуда не придут, пока владелец бота в него не вступит."
+		}
+		if err == nil && title == "" {
+			title = access.Title
+		}
+	}
 	profileID := profiles.IDForTelegramChat(chatID)
 	if err := b.store.UpsertProfile(ctx, profiles.Profile{ID: profileID, TelegramChatID: chatID}); err != nil {
 		return "", err
@@ -529,9 +570,9 @@ func (b *Bot) upsertChannel(ctx context.Context, chatID int64, username, title s
 		return "", err
 	}
 	if added {
-		return "Добавлен @" + username, nil
+		return "Добавлен @" + username + accessNote, nil
 	}
-	return "Обновлен @" + username, nil
+	return "Обновлен @" + username + accessNote, nil
 }
 
 func (b *Bot) unsubscribeChannel(ctx context.Context, chatID int64, text string) (string, error) {
@@ -692,7 +733,11 @@ func (b *Bot) saveReplyFeedback(ctx context.Context, message *models.Message) (s
 				draft.Preferences = *profile.Preferences
 			}
 			draft.Preferences.City = b.storedCity(profile).Key
-			if draftErr := b.saveDraft(ctx, message.Chat.ID, draft, areaChanged); draftErr != nil {
+			area, areaErr := b.agentSearchArea(ctx, profile, &draft, areaChanged)
+			if areaErr != nil {
+				return "Отзыв сохранен, но ошибка построения зоны поиска: " + areaErr.Error(), true, nil
+			}
+			if draftErr := b.saveDraft(ctx, message.Chat.ID, draft, area); draftErr != nil {
 				return "Отзыв сохранен, но ошибка применения фильтров: " + draftErr.Error(), true, nil
 			}
 		}
@@ -708,6 +753,13 @@ func debugModeStatusMessage(enabled bool) string {
 	}
 	return "Debug mode: off\n\nЯ пересылаю только объявления, которые прошли фильтры. Включить все отчеты: /debug on"
 }
+
+const (
+	channelAccessTimeout = 10 * time.Second
+	preferenceSessionTTL = 30 * time.Minute
+)
+
+const readerAccountNote = "Объявления читает аккаунт-читатель владельца бота, а я не вступаю в чаты автоматически. Новые объявления приходят только из чатов, где этот аккаунт состоит; если его там нет, я предупрежу при подключении."
 
 func mcpModeStatusMessage(enabled bool) string {
 	if enabled {
@@ -789,7 +841,7 @@ func cleanTelegramUsername(username string) (string, bool) {
 }
 
 func unsupportedChannelRefMessage(value string) string {
-	return "Пока я могу подключать только public Telegram-источники по @username или t.me/name.\n\nЕсли это invite-ссылка вида t.me/+..., вступи вручную, но для чтения мне все равно нужен public username канала/группы. Автоматическое вступление не выполняю."
+	return "Пока я могу подключать только public Telegram-источники по @username или t.me/name.\n\nПриватные чаты по invite-ссылкам вида t.me/+... не поддерживаются: нужен публичный @username канала или группы. Автоматическое вступление не выполняю."
 }
 
 func (b *Bot) prepareDraftGeometry(ctx context.Context, draft *preferenceparser.Draft) (*domain.GeoSearchArea, error) {
@@ -801,12 +853,19 @@ func (b *Bot) prepareDraftGeometry(ctx context.Context, draft *preferenceparser.
 		return nil, err
 	}
 	if area != nil {
-		draft.Preferences.UnresolvedLocationRules = append(draft.Preferences.UnresolvedLocationRules, area.UnresolvedRules...)
-		if strings.TrimSpace(area.GeoJSON) != "" {
-			draft.Preferences.HasSearchArea = true
-		}
+		draft.Preferences.UnresolvedLocationRules = appendMissing(draft.Preferences.UnresolvedLocationRules, area.UnresolvedRules...)
+		draft.Preferences.HasSearchArea = strings.TrimSpace(area.GeoJSON) != ""
 	}
 	return area, nil
+}
+
+func appendMissing(values []string, additions ...string) []string {
+	for _, addition := range additions {
+		if !slices.Contains(values, addition) {
+			values = append(values, addition)
+		}
+	}
+	return values
 }
 
 func (b *Bot) preferencesPreviewResponse(ctx context.Context, draft preferenceparser.Draft, area *domain.GeoSearchArea) textResponse {
@@ -860,13 +919,6 @@ func (b *Bot) saveDraft(ctx context.Context, chatID int64, draft preferenceparse
 	if _, ok := cities.Find(draft.Preferences.City); !ok {
 		draft.Preferences.City = b.profileCity(ctx, chatID).Key
 	}
-	if area == nil && b.geometry != nil {
-		built, err := b.prepareDraftGeometry(ctx, &draft)
-		if err != nil {
-			return err
-		}
-		area = built
-	}
 	if err := b.store.SaveSearchProfile(ctx, domain.UserSearchProfile{
 		UserID:          userID,
 		RawQuery:        draft.RawQuery,
@@ -877,6 +929,60 @@ func (b *Bot) saveDraft(ctx context.Context, chatID int64, draft preferenceparse
 		return err
 	}
 	return b.saveProfile(ctx, chatID, draft.Preferences)
+}
+
+func (b *Bot) agentSearchArea(ctx context.Context, before profiles.Profile, draft *preferenceparser.Draft, area *domain.GeoSearchArea) (*domain.GeoSearchArea, error) {
+	if area != nil || b.geometry == nil || b.keepsSearchLocations(before.Preferences, draft.Preferences) {
+		return area, nil
+	}
+	return b.prepareDraftGeometry(ctx, draft)
+}
+
+func (b *Bot) keepsSearchLocations(stored *domain.UserPreferences, next domain.UserPreferences) bool {
+	if stored == nil || b.cityOf(*stored).Key != b.cityOf(next).Key {
+		return false
+	}
+	storedKeys := locationGeometryKeys(preferenceparser.NormalizePreferences(*stored).LocationPreferences)
+	nextKeys := locationGeometryKeys(next.LocationPreferences)
+	if len(storedKeys) == 0 && len(nextKeys) == 0 {
+		return true
+	}
+	return stored.HasSearchArea && slices.Equal(storedKeys, nextKeys)
+}
+
+func locationGeometryKeys(locations []domain.LocationPreference) []string {
+	keys := make([]string, 0, len(locations))
+	for _, location := range locations {
+		radius := location.MaxDistanceMeters
+		if location.RadiusMeters != nil {
+			radius = *location.RadiusMeters
+		}
+		coordinates := ""
+		if location.Latitude != 0 || location.Longitude != 0 {
+			coordinates = fmt.Sprintf("%.5f,%.5f", location.Latitude, location.Longitude)
+		}
+		keys = append(keys, strings.Join([]string{
+			normalizedText(location.Name),
+			normalizedText(location.CenterName),
+			normalizedText(location.Type),
+			strconv.Itoa(radius),
+			normalizedText(stringOrEmpty(location.BoundaryStreetName)),
+			normalizedText(stringOrEmpty(location.BoundaryRule)),
+			coordinates,
+		}, "|"))
+	}
+	return keys
+}
+
+func normalizedText(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func stringOrEmpty(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func (b *Bot) cityOf(prefs domain.UserPreferences) cities.City {
@@ -1001,15 +1107,26 @@ func (b *Bot) cityCommand(ctx context.Context, chatID int64, text string) (strin
 	return fmt.Sprintf("Город поиска: %s. Районы и зона поиска от прошлого города сброшены, сейчас подходят объявления из любого района. Чтобы задать районы, отправь /preferences с описанием поиска.", city.DisplayName), nil
 }
 
+func (b *Bot) mcpModeEnabled(chatID int64) bool {
+	profile, ok, err := b.store.GetProfile(context.Background(), profiles.IDForTelegramChat(chatID))
+	return err == nil && ok && profiles.MCPModeEnabled(profile)
+}
+
 func (b *Bot) getSession(chatID int64) *preferenceSession {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.sessions[chatID]
+	session := b.sessions[chatID]
+	if session != nil && time.Since(session.StartedAt) > preferenceSessionTTL {
+		delete(b.sessions, chatID)
+		return nil
+	}
+	return session
 }
 
 func (b *Bot) setSession(chatID int64, session *preferenceSession) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	session.StartedAt = time.Now()
 	b.sessions[chatID] = session
 }
 
@@ -1179,57 +1296,91 @@ func SendPhotoBytesMessageID(ctx context.Context, token string, chatID int64, fi
 	return message.ID, nil
 }
 
+var (
+	markdownPreBlock    = regexp.MustCompile("(?s)```[a-zA-Z0-9]*\n?(.*?)```")
+	markdownInlineCode  = regexp.MustCompile("`([^`\n]+)`")
+	markdownStarBold    = regexp.MustCompile(`\*\*([^*\n]+)\*\*`)
+	markdownStarItalic  = regexp.MustCompile(`(^|[^\p{L}\p{N}_*])\*([^\s*][^*\n]*?)\*($|[^\p{L}\p{N}_*])`)
+	markdownUnderBold   = regexp.MustCompile(`(^|[^\p{L}\p{N}_])__([^_\n]+)__($|[^\p{L}\p{N}_])`)
+	markdownUnderItalic = regexp.MustCompile(`(^|[^\p{L}\p{N}_])_([^\s_][^_\n]*?)_($|[^\p{L}\p{N}_])`)
+	markdownLink        = regexp.MustCompile(`\[([^\]\n]+)\]\(([^)\s]+)\)`)
+	markdownURL         = regexp.MustCompile(`https?://[^\s<>"]+`)
+	markdownMention     = regexp.MustCompile(`@\w+`)
+	markdownPlaceholder = regexp.MustCompile("\x00(\\d+)\x00")
+)
+
+var markdownFormattingTag = regexp.MustCompile(`</?[bi]>`)
+
+func wellNestedTags(text string) bool {
+	var open []string
+	for _, tag := range markdownFormattingTag.FindAllString(text, -1) {
+		if !strings.HasPrefix(tag, "</") {
+			open = append(open, tag[1:2])
+			continue
+		}
+		if len(open) == 0 || open[len(open)-1] != tag[2:3] {
+			return false
+		}
+		open = open[:len(open)-1]
+	}
+	return len(open) == 0
+}
+
+func replaceUntilStable(pattern *regexp.Regexp, text, replacement string) string {
+	for {
+		replaced := pattern.ReplaceAllString(text, replacement)
+		if replaced == text {
+			return text
+		}
+		text = replaced
+	}
+}
+
 func markdownToHTML(md string) string {
-	escaped := html.EscapeString(md)
+	var protected []string
+	protect := func(fragment string) string {
+		protected = append(protected, fragment)
+		return fmt.Sprintf("\x00%d\x00", len(protected)-1)
+	}
 
-	// Block pre code: ```(lang)?\n(content)``` -> <pre>(content)</pre>
-	rePre := regexp.MustCompile("(?s)```[a-zA-Z0-9]*\n?(.*?)```")
-	escaped = rePre.ReplaceAllString(escaped, "<pre>${1}</pre>")
+	escaped := html.EscapeString(strings.ReplaceAll(md, "\x00", ""))
+	escaped = markdownPreBlock.ReplaceAllStringFunc(escaped, func(block string) string {
+		return protect("<pre>" + markdownPreBlock.FindStringSubmatch(block)[1] + "</pre>")
+	})
+	escaped = markdownInlineCode.ReplaceAllStringFunc(escaped, func(code string) string {
+		return protect("<code>" + markdownInlineCode.FindStringSubmatch(code)[1] + "</code>")
+	})
+	escaped = markdownLink.ReplaceAllStringFunc(escaped, func(link string) string {
+		parts := markdownLink.FindStringSubmatch(link)
+		return protect(`<a href="` + parts[2] + `">` + parts[1] + `</a>`)
+	})
+	escaped = markdownURL.ReplaceAllStringFunc(escaped, protect)
+	escaped = markdownMention.ReplaceAllStringFunc(escaped, protect)
 
-	// Inline code: `code` -> <code>code</code>
-	reCode := regexp.MustCompile("`([^`\n]+)`")
-	escaped = reCode.ReplaceAllString(escaped, "<code>${1}</code>")
+	plain := escaped
+	escaped = markdownStarBold.ReplaceAllString(escaped, "<b>${1}</b>")
+	escaped = replaceUntilStable(markdownUnderBold, escaped, "${1}<b>${2}</b>${3}")
+	escaped = replaceUntilStable(markdownStarItalic, escaped, "${1}<i>${2}</i>${3}")
+	escaped = replaceUntilStable(markdownUnderItalic, escaped, "${1}<i>${2}</i>${3}")
 
-	// Bold: **text** -> <b>text</b>
-	reBold1 := regexp.MustCompile(`\*\*([^\*]+)\*\*`)
-	escaped = reBold1.ReplaceAllString(escaped, "<b>${1}</b>")
-
-	// Bold: __text__ -> <b>text</b>
-	reBold2 := regexp.MustCompile(`__([^_]+)__`)
-	escaped = reBold2.ReplaceAllString(escaped, "<b>${1}</b>")
-
-	// Italic: *text* -> <i>text</i>
-	reItalic1 := regexp.MustCompile(`\*([^\*]+)\*`)
-	escaped = reItalic1.ReplaceAllString(escaped, "<i>${1}</i>")
-
-	// Italic: _text_ -> <i>text</i>
-	reItalic2 := regexp.MustCompile(`_([^_]+)_`)
-	escaped = reItalic2.ReplaceAllString(escaped, "<i>${1}</i>")
-
-	// Links: [text](url) -> <a href="url">text</a>
-	reLink := regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
-	escaped = reLink.ReplaceAllString(escaped, `<a href="${2}">${1}</a>`)
-
-	// Headers: # Header -> <b>Header</b>
 	lines := strings.Split(escaped, "\n")
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "#") {
-			hashes := 0
-			for _, r := range trimmed {
-				if r == '#' {
-					hashes++
-				} else {
-					break
-				}
-			}
-			if hashes > 0 && hashes < len(trimmed) && trimmed[hashes] == ' ' {
-				headerText := strings.TrimSpace(trimmed[hashes:])
-				lines[i] = "<b>" + headerText + "</b>"
-			}
+		hashes := len(trimmed) - len(strings.TrimLeft(trimmed, "#"))
+		if hashes > 0 && hashes < len(trimmed) && trimmed[hashes] == ' ' {
+			lines[i] = "<b>" + strings.TrimSpace(trimmed[hashes:]) + "</b>"
 		}
 	}
 	escaped = strings.Join(lines, "\n")
 
+	if !wellNestedTags(escaped) {
+		escaped = plain
+	}
+	for markdownPlaceholder.MatchString(escaped) {
+		escaped = markdownPlaceholder.ReplaceAllStringFunc(escaped, func(placeholder string) string {
+			index, _ := strconv.Atoi(markdownPlaceholder.FindStringSubmatch(placeholder)[1])
+			return protected[index]
+		})
+	}
 	return escaped
 }
