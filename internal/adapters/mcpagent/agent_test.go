@@ -360,3 +360,31 @@ func TestProcessFeedbackCanGetListingEvaluationReport(t *testing.T) {
 		t.Fatalf("unexpected lookup args: profile=%s chat=%d message=%d", store.gotProfileID, store.gotChatID, store.gotMessageID)
 	}
 }
+
+func TestMergePreferenceUpdateChangesCityOnlyWhenPatchNamesOne(t *testing.T) {
+	existing := domain.UserPreferences{City: "tbilisi", MaxBudget: 800}
+
+	kept, err := mergePreferenceUpdate(&existing, `{"city":null,"budget_max":900}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kept.City != "tbilisi" || kept.MaxBudget != 900 {
+		t.Fatalf("expected Tbilisi kept with new budget, got %+v", kept)
+	}
+
+	switched, err := mergePreferenceUpdate(&existing, `{"city":"batumi"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if switched.City != "batumi" {
+		t.Fatalf("expected Batumi, got %q", switched.City)
+	}
+
+	ignored, err := mergePreferenceUpdate(&existing, `{"city":"kutaisi"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ignored.City != "tbilisi" {
+		t.Fatalf("expected unsupported city to be ignored, got %q", ignored.City)
+	}
+}

@@ -299,9 +299,11 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 			} else if profile.Preferences != nil {
 				draft.Preferences = *profile.Preferences
 			}
-			if err := b.saveDraft(context.Background(), chatID, draft, areaChanged); err != nil {
+			cityNote, area := b.applyAgentCityChange(profile, &draft, areaChanged)
+			if err := b.saveDraft(context.Background(), chatID, draft, area); err != nil {
 				return textResponse{Text: "Ошибка сохранения новых фильтров: " + err.Error()}, nil
 			}
+			reply += cityNote
 		}
 		resp := textResponse{
 			Text:        reply,
@@ -689,6 +691,7 @@ func (b *Bot) saveReplyFeedback(ctx context.Context, message *models.Message) (s
 			} else if profile.Preferences != nil {
 				draft.Preferences = *profile.Preferences
 			}
+			draft.Preferences.City = b.storedCity(profile).Key
 			if draftErr := b.saveDraft(ctx, message.Chat.ID, draft, areaChanged); draftErr != nil {
 				return "Отзыв сохранен, но ошибка применения фильтров: " + draftErr.Error(), true, nil
 			}
@@ -878,6 +881,72 @@ func (b *Bot) saveDraft(ctx context.Context, chatID int64, draft preferenceparse
 
 func (b *Bot) cityOf(prefs domain.UserPreferences) cities.City {
 	return cities.ForKey(prefs.City, b.defaultCity)
+}
+
+func (b *Bot) storedCity(profile profiles.Profile) cities.City {
+	if profile.Preferences == nil {
+		return b.defaultCity
+	}
+	return b.cityOf(*profile.Preferences)
+}
+
+func (b *Bot) applyAgentCityChange(profile profiles.Profile, draft *preferenceparser.Draft, area *domain.GeoSearchArea) (string, *domain.GeoSearchArea) {
+	previous := b.storedCity(profile)
+	if _, ok := cities.Find(draft.Preferences.City); !ok {
+		draft.Preferences.City = previous.Key
+		return "", area
+	}
+	next := b.cityOf(draft.Preferences)
+	if next.Key == previous.Key {
+		return "", area
+	}
+	var previousLocations []domain.LocationPreference
+	if profile.Preferences != nil {
+		previousLocations = profile.Preferences.LocationPreferences
+	}
+	draft.Preferences.UnresolvedLocationRules = nil
+	draft.Preferences.HasSearchArea = false
+	draft.Preferences.LocationPreferences = locationsNotIn(draft.Preferences.LocationPreferences, previousLocations)
+	if len(draft.Preferences.LocationPreferences) > 0 {
+		draft.Preferences.Locations = nil
+		return fmt.Sprintf("\n\nГород поиска: %s.", next.DisplayName), nil
+	}
+	draft.Preferences.LocationPreferences = nil
+	draft.Preferences.Locations = nil
+	return fmt.Sprintf("\n\nГород поиска: %s. Районы и зона поиска от прошлого города сброшены, сейчас подходят объявления из любого района.", next.DisplayName), &domain.GeoSearchArea{SRID: 4326}
+}
+
+func locationsNotIn(locations, previous []domain.LocationPreference) []domain.LocationPreference {
+	previousKeys := map[string]bool{}
+	for _, location := range previous {
+		for _, key := range locationKeys(location) {
+			previousKeys[key] = true
+		}
+	}
+	var fresh []domain.LocationPreference
+	for _, location := range locations {
+		known := false
+		for _, key := range locationKeys(location) {
+			if previousKeys[key] {
+				known = true
+				break
+			}
+		}
+		if !known {
+			fresh = append(fresh, location)
+		}
+	}
+	return fresh
+}
+
+func locationKeys(location domain.LocationPreference) []string {
+	var keys []string
+	for _, value := range []string{location.Name, location.CenterName, location.RawText} {
+		if key := strings.ToLower(strings.TrimSpace(value)); key != "" {
+			keys = append(keys, key)
+		}
+	}
+	return keys
 }
 
 func (b *Bot) profileCity(ctx context.Context, chatID int64) cities.City {

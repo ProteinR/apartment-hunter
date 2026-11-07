@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -411,6 +412,152 @@ func TestMCPMapRequestAttachesSearchAreaImage(t *testing.T) {
 	}
 	if response.PhotoFilename != "search-area-map.png" || string(response.PhotoBytes) != "png-bytes" {
 		t.Fatalf("expected map photo attachment, got filename=%q bytes=%q", response.PhotoFilename, string(response.PhotoBytes))
+	}
+}
+
+func newScriptedAgentServer(t *testing.T, toolArguments string) *httptest.Server {
+	t.Helper()
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		requests++
+		if requests == 1 {
+			arguments, _ := json.Marshal(toolArguments)
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"update_preferences","arguments":` + string(arguments) + `}}]}}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Готово."}}]}`))
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+	return server
+}
+
+func batumiMCPProfile(chatID int64) profiles.Profile {
+	mcpMode := true
+	return profiles.Profile{
+		ID:             profiles.IDForTelegramChat(chatID),
+		TelegramChatID: chatID,
+		MCPMode:        &mcpMode,
+		Preferences: &domain.UserPreferences{
+			MaxBudget: 600,
+			LocationPreferences: []domain.LocationPreference{{
+				Name:         "Парк 6 мая",
+				CenterName:   "6 May Park",
+				RadiusMeters: intPtr(1000),
+			}},
+			HasSearchArea: true,
+		},
+	}
+}
+
+func TestMCPMessageMentioningAnotherCityKeepsStoredCity(t *testing.T) {
+	store := newFakeProfileStore()
+	profile := batumiMCPProfile(43)
+	store.profiles[profile.ID] = profile
+	newScriptedAgentServer(t, `{"budget_max":900,"city":null}`)
+	var builtCities []string
+	bot := New("test-token", t.TempDir(), WithProfileStore(store), WithMCPAgent(mcpagent.New("test-key", store)), WithGeometryBuilder(fakeGeometryBuilder{geoJSON: testSearchAreaGeoJSON, cities: &builtCities}))
+
+	if _, err := bot.handleTextResponse(43, "Бюджет до 900$, в Тбилиси и то дешевле"); err != nil {
+		t.Fatal(err)
+	}
+	saved := store.profiles[profile.ID].Preferences
+	if saved.City != cities.Batumi.Key || len(saved.LocationPreferences) != 1 {
+		t.Fatalf("expected Batumi with its locations, got %+v", saved)
+	}
+	if len(builtCities) != 1 || builtCities[0] != cities.Batumi.Key {
+		t.Fatalf("expected Batumi geometry, got %+v", builtCities)
+	}
+}
+
+func TestMCPCitySwitchClearsPreviousCityLocations(t *testing.T) {
+	store := newFakeProfileStore()
+	profile := batumiMCPProfile(44)
+	store.profiles[profile.ID] = profile
+	newScriptedAgentServer(t, `{"city":"tbilisi"}`)
+	bot := New("test-token", t.TempDir(), WithProfileStore(store), WithMCPAgent(mcpagent.New("test-key", store)), WithGeometryBuilder(fakeGeometryBuilder{geoJSON: testSearchAreaGeoJSON}))
+
+	response, err := bot.handleTextResponse(44, "Теперь ищем в Тбилиси")
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := store.profiles[profile.ID].Preferences
+	if saved.City != cities.Tbilisi.Key || len(saved.LocationPreferences) != 0 || saved.HasSearchArea {
+		t.Fatalf("expected Tbilisi without Batumi locations, got %+v", saved)
+	}
+	last := store.searchProfiles[len(store.searchProfiles)-1]
+	if last.SearchArea == nil || last.SearchArea.WKT != "" {
+		t.Fatalf("expected explicitly empty search area, got %+v", last.SearchArea)
+	}
+	if !strings.Contains(response.Text, "Город поиска: Тбилиси") {
+		t.Fatalf("expected city switch note, got %q", response.Text)
+	}
+}
+
+func TestMCPCitySwitchDropsEchoedPreviousCityLocations(t *testing.T) {
+	store := newFakeProfileStore()
+	profile := batumiMCPProfile(46)
+	store.profiles[profile.ID] = profile
+	newScriptedAgentServer(t, `{"city":"tbilisi","location_preferences":[{"name":"Парк 6 мая","type":"radius","center_name":"6 May Park","radius_meters":1000,"boundary_street_name":null,"boundary_rule":null,"geometry_wkt":null,"google_place_id":null,"confidence":0.8,"raw_text":"","unresolved_rules":[]}]}`)
+	var builtCities []string
+	bot := New("test-token", t.TempDir(), WithProfileStore(store), WithMCPAgent(mcpagent.New("test-key", store)), WithGeometryBuilder(fakeGeometryBuilder{geoJSON: testSearchAreaGeoJSON, cities: &builtCities}))
+
+	response, err := bot.handleTextResponse(46, "Теперь ищем в Тбилиси")
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := store.profiles[profile.ID].Preferences
+	if saved.City != cities.Tbilisi.Key || len(saved.LocationPreferences) != 0 {
+		t.Fatalf("expected echoed Batumi locations to be dropped, got %+v", saved)
+	}
+	if len(builtCities) != 0 {
+		t.Fatalf("expected no geometry build for dropped locations, got %+v", builtCities)
+	}
+	last := store.searchProfiles[len(store.searchProfiles)-1]
+	if last.SearchArea == nil || last.SearchArea.WKT != "" || !strings.Contains(response.Text, "сброшены") {
+		t.Fatalf("expected reset area and note, got %+v %q", last.SearchArea, response.Text)
+	}
+}
+
+func TestMCPExplicitBatumiForLegacyProfileIsNotASwitch(t *testing.T) {
+	store := newFakeProfileStore()
+	profile := batumiMCPProfile(47)
+	store.profiles[profile.ID] = profile
+	newScriptedAgentServer(t, `{"city":"batumi","budget_max":700}`)
+	var builtCities []string
+	bot := New("test-token", t.TempDir(), WithProfileStore(store), WithMCPAgent(mcpagent.New("test-key", store)), WithGeometryBuilder(fakeGeometryBuilder{geoJSON: testSearchAreaGeoJSON, cities: &builtCities}))
+
+	response, err := bot.handleTextResponse(47, "Бюджет до 700$")
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := store.profiles[profile.ID].Preferences
+	if saved.City != cities.Batumi.Key || len(saved.LocationPreferences) != 1 || strings.Contains(response.Text, "Город поиска") {
+		t.Fatalf("expected unchanged Batumi search, got %+v %q", saved, response.Text)
+	}
+	if len(builtCities) != 1 || builtCities[0] != cities.Batumi.Key {
+		t.Fatalf("expected Batumi geometry, got %+v", builtCities)
+	}
+}
+
+func TestMCPCitySwitchWithNewLocationsBuildsNewCityGeometry(t *testing.T) {
+	store := newFakeProfileStore()
+	profile := batumiMCPProfile(45)
+	store.profiles[profile.ID] = profile
+	newScriptedAgentServer(t, `{"city":"tbilisi","location_preferences":[{"name":"Ваке","type":"radius","center_name":"Vake Park","radius_meters":1500,"boundary_street_name":null,"boundary_rule":null,"geometry_wkt":null,"google_place_id":null,"confidence":0.8,"raw_text":"Ваке","unresolved_rules":[]}]}`)
+	var builtCities []string
+	bot := New("test-token", t.TempDir(), WithProfileStore(store), WithMCPAgent(mcpagent.New("test-key", store)), WithGeometryBuilder(fakeGeometryBuilder{geoJSON: testSearchAreaGeoJSON, cities: &builtCities}))
+
+	if _, err := bot.handleTextResponse(45, "Ищем в Тбилиси, район Ваке"); err != nil {
+		t.Fatal(err)
+	}
+	saved := store.profiles[profile.ID].Preferences
+	if saved.City != cities.Tbilisi.Key || len(saved.LocationPreferences) != 1 || saved.LocationPreferences[0].CenterName != "Vake Park" {
+		t.Fatalf("expected Tbilisi with Vake location, got %+v", saved)
+	}
+	if len(builtCities) != 1 || builtCities[0] != cities.Tbilisi.Key {
+		t.Fatalf("expected Tbilisi geometry, got %+v", builtCities)
 	}
 }
 

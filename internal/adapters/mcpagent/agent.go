@@ -180,8 +180,9 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 4. Включать/выключать фильтрацию с помощью set_filtering_status.
 5. Работать с географией: находить координаты по адресу (resolve_address), вычислять расстояние в метрах (calculate_distance) и обновлять зону поиска напрямую с помощью GeoJSON (update_search_area).
 6. Управлять списком стоп-слов в поле stop_words (добавлять или удалять слова, по которым нужно отсеивать объявления о квартирах).
-7. Просматривать публичные Telegram-каналы и группы, доступные аккаунту userbot, с помощью list_available_telegram_chats, чтобы предложить релевантные источники для отслеживания. Предлагай только те варианты, которые выглядят связанными с арендой, недвижимостью в городе поиска пользователя (поле city в Preferences: batumi — Батуми, tbilisi — Тбилиси; если пусто — Батуми), apartment/rent/real estate. Если подходящих мало или нет, так и скажи. Город поиска меняется командой /city, например /city tbilisi.
+7. Просматривать публичные Telegram-каналы и группы, доступные аккаунту userbot, с помощью list_available_telegram_chats, чтобы предложить релевантные источники для отслеживания. Предлагай только те варианты, которые выглядят связанными с арендой, недвижимостью в городе поиска пользователя, apartment/rent/real estate. Если подходящих мало или нет, так и скажи.
 8. Получать полный отчет по конкретному объявлению из локальной базы с помощью get_listing_evaluation_report, если пользователь спрашивает, почему объявление прошло/не прошло фильтры, или ссылается на сообщение бота.
+9. Город поиска хранится в поле city в Preferences: batumi — Батуми, tbilisi — Тбилиси, пусто — Батуми. Меняй city через update_preferences только когда пользователь явно просит искать в другом городе; во всех остальных вызовах update_preferences передавай текущее значение city или null. При смене города районы и зона поиска прошлого города сбрасываются: в том же вызове передай location_preferences: [] или только районы нового города, которые назвал пользователь, и не вызывай update_search_area — зону нового города можно нарисовать следующим сообщением. Пользователь также может сменить город командой /city tbilisi или /city batumi.
 
 Веди диалог живо, эмпатично и профессионально. Задавай уточняющие вопросы, если пожелания размыты (например, "хочу бабушкин вариант" -> предложи добавить "soviet" в reject_rules).
 
@@ -259,6 +260,11 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 						"address": map[string]any{
 							"type":        "string",
 							"description": "Адрес или название места",
+						},
+						"city": map[string]any{
+							"type":        "string",
+							"enum":        []string{"batumi", "tbilisi"},
+							"description": "Город, в котором искать адрес. Если не указан, используется город поиска пользователя.",
 						},
 					},
 					"required": []string{"address"},
@@ -431,12 +437,13 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 		case "resolve_address":
 			var args struct {
 				Address string `json:"address"`
+				City    string `json:"city"`
 			}
 			json.Unmarshal([]byte(tc.Function.Arguments), &args)
 			if a.geocoder == nil {
 				toolResult = "error: geocoder is not configured"
 			} else {
-				loc, err := a.geocoder.Resolve(ctx, profileSearchCity(profile).QueryWithRegion(args.Address), 0)
+				loc, err := a.geocoder.Resolve(ctx, cities.ForKey(args.City, profileSearchCity(profile)).QueryWithRegion(args.Address), 0)
 				if err != nil {
 					toolResult = "error: " + err.Error()
 				} else if loc.Latitude == 0 && loc.Longitude == 0 {
@@ -613,6 +620,7 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 5. Работать с географией: находить координаты по адресу (resolve_address), вычислять расстояние в метрах (calculate_distance) и обновлять зону поиска напрямую с помощью GeoJSON (update_search_area).
 6. Управлять списком стоп-слов в поле stop_words (добавлять или удалять слова, по которым нужно отсеивать объявления о квартирах).
 7. Получать полный отчет по объявлению из локальной базы с помощью get_listing_evaluation_report, когда пользователь спрашивает, почему объявление прошло или не прошло фильтры. В feedback-контексте для этого уже есть telegram_chat_id и replied_message_id.
+8. Город поиска хранится в поле city в Preferences (batumi или tbilisi, пусто — Батуми). В ответ на отзыв город не меняй: передавай в update_preferences текущее значение city или null. Сменить город пользователь может командой /city.
 
 Веди диалог живо, эмпатично и профессионально. Задавай уточняющие вопросы, если пожелания размыты (например, "хочу бабушкин вариант" -> предложи добавить "soviet" в reject_rules).
 
@@ -691,6 +699,11 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 						"address": map[string]any{
 							"type":        "string",
 							"description": "Адрес или название места",
+						},
+						"city": map[string]any{
+							"type":        "string",
+							"enum":        []string{"batumi", "tbilisi"},
+							"description": "Город, в котором искать адрес. Если не указан, используется город поиска пользователя.",
 						},
 					},
 					"required": []string{"address"},
@@ -847,12 +860,13 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 		case "resolve_address":
 			var args struct {
 				Address string `json:"address"`
+				City    string `json:"city"`
 			}
 			json.Unmarshal([]byte(tc.Function.Arguments), &args)
 			if a.geocoder == nil {
 				toolResult = "error: geocoder is not configured"
 			} else {
-				loc, err := a.geocoder.Resolve(ctx, profileSearchCity(profile).QueryWithRegion(args.Address), 0)
+				loc, err := a.geocoder.Resolve(ctx, cities.ForKey(args.City, profileSearchCity(profile)).QueryWithRegion(args.Address), 0)
 				if err != nil {
 					toolResult = "error: " + err.Error()
 				} else if loc.Latitude == 0 && loc.Longitude == 0 {
@@ -1093,6 +1107,9 @@ func mergePreferenceUpdate(existing *domain.UserPreferences, updateJSON string) 
 	}
 	if hasField(fields, "stop_words") {
 		merged.StopWords = patch.StopWords
+	}
+	if city, ok := cities.Find(patch.City); ok {
+		merged.City = city.Key
 	}
 
 	return preferenceparser.NormalizePreferences(merged), nil

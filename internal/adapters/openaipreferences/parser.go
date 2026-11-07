@@ -190,6 +190,7 @@ If the input is Russian, keep those human-readable text fields in Russian and do
 Use stable English slugs only for machine-readable enum/list fields such as required_amenities, preferred_amenities, interior_preferences.style, interior_preferences.reject, reject_rules, type, and boundary_rule.
 Ambiguous location phrases must be preserved in unresolved_location_rules in the original input language.
 Extract any stop words (words or phrases that should trigger rejection of the listing) mentioned by the user into the stop_words array in their original language.
+Set city to "batumi" or "tbilisi" only when the input names that city explicitly; otherwise use null.
 CRITICAL: Only one location or city is allowed per user. If the input specifies multiple locations, choose the primary one and include only one object in the location_preferences array.`
 
 func normalizationSchema() map[string]any {
@@ -229,11 +230,12 @@ func PreferencesSchema() map[string]any {
 		"type":                 "object",
 		"additionalProperties": false,
 		"required": []string{
-			"budget_min", "budget_max", "area_min", "area_max", "required_amenities",
+			"city", "budget_min", "budget_max", "area_min", "area_max", "required_amenities",
 			"preferred_amenities", "interior_preferences", "reject_rules",
 			"location_preferences", "weights", "unresolved_location_rules", "stop_words",
 		},
 		"properties": map[string]any{
+			"city":                map[string]any{"type": []string{"string", "null"}, "enum": []any{"batumi", "tbilisi", nil}},
 			"budget_min":          nullableInteger(),
 			"budget_max":          nullableInteger(),
 			"area_min":            nullableNumber(),
