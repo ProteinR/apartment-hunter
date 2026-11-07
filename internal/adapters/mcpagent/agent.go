@@ -16,7 +16,6 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 
-	"apartment-hunter/internal/adapters/openaipreferences"
 	"apartment-hunter/internal/cities"
 	"apartment-hunter/internal/domain"
 	"apartment-hunter/internal/preferenceparser"
@@ -26,9 +25,9 @@ import (
 
 const (
 	defaultAnthropicModel = "claude-haiku-5-5"
-	maxAgentToolRounds    = 4
+	maxAgentToolRounds    = 8
 	accountLookupTimeout  = 10 * time.Second
-	emptyAgentReply       = "Не получилось довести действие до конца. Сформулируй просьбу иначе или проверь фильтры командой /preferences."
+	emptyAgentReply       = "Не получилось довести действие до конца. Сформулируй просьбу иначе или спроси «покажи мой поиск», чтобы проверить настройки."
 )
 
 type ProfileStore interface {
@@ -58,6 +57,7 @@ type Agent struct {
 	chatLister TelegramChatLister
 	anthropic  *anthropic.Client
 	effort     string
+	sources    SourceManager
 }
 
 func New(apiKey string, store ProfileStore) *Agent {
@@ -188,439 +188,17 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 	if !ok {
 		return "Профиль не найден", nil, nil, nil
 	}
-
-	var searchAreaJSON any
-	if saStore, ok := a.store.(interface {
-		LatestSearchAreaGeoJSON(ctx context.Context, profileID string) (string, bool, error)
-	}); ok {
-		if geoJSON, ok, err := saStore.LatestSearchAreaGeoJSON(ctx, profileID); err == nil && ok {
-			var parsed any
-			if err := json.Unmarshal([]byte(geoJSON), &parsed); err == nil {
-				searchAreaJSON = parsed
-			} else {
-				searchAreaJSON = geoJSON
-			}
-		}
-	}
-
-	state, err := json.MarshalIndent(map[string]any{
-		"FilterDisabled":   profiles.FilterDisabled(profile),
-		"Preferences":      profile.Preferences,
-		"SearchArea":       searchAreaJSON,
-		"ConnectedSources": profile.Channels,
-	}, "", "  ")
+	state, err := a.conversationState(ctx, profile)
 	if err != nil {
 		return "", nil, nil, err
 	}
-
 	canListChats := a.mayListTelegramChats(ctx, profile)
-	chatSourcesAbility := "Подсказывать, как подключить новый источник: пользователь сам находит публичный Telegram-канал или группу с объявлениями и присылает @username или ссылку t.me/name."
-	chatSourcesNote := ""
-	if canListChats {
-		chatSourcesAbility = "Просматривать публичные Telegram-каналы и группы, доступные аккаунту userbot, с помощью list_available_telegram_chats, чтобы предложить релевантные источники для отслеживания. Предлагай только те варианты, которые выглядят связанными с арендой, недвижимостью в городе поиска пользователя, apartment/rent/real estate. Если подходящих мало или нет, так и скажи."
-		chatSourcesNote = "- Инструмент list_available_telegram_chats показывает доступные userbot-аккаунту чаты для выбора новых источников; это НЕ список уже подключенных источников поиска.\n"
-	}
-
-	systemPrompt := fmt.Sprintf(`Ты - персональный ассистент по поиску квартир (MCP Agent). Твоя цель — помочь пользователю сформировать идеальные фильтры для поиска жилья.
-Ты можешь:
-1. Рассказывать пользователю, какие у него сейчас стоят настройки и как ты видишь его идеальную квартиру.
-2. Обсуждать желаемый ремонт, район, бюджет, удобства и помогать сформулировать четкие критерии.
-3. Изменять фильтры с помощью инструмента update_preferences, НО только после того, как согласуешь изменения с пользователем, или если пользователь прямо попросил обновить фильтр.
-4. Включать/выключать фильтрацию с помощью set_filtering_status.
-5. Работать с географией: находить координаты по адресу (resolve_address), вычислять расстояние в метрах (calculate_distance) и обновлять зону поиска напрямую с помощью GeoJSON (update_search_area).
-6. Управлять списком стоп-слов в поле stop_words (добавлять или удалять слова, по которым нужно отсеивать объявления о квартирах).
-7. %s
-8. Получать полный отчет по конкретному объявлению из локальной базы с помощью get_listing_evaluation_report, если пользователь спрашивает, почему объявление прошло/не прошло фильтры, или ссылается на сообщение бота.
-9. Город поиска хранится в поле city в Preferences: batumi — Батуми, tbilisi — Тбилиси, пусто — Батуми. Меняй city через update_preferences только когда пользователь явно просит искать в другом городе; во всех остальных вызовах update_preferences передавай текущее значение city или null. При смене города районы и зона поиска прошлого города сбрасываются: в том же вызове передай location_preferences: [] или только районы нового города, которые назвал пользователь, и не вызывай update_search_area — зону нового города можно нарисовать следующим сообщением. Пользователь также может сменить город командой /city tbilisi или /city batumi.
-
-Веди диалог живо, эмпатично и профессионально. Задавай уточняющие вопросы, если пожелания размыты (например, "хочу бабушкин вариант" -> предложи добавить "soviet" в reject_rules).
-
-ВАЖНО:
-- Используй Markdown разметку для оформления (списки, **жирный текст** и т.д.).
-- Не упоминай технические ключи из JSON (например, location_preferences, reject_rules). Если выводишь список фильтров или локаций, перечисляй их естественным, человекочитаемым языком.
-- Если пользователь просит добавить стоп-слово или удалить его (например, "добавь стоп-слово 'студия'"), используй update_preferences, чтобы обновить массив stop_words.
-- Если в состоянии настроек заполнен ключ "SearchArea" (даже если текстовые предпочтения по районам пусты), это ОЗНАЧАЕТ, что локация для поиска задана (пользователь ограничил поиск гео-зоной на карте). В этом случае НИКОГДА не пиши, что локация не задана или что предпочтений по районам нет. Указывай, что поиск идет в границах заданной области/зоны поиска на карте.
-- Если пользователь просит показать/прислать карту, картинку, фото или изображение зоны поиска и "SearchArea" заполнен, отвечай коротко, что прикрепляешь изображение текущей зоны поиска. НЕ говори, что не можешь отрисовать или сгенерировать карту: Telegram-бот прикрепит изображение автоматически.
-- Если пользователь спрашивает, какие чаты/каналы/источники сейчас читаются, отслеживаются или подключены, отвечай строго по "ConnectedSources" из текущего состояния. Если список пустой, скажи, что источники пока не подключены. НЕ говори, что ты не подключен к списку чатов.
-%s- Если пользователь хочет сам нарисовать зону поиска, обязательно дай ему пошаговую инструкцию: 1) Открыть сайт geojson.io, 2) Нарисовать полигон с помощью инструмента рисования (Draw a polygon), 3) Скопировать сгенерированный JSON (справа) и прислать тебе в чат в виде текста или файла.
-
-Текущее состояние настроек:
-%s
-
-Отвечай в дружелюбном тоне.`, chatSourcesAbility, chatSourcesNote, string(state))
-
-	messages := []chatMessage{
-		{Role: "system", Content: systemPrompt},
-	}
-
-	var activeHistory []profiles.MCPMessage
-	for _, msg := range profile.MCPHistory {
-		if a.ttlHours > 0 && !msg.CreatedAt.IsZero() && time.Since(msg.CreatedAt) > time.Duration(a.ttlHours)*time.Hour {
-			continue
-		}
-		activeHistory = append(activeHistory, msg)
-	}
-	profile.MCPHistory = activeHistory
-
-	for _, msg := range profile.MCPHistory {
-		messages = append(messages, chatMessage{
-			Role:    msg.Role,
-			Content: msg.Content,
-		})
-	}
-
-	messages = append(messages, chatMessage{Role: "user", Content: text})
-
-	tools := []chatTool{
-		{
-			Type: "function",
-			Function: chatFunction{
-				Name:        "set_filtering_status",
-				Description: "Включает или выключает общую фильтрацию объявлений. Если фильтрация выключена, все объявления будут проходить независимо от правил.",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"enabled": map[string]any{
-							"type":        "boolean",
-							"description": "true - включить фильтрацию (обычный режим), false - выключить (пропускать все объявления)",
-						},
-					},
-					"required": []string{"enabled"},
-				},
-			},
-		},
-		{
-			Type: "function",
-			Function: chatFunction{
-				Name:        "update_preferences",
-				Description: "Полностью обновляет параметры поиска квартир (бюджет, площадь, ремонт, локации, стоп-слова и т.д.).",
-				Parameters:  openaipreferences.PreferencesSchema(),
-			},
-		},
-		{
-			Type: "function",
-			Function: chatFunction{
-				Name:        "resolve_address",
-				Description: "Находит географические координаты (latitude, longitude) и имя места для текстового адреса или названия объекта (например, 'проспект Руставели 10'; город поиска пользователя подставляется автоматически).",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"address": map[string]any{
-							"type":        "string",
-							"description": "Адрес или название места",
-						},
-						"city": map[string]any{
-							"type":        "string",
-							"enum":        []string{"batumi", "tbilisi"},
-							"description": "Город, в котором искать адрес. Если не указан, используется город поиска пользователя.",
-						},
-					},
-					"required": []string{"address"},
-				},
-			},
-		},
-		{
-			Type: "function",
-			Function: chatFunction{
-				Name:        "calculate_distance",
-				Description: "Вычисляет расстояние в метрах по прямой между двумя точками на Земле по их координатам.",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"lat1": map[string]any{"type": "number", "description": "Широта первой точки"},
-						"lon1": map[string]any{"type": "number", "description": "Долгота первой точки"},
-						"lat2": map[string]any{"type": "number", "description": "Широта второй точки"},
-						"lon2": map[string]any{"type": "number", "description": "Долгота второй точки"},
-					},
-					"required": []string{"lat1", "lon1", "lat2", "lon2"},
-				},
-			},
-		},
-		{
-			Type: "function",
-			Function: chatFunction{
-				Name:        "update_search_area",
-				Description: "Устанавливает или обновляет полигон зоны поиска (search area) напрямую, используя предоставленный GeoJSON (Polygon или MultiPolygon). Используй это, если пользователь нарисовал зону или прислал валидный GeoJSON.",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"geojson": map[string]any{
-							"type":        "string",
-							"description": "Валидная GeoJSON-строка с объектом Polygon или MultiPolygon",
-						},
-					},
-					"required": []string{"geojson"},
-				},
-			},
-		},
-		{
-			Type: "function",
-			Function: chatFunction{
-				Name:        "search_local_listings",
-				Description: "Ищет объявления по локальной истории (проверенным квартирам) по различным фильтрам: статус, текстовый поисковый запрос (включая описание, особенности ремонта, детали фото), диапазон цен и район/локация.",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"status": map[string]any{
-							"type":        "string",
-							"description": "Фильтр по статусу (например: 'passed', 'rejected_ai', 'rejected_location', 'rejected_basic', 'duplicate'). Если не указан, ищутся все объявления.",
-						},
-						"query": map[string]any{
-							"type":        "string",
-							"description": "Поисковый запрос для текстового поиска по описанию, заголовку, району или деталям ремонта/дизайна (сравнивается с текстом объявления и отчетом).",
-						},
-						"min_price": map[string]any{
-							"type":        "integer",
-							"description": "Минимальная цена в USD.",
-						},
-						"max_price": map[string]any{
-							"type":        "integer",
-							"description": "Максимальная цена в USD.",
-						},
-						"location": map[string]any{
-							"type":        "string",
-							"description": "Название района или адрес для поиска по локации.",
-						},
-						"limit": map[string]any{
-							"type":        "integer",
-							"description": "Максимальное количество возвращаемых результатов (по умолчанию 10).",
-						},
-					},
-				},
-			},
-		},
-		{
-			Type: "function",
-			Function: chatFunction{
-				Name:        "get_listing_evaluation_report",
-				Description: "Возвращает полный сохраненный отчет по одному объявлению: само объявление, источник, статус, причины отклонения, AI-инсайты, итоговый текст отчета и ошибку. Используй, когда пользователь спрашивает, почему конкретное объявление прошло или не прошло фильтры. message_id — это ID сообщения бота с отчетом или ID исходного сообщения в канале.",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"message_id": map[string]any{
-							"type":        "integer",
-							"description": "ID сообщения бота с отчетом или исходного сообщения объявления.",
-						},
-						"telegram_chat_id": map[string]any{
-							"type":        "integer",
-							"description": "Telegram chat id пользователя. Если не указан, используется текущий chat id профиля.",
-						},
-					},
-					"required": []string{"message_id"},
-				},
-			},
-		},
-	}
-
-	if canListChats {
-		tools = append(tools, chatTool{
-			Type: "function",
-			Function: chatFunction{
-				Name:        "list_available_telegram_chats",
-				Description: "Возвращает public Telegram-каналы и группы, на которые уже подписан userbot-аккаунт. Используй для выбора релевантных источников объявлений, которые можно предложить подключить через /subscribe @username.",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"limit": map[string]any{
-							"type":        "integer",
-							"description": "Максимальное число dialogs для просмотра, по умолчанию 100, максимум 200.",
-						},
-					},
-				},
-			},
-		})
-	}
-
-	reqBody := chatRequest{
-		Model:    a.model,
-		Messages: messages,
-		Tools:    tools,
-	}
-
-	respMsg, err := a.makeChatRequest(ctx, reqBody)
-	if err != nil {
-		return "", nil, nil, err
-	}
-
-	var prefsChanged *domain.UserPreferences
-	var areaChanged *domain.GeoSearchArea
-
-	for round := 1; len(respMsg.ToolCalls) > 0 && round <= maxAgentToolRounds; round++ {
-		messages = append(messages, respMsg)
-		for _, tc := range respMsg.ToolCalls {
-			var toolResult string
-			switch tc.Function.Name {
-			case "set_filtering_status":
-				var args struct {
-					Enabled bool `json:"enabled"`
-				}
-				json.Unmarshal([]byte(tc.Function.Arguments), &args)
-				disabled := !args.Enabled
-				profile.FilterDisabled = &disabled
-				err = a.store.UpsertProfile(ctx, profile)
-				if err == nil {
-					toolResult = "success"
-				} else {
-					toolResult = err.Error()
-				}
-			case "update_preferences":
-				newPrefs, err := mergePreferenceUpdate(profile.Preferences, tc.Function.Arguments)
-				if err != nil {
-					toolResult = "error: failed to parse preferences JSON"
-				} else {
-					profile.Preferences = &newPrefs
-					prefsChanged = &newPrefs
-					toolResult = "success"
-				}
-			case "resolve_address":
-				var args struct {
-					Address string `json:"address"`
-					City    string `json:"city"`
-				}
-				json.Unmarshal([]byte(tc.Function.Arguments), &args)
-				if a.geocoder == nil {
-					toolResult = "error: geocoder is not configured"
-				} else {
-					loc, err := a.geocoder.Resolve(ctx, cities.ForKey(args.City, profileSearchCity(profile)).QueryWithRegion(args.Address), 0)
-					if err != nil {
-						toolResult = "error: " + err.Error()
-					} else if loc.Latitude == 0 && loc.Longitude == 0 {
-						toolResult = "error: address not found"
-					} else {
-						resBytes, _ := json.Marshal(map[string]any{
-							"name":      loc.Name,
-							"latitude":  loc.Latitude,
-							"longitude": loc.Longitude,
-						})
-						toolResult = string(resBytes)
-					}
-				}
-			case "calculate_distance":
-				var args struct {
-					Lat1 float64 `json:"lat1"`
-					Lon1 float64 `json:"lon1"`
-					Lat2 float64 `json:"lat2"`
-					Lon2 float64 `json:"lon2"`
-				}
-				json.Unmarshal([]byte(tc.Function.Arguments), &args)
-				dist := haversineDistance(args.Lat1, args.Lon1, args.Lat2, args.Lon2)
-				resBytes, _ := json.Marshal(map[string]any{
-					"distance_meters": int(dist),
-				})
-				toolResult = string(resBytes)
-			case "update_search_area":
-				var args struct {
-					GeoJSON string `json:"geojson"`
-				}
-				json.Unmarshal([]byte(tc.Function.Arguments), &args)
-				area, err := parseGeoJSONArea(args.GeoJSON)
-				if err != nil {
-					toolResult = "error: " + err.Error()
-				} else {
-					areaChanged = area
-					toolResult = "success"
-				}
-			case "search_local_listings":
-				var args struct {
-					Status   string `json:"status"`
-					Query    string `json:"query"`
-					MinPrice int    `json:"min_price"`
-					MaxPrice int    `json:"max_price"`
-					Location string `json:"location"`
-					Limit    int    `json:"limit"`
-				}
-				json.Unmarshal([]byte(tc.Function.Arguments), &args)
-				filter := domain.EvaluationSearchFilter{
-					Status:   args.Status,
-					Query:    args.Query,
-					MinPrice: args.MinPrice,
-					MaxPrice: args.MaxPrice,
-					Location: args.Location,
-					Limit:    args.Limit,
-				}
-				records, err := a.store.SearchEvaluations(ctx, profileID, filter)
-				if err != nil {
-					toolResult = "error: " + err.Error()
-				} else {
-					resBytes, _ := json.Marshal(records)
-					toolResult = string(resBytes)
-				}
-			case "get_listing_evaluation_report":
-				var args struct {
-					MessageID      int   `json:"message_id"`
-					TelegramChatID int64 `json:"telegram_chat_id"`
-				}
-				json.Unmarshal([]byte(tc.Function.Arguments), &args)
-				chatID := args.TelegramChatID
-				if chatID == 0 {
-					chatID = profile.TelegramChatID
-				}
-				record, ok, err := a.store.GetEvaluationByTelegramMessage(ctx, profileID, chatID, args.MessageID)
-				if err != nil {
-					toolResult = "error: " + err.Error()
-				} else if !ok {
-					toolResult = "not found"
-				} else {
-					resBytes, _ := json.Marshal(record)
-					toolResult = string(resBytes)
-				}
-			case "list_available_telegram_chats":
-				var args struct {
-					Limit int `json:"limit"`
-				}
-				json.Unmarshal([]byte(tc.Function.Arguments), &args)
-				if !canListChats {
-					toolResult = "unknown function"
-				} else if a.chatLister == nil {
-					toolResult = "error: telegram chat lister is not configured"
-				} else {
-					chats, err := a.chatLister.ListAvailableChats(ctx, args.Limit)
-					if err != nil {
-						toolResult = "error: " + err.Error()
-					} else {
-						resBytes, _ := json.Marshal(chats)
-						toolResult = string(resBytes)
-					}
-				}
-			default:
-				toolResult = "unknown function"
-			}
-
-			messages = append(messages, chatMessage{
-				Role:       "tool",
-				ToolCallID: tc.ID,
-				Name:       tc.Function.Name,
-				Content:    toolResult,
-			})
-		}
-
-		reqBody.Messages = messages
-		if round >= maxAgentToolRounds {
-			reqBody.ToolChoice = "none"
-		}
-		respMsg, err = a.makeChatRequest(ctx, reqBody)
-		if err != nil {
-			return "", nil, nil, err
-		}
-	}
-
-	if strings.TrimSpace(respMsg.Content) == "" {
-		respMsg.Content = emptyAgentReply
-	}
-
-	// Update sliding window history
-	now := time.Now()
-	profile.MCPHistory = append(profile.MCPHistory, profiles.MCPMessage{Role: "user", Content: text, CreatedAt: now})
-	profile.MCPHistory = append(profile.MCPHistory, profiles.MCPMessage{Role: "assistant", Content: respMsg.Content, CreatedAt: now})
-	if len(profile.MCPHistory) > 10 {
-		profile.MCPHistory = profile.MCPHistory[len(profile.MCPHistory)-10:]
-	}
-
-	if err := a.store.UpsertProfile(ctx, profile); err != nil {
-		return "", nil, nil, fmt.Errorf("failed to save mcp history: %w", err)
-	}
-
-	return respMsg.Content, prefsChanged, areaChanged, nil
+	return a.converse(ctx, profile, conversationTurn{
+		systemPrompt:   commandSystemPrompt(profile, a.mayManageSources(profile), canListChats, state),
+		userContent:    text,
+		historyContent: text,
+		canListChats:   canListChats,
+	})
 }
 
 func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing domain.ApartmentListing, feedbackText string, telegramChatID int64, repliedMessageID int) (string, *domain.UserPreferences, *domain.GeoSearchArea, error) {
@@ -631,395 +209,93 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 	if !ok {
 		return "Профиль не найден", nil, nil, nil
 	}
-
-	var searchAreaJSON any
-	if saStore, ok := a.store.(interface {
-		LatestSearchAreaGeoJSON(ctx context.Context, profileID string) (string, bool, error)
-	}); ok {
-		if geoJSON, ok, err := saStore.LatestSearchAreaGeoJSON(ctx, profileID); err == nil && ok {
-			var parsed any
-			if err := json.Unmarshal([]byte(geoJSON), &parsed); err == nil {
-				searchAreaJSON = parsed
-			} else {
-				searchAreaJSON = geoJSON
-			}
-		}
-	}
-
-	state, err := json.MarshalIndent(map[string]any{
-		"FilterDisabled":   profiles.FilterDisabled(profile),
-		"Preferences":      profile.Preferences,
-		"SearchArea":       searchAreaJSON,
-		"ConnectedSources": profile.Channels,
-	}, "", "  ")
+	state, err := a.conversationState(ctx, profile)
 	if err != nil {
 		return "", nil, nil, err
 	}
-
-	systemPrompt := fmt.Sprintf(`Ты - персональный ассистент по поиску квартир (MCP Agent). Пользователь ответил на отчет об объявлении о квартире с отзывом. Твоя цель — помочь пользователю уточнить фильтры, основываясь на его отзыве и данных объявления.
-Ты можешь:
-1. Рассказывать пользователю, какие у него сейчас стоят настройки и как ты видишь его идеальную квартиру.
-2. Обсуждать желаемый ремонт, район, бюджет, удобства и помогать сформулировать четкие критерии.
-3. Изменять фильтры с помощью инструмента update_preferences, НО только после того, как согласуешь изменения с пользователем, или если пользователь прямо попросил обновить фильтр.
-4. Включать/выключать фильтрацию с помощью set_filtering_status.
-5. Работать с географией: находить координаты по адресу (resolve_address), вычислять расстояние в метрах (calculate_distance) и обновлять зону поиска напрямую с помощью GeoJSON (update_search_area).
-6. Управлять списком стоп-слов в поле stop_words (добавлять или удалять слова, по которым нужно отсеивать объявления о квартирах).
-7. Получать полный отчет по объявлению из локальной базы с помощью get_listing_evaluation_report, когда пользователь спрашивает, почему объявление прошло или не прошло фильтры. В feedback-контексте для этого уже есть telegram_chat_id и replied_message_id.
-8. Город поиска хранится в поле city в Preferences (batumi или tbilisi, пусто — Батуми). В ответ на отзыв город не меняй: передавай в update_preferences текущее значение city или null. Сменить город пользователь может командой /city.
-
-Веди диалог живо, эмпатично и профессионально. Задавай уточняющие вопросы, если пожелания размыты (например, "хочу бабушкин вариант" -> предложи добавить "soviet" в reject_rules).
-
-ВАЖНО:
-- Используй Markdown разметку для оформления (списки, **жирный текст** и т.д.).
-- Не упоминай технические ключи из JSON (например, location_preferences, reject_rules). Если выводишь список фильтров или локаций, перечисляй их естественным, человекочитаемым языком.
-- Если пользователь просит добавить стоп-слово или удалить его (например, "добавь стоп-слово 'студия'"), используй update_preferences, чтобы обновить массив stop_words.
-- Если в состоянии настроек заполнен ключ "SearchArea" (даже если текстовые предпочтения по районам пусты), это ОЗНАЧАЕТ, что локация для поиска задана (пользователь ограничил поиск гео-зоной на карте). В этом случае НИКОГДА не пиши, что локация не задана или что предпочтений по районам нет. Указывай, что поиск идет в границах заданной области/зоны поиска на карте.
-- Если пользователь просит показать/прислать карту, картинку, фото или изображение зоны поиска и "SearchArea" заполнен, отвечай коротко, что прикрепляешь изображение текущей зоны поиска. НЕ говори, что не можешь отрисовать или сгенерировать карту: Telegram-бот прикрепит изображение автоматически.
-- Если пользователь спрашивает, какие чаты/каналы/источники сейчас читаются, отслеживаются или подключены, отвечай строго по "ConnectedSources" из текущего состояния. Если список пустой, скажи, что источники пока не подключены. НЕ говори, что ты не подключен к списку чатов.
-- Если пользователь хочет сам нарисовать зону поиска, обязательно дай ему пошаговую инструкцию: 1) Открыть сайт geojson.io, 2) Нарисовать полигон с помощью инструмента рисования (Draw a polygon), 3) Скопировать сгенерированный JSON (справа) и прислать тебе в чат в виде текста или файла.
-
-Текущее состояние настроек:
-%s
-
-Отвечай в дружелюбном тоне.`, string(state))
-
-	messages := []chatMessage{
-		{Role: "system", Content: systemPrompt},
-	}
-
-	var activeHistory []profiles.MCPMessage
-	for _, msg := range profile.MCPHistory {
-		if a.ttlHours > 0 && !msg.CreatedAt.IsZero() && time.Since(msg.CreatedAt) > time.Duration(a.ttlHours)*time.Hour {
-			continue
-		}
-		activeHistory = append(activeHistory, msg)
-	}
-	profile.MCPHistory = activeHistory
-
-	for _, msg := range profile.MCPHistory {
-		messages = append(messages, chatMessage{
-			Role:    msg.Role,
-			Content: msg.Content,
-		})
-	}
-
 	listingJSON, _ := json.MarshalIndent(listing, "", "  ")
-	userContent := fmt.Sprintf("Контекст: Я ответил на следующее объявление.\ntelegram_chat_id: %d\nreplied_message_id: %d\n\nДанные объявления:\n%s\n\nМой отзыв: %s", telegramChatID, repliedMessageID, string(listingJSON), feedbackText)
-	messages = append(messages, chatMessage{Role: "user", Content: userContent})
+	return a.converse(ctx, profile, conversationTurn{
+		systemPrompt:   feedbackSystemPrompt(a.mayManageSources(profile), state),
+		userContent:    fmt.Sprintf("Контекст: Я ответил на следующее объявление.\ntelegram_chat_id: %d\nreplied_message_id: %d\n\nДанные объявления:\n%s\n\nМой отзыв: %s", telegramChatID, repliedMessageID, string(listingJSON), feedbackText),
+		historyContent: "[Отзыв на объявление] " + feedbackText,
+	})
+}
 
-	tools := []chatTool{
-		{
-			Type: "function",
-			Function: chatFunction{
-				Name:        "set_filtering_status",
-				Description: "Включает или выключает общую фильтрацию объявлений. Если фильтрация выключена, все объявления будут проходить независимо от правил.",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"enabled": map[string]any{
-							"type":        "boolean",
-							"description": "true - включить фильтрацию (обычный режим), false - выключить (пропускать все объявления)",
-						},
-					},
-					"required": []string{"enabled"},
-				},
-			},
-		},
-		{
-			Type: "function",
-			Function: chatFunction{
-				Name:        "update_preferences",
-				Description: "Полностью обновляет параметры поиска квартир (бюджет, площадь, ремонт, локации, стоп-слова и т.д.).",
-				Parameters:  openaipreferences.PreferencesSchema(),
-			},
-		},
-		{
-			Type: "function",
-			Function: chatFunction{
-				Name:        "resolve_address",
-				Description: "Находит географические координаты (latitude, longitude) и имя места для текстового адреса или названия объекта (например, 'проспект Руставели 10'; город поиска пользователя подставляется автоматически).",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"address": map[string]any{
-							"type":        "string",
-							"description": "Адрес или название места",
-						},
-						"city": map[string]any{
-							"type":        "string",
-							"enum":        []string{"batumi", "tbilisi"},
-							"description": "Город, в котором искать адрес. Если не указан, используется город поиска пользователя.",
-						},
-					},
-					"required": []string{"address"},
-				},
-			},
-		},
-		{
-			Type: "function",
-			Function: chatFunction{
-				Name:        "calculate_distance",
-				Description: "Вычисляет расстояние в метрах по прямой между двумя точками на Земле по их координатам.",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"lat1": map[string]any{"type": "number", "description": "Широта первой точки"},
-						"lon1": map[string]any{"type": "number", "description": "Долгота первой точки"},
-						"lat2": map[string]any{"type": "number", "description": "Широта второй точки"},
-						"lon2": map[string]any{"type": "number", "description": "Долгота второй точки"},
-					},
-					"required": []string{"lat1", "lon1", "lat2", "lon2"},
-				},
-			},
-		},
-		{
-			Type: "function",
-			Function: chatFunction{
-				Name:        "update_search_area",
-				Description: "Устанавливает или обновляет полигон зоны поиска (search area) напрямую, используя предоставленный GeoJSON (Polygon или MultiPolygon). Используй это, если пользователь нарисовал зону или прислал валидный GeoJSON.",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"geojson": map[string]any{
-							"type":        "string",
-							"description": "Валидная GeoJSON-строка с объектом Polygon или MultiPolygon",
-						},
-					},
-					"required": []string{"geojson"},
-				},
-			},
-		},
-		{
-			Type: "function",
-			Function: chatFunction{
-				Name:        "search_local_listings",
-				Description: "Ищет объявления по локальной истории (проверенным квартирам) по различным фильтрам: статус, текстовый поисковый запрос (включая описание, особенности ремонта, детали фото), диапазон цен и район/локация.",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"status": map[string]any{
-							"type":        "string",
-							"description": "Фильтр по статусу (например: 'passed', 'rejected_ai', 'rejected_location', 'rejected_basic', 'duplicate'). Если не указан, ищутся все объявления.",
-						},
-						"query": map[string]any{
-							"type":        "string",
-							"description": "Поисковый запрос для текстового поиска по описанию, заголовку, району или деталям ремонта/дизайна (сравнивается с текстом объявления и отчетом).",
-						},
-						"min_price": map[string]any{
-							"type":        "integer",
-							"description": "Минимальная цена в USD.",
-						},
-						"max_price": map[string]any{
-							"type":        "integer",
-							"description": "Максимальная цена в USD.",
-						},
-						"location": map[string]any{
-							"type":        "string",
-							"description": "Название района или адрес для поиска по локации.",
-						},
-						"limit": map[string]any{
-							"type":        "integer",
-							"description": "Максимальное количество возвращаемых результатов (по умолчанию 10).",
-						},
-					},
-				},
-			},
-		},
-		{
-			Type: "function",
-			Function: chatFunction{
-				Name:        "get_listing_evaluation_report",
-				Description: "Возвращает полный сохраненный отчет по одному объявлению: само объявление, источник, статус, причины отклонения, AI-инсайты, итоговый текст отчета и ошибку. Используй, когда пользователь спрашивает, почему конкретное объявление прошло или не прошло фильтры. message_id — это replied_message_id из feedback-контекста, ID сообщения бота с отчетом или ID исходного сообщения в канале.",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"message_id": map[string]any{
-							"type":        "integer",
-							"description": "ID сообщения бота с отчетом или исходного сообщения объявления.",
-						},
-						"telegram_chat_id": map[string]any{
-							"type":        "integer",
-							"description": "Telegram chat id пользователя. Если не указан, используется текущий chat id профиля.",
-						},
-					},
-					"required": []string{"message_id"},
-				},
-			},
-		},
+const agentIntroduction = `Ты — ассистент Telegram-бота, который ищет квартиры в аренду: он читает Telegram-каналы и группы с объявлениями, проверяет каждое объявление по профилю поиска пользователя (бюджет, площадь, район, ремонт по фото и т.д.) и присылает подходящие. Кнопок и меню у бота нет: пользователь настраивает всё, просто переписываясь с тобой. Поэтому ты сам выясняешь, что ему нужно, и сам меняешь настройки инструментами.`
+
+func agentAbilities(canManageSources, canListChats bool) string {
+	lines := []string{
+		"Что ты умеешь:",
+		"- Рассказывать, какие сейчас стоят настройки и как ты видишь идеальную квартиру пользователя.",
+		"- Обсуждать ремонт, район, бюджет, удобства и помогать сформулировать четкие критерии.",
+		"- Менять профиль поиска инструментом update_preferences, НО только после того, как согласуешь изменения с пользователем, или если он прямо попросил их внести. Передавай только поля, которые меняются.",
+		"- Управлять стоп-словами в поле stop_words.",
+		"- Работать с географией: resolve_address находит координаты, calculate_distance считает расстояние, update_search_area задает зону поиска из GeoJSON.",
+		"- Включать или выключать фильтрацию целиком (set_filtering_status).",
+		"- Менять режим уведомлений (set_notification_mode): только подходящие объявления или отчет по каждому объявлению с причиной.",
+		"- Искать по уже проверенным объявлениям (search_local_listings) и объяснять решение по конкретному объявлению (get_listing_evaluation_report).",
 	}
-
-	reqBody := chatRequest{
-		Model:    a.model,
-		Messages: messages,
-		Tools:    tools,
+	if canManageSources {
+		lines = append(lines, "- Управлять источниками объявлений: list_sources показывает подключенные Telegram-каналы и группы, add_sources подключает новые (@username или ссылки t.me/name), remove_sources отключает. Когда пользователь присылает @username или ссылку t.me, сразу подключи ее через add_sources и перескажи результат своими словами.")
+	} else {
+		lines = append(lines, "- Подсказывать, как подключить источник: пользователь присылает @username или ссылку t.me/name публичного канала или группы с объявлениями.")
 	}
-
-	respMsg, err := a.makeChatRequest(ctx, reqBody)
-	if err != nil {
-		return "", nil, nil, err
+	if canListChats {
+		lines = append(lines, "- Просматривать публичные каналы и группы, доступные аккаунту-читателю (list_available_telegram_chats), чтобы предложить релевантные источники. Это НЕ список уже подключенных источников. Предлагай только чаты про аренду и недвижимость в городе поиска; если подходящих нет, так и скажи.")
 	}
+	lines = append(lines,
+		"- Город поиска хранится в поле city (batumi — Батуми, tbilisi — Тбилиси, пусто — Батуми). Меняй city через update_preferences только когда пользователь явно просит искать в другом городе; иначе передавай текущее значение или null. При смене города районы и зона прошлого города сбрасываются: в том же вызове передай location_preferences: [] или только районы нового города, которые назвал пользователь, и не вызывай update_search_area.",
+		"- Аккаунт-читатель — это аккаунт владельца бота. Объявления приходят только из чатов, в которых он состоит. Если add_sources сообщает, что он не состоит в чате, объясни, что объявления оттуда начнут приходить после того, как владелец бота вступит в этот чат.",
+	)
+	return strings.Join(lines, "\n")
+}
 
-	var prefsChanged *domain.UserPreferences
-	var areaChanged *domain.GeoSearchArea
+const onboardingInstructions = `Сейчас у пользователя еще нет профиля поиска: ты проводишь первую настройку. Веди ее как живой разговор, а не анкету.
+- Задавай один-два коротких вопроса за сообщение. Если пользователь сразу рассказал многое, не переспрашивай то, что уже известно, — переходи к недостающему.
+- Выясни примерно в таком порядке: город (Батуми или Тбилиси); бюджет в месяц в USD; площадь или число комнат; районы или ориентиры и насколько далеко от них можно; что обязательно (например посудомойка, кондиционер, можно с животными); что желательно; что точно не подходит (тип ремонта, этаж, вид из окна и т.п.).
+- Если пользователь хочет сам нарисовать зону на карте, сначала сохрани профиль после подтверждения сводки, а зону прими следующим сообщением.
+- Для запуска поиска достаточно города, бюджета и района (или явного «район не важен»). Остальное спроси, но не настаивай, если пользователь не хочет уточнять.
+- Когда данных хватает, покажи короткую сводку человеческим языком и спроси, запускать ли поиск. НЕ вызывай update_preferences, пока пользователь не подтвердил сводку («да», «ок», «запускай» и т.п.). После подтверждения сохрани все одним вызовом update_preferences.`
 
-	for round := 1; len(respMsg.ToolCalls) > 0 && round <= maxAgentToolRounds; round++ {
-		messages = append(messages, respMsg)
-		for _, tc := range respMsg.ToolCalls {
-			var toolResult string
-			switch tc.Function.Name {
-			case "set_filtering_status":
-				var args struct {
-					Enabled bool `json:"enabled"`
-				}
-				json.Unmarshal([]byte(tc.Function.Arguments), &args)
-				disabled := !args.Enabled
-				profile.FilterDisabled = &disabled
-				err = a.store.UpsertProfile(ctx, profile)
-				if err == nil {
-					toolResult = "success"
-				} else {
-					toolResult = err.Error()
-				}
-			case "update_preferences":
-				newPrefs, err := mergePreferenceUpdate(profile.Preferences, tc.Function.Arguments)
-				if err != nil {
-					toolResult = "error: failed to parse preferences JSON"
-				} else {
-					profile.Preferences = &newPrefs
-					prefsChanged = &newPrefs
-					toolResult = "success"
-				}
-			case "resolve_address":
-				var args struct {
-					Address string `json:"address"`
-					City    string `json:"city"`
-				}
-				json.Unmarshal([]byte(tc.Function.Arguments), &args)
-				if a.geocoder == nil {
-					toolResult = "error: geocoder is not configured"
-				} else {
-					loc, err := a.geocoder.Resolve(ctx, cities.ForKey(args.City, profileSearchCity(profile)).QueryWithRegion(args.Address), 0)
-					if err != nil {
-						toolResult = "error: " + err.Error()
-					} else if loc.Latitude == 0 && loc.Longitude == 0 {
-						toolResult = "error: address not found"
-					} else {
-						resBytes, _ := json.Marshal(map[string]any{
-							"name":      loc.Name,
-							"latitude":  loc.Latitude,
-							"longitude": loc.Longitude,
-						})
-						toolResult = string(resBytes)
-					}
-				}
-			case "calculate_distance":
-				var args struct {
-					Lat1 float64 `json:"lat1"`
-					Lon1 float64 `json:"lon1"`
-					Lat2 float64 `json:"lat2"`
-					Lon2 float64 `json:"lon2"`
-				}
-				json.Unmarshal([]byte(tc.Function.Arguments), &args)
-				dist := haversineDistance(args.Lat1, args.Lon1, args.Lat2, args.Lon2)
-				resBytes, _ := json.Marshal(map[string]any{
-					"distance_meters": int(dist),
-				})
-				toolResult = string(resBytes)
-			case "update_search_area":
-				var args struct {
-					GeoJSON string `json:"geojson"`
-				}
-				json.Unmarshal([]byte(tc.Function.Arguments), &args)
-				area, err := parseGeoJSONArea(args.GeoJSON)
-				if err != nil {
-					toolResult = "error: " + err.Error()
-				} else {
-					areaChanged = area
-					toolResult = "success"
-				}
-			case "search_local_listings":
-				var args struct {
-					Status   string `json:"status"`
-					Query    string `json:"query"`
-					MinPrice int    `json:"min_price"`
-					MaxPrice int    `json:"max_price"`
-					Location string `json:"location"`
-					Limit    int    `json:"limit"`
-				}
-				json.Unmarshal([]byte(tc.Function.Arguments), &args)
-				filter := domain.EvaluationSearchFilter{
-					Status:   args.Status,
-					Query:    args.Query,
-					MinPrice: args.MinPrice,
-					MaxPrice: args.MaxPrice,
-					Location: args.Location,
-					Limit:    args.Limit,
-				}
-				records, err := a.store.SearchEvaluations(ctx, profileID, filter)
-				if err != nil {
-					toolResult = "error: " + err.Error()
-				} else {
-					resBytes, _ := json.Marshal(records)
-					toolResult = string(resBytes)
-				}
-			case "get_listing_evaluation_report":
-				var args struct {
-					MessageID      int   `json:"message_id"`
-					TelegramChatID int64 `json:"telegram_chat_id"`
-				}
-				json.Unmarshal([]byte(tc.Function.Arguments), &args)
-				chatID := args.TelegramChatID
-				if chatID == 0 {
-					chatID = profile.TelegramChatID
-				}
-				record, ok, err := a.store.GetEvaluationByTelegramMessage(ctx, profileID, chatID, args.MessageID)
-				if err != nil {
-					toolResult = "error: " + err.Error()
-				} else if !ok {
-					toolResult = "not found"
-				} else {
-					resBytes, _ := json.Marshal(record)
-					toolResult = string(resBytes)
-				}
-			default:
-				toolResult = "unknown function"
-			}
+const configuredInstructions = `Профиль поиска пользователя уже сохранен. Помогай менять его по просьбе пользователя. Если он хочет настроить поиск заново, пройди те же вопросы, что при первой настройке (город, бюджет, площадь, районы, обязательное, желательное, неприемлемое), и сохрани результат после подтверждения сводки.
+- Если источников нет, напомни, что без них искать негде, и попроси прислать каналы или группы с объявлениями.
+- Если источники уже есть, а режим уведомлений с пользователем еще не обсуждали, один раз спроси, присылать только подходящие объявления или отчет по каждому, и выставь режим через set_notification_mode.
+- На просьбы вроде «покажи мой поиск» дай краткую сводку: город, бюджет, площадь, районы, обязательное и неприемлемое, источники и режим уведомлений. Карту зоны поиска бот прикрепит сам.`
 
-			messages = append(messages, chatMessage{
-				Role:       "tool",
-				ToolCallID: tc.ID,
-				Name:       tc.Function.Name,
-				Content:    toolResult,
-			})
-		}
+const conversationRules = `ВАЖНО:
+- Используй Markdown разметку для оформления (списки, **жирный текст** и т.д.). Пиши коротко.
+- Не упоминай технические ключи из JSON (например, location_preferences, reject_rules) и названия инструментов. Перечисляй фильтры и локации человеческим языком.
+- Не предлагай пользователю команды со слэшем: всё делается обычными сообщениями. Исключение — /reset, если он хочет начать разговор с чистого листа (фильтры при этом сохраняются).
+- Если в состоянии заполнен ключ "SearchArea" (даже если районы пусты), локация для поиска задана гео-зоной на карте. НИКОГДА не пиши в этом случае, что локация не задана.
+- Если пользователь просит показать карту или изображение зоны поиска и "SearchArea" заполнен, коротко скажи, что прикрепляешь изображение текущей зоны. НЕ говори, что не можешь отрисовать карту: бот прикрепит ее сам.
+- О подключенных источниках отвечай по "ConnectedSources" из состояния или по результату list_sources. НЕ говори, что не имеешь доступа к списку чатов.
+- Если пользователь хочет сам нарисовать зону поиска, дай пошаговую инструкцию: 1) открыть geojson.io, 2) нарисовать полигон инструментом Draw a polygon, 3) скопировать JSON справа и прислать в чат текстом или файлом.
+- Задавай уточняющие вопросы, если пожелания размыты (например, «хочу бабушкин вариант» → предложи отсеивать советский ремонт).`
 
-		reqBody.Messages = messages
-		if round >= maxAgentToolRounds {
-			reqBody.ToolChoice = "none"
-		}
-		respMsg, err = a.makeChatRequest(ctx, reqBody)
-		if err != nil {
-			return "", nil, nil, err
-		}
+func commandSystemPrompt(profile profiles.Profile, canManageSources, canListChats bool, state string) string {
+	stage := configuredInstructions
+	if profile.Preferences == nil {
+		stage = onboardingInstructions
 	}
+	return strings.Join([]string{
+		agentIntroduction,
+		agentAbilities(canManageSources, canListChats),
+		stage,
+		conversationRules,
+		"Текущее состояние настроек:\n" + state,
+		"Отвечай дружелюбно и по делу.",
+	}, "\n\n")
+}
 
-	if strings.TrimSpace(respMsg.Content) == "" {
-		respMsg.Content = emptyAgentReply
-	}
-
-	// Update sliding window history
-	now := time.Now()
-	profile.MCPHistory = append(profile.MCPHistory, profiles.MCPMessage{Role: "user", Content: "[Отзыв на объявление] " + feedbackText, CreatedAt: now})
-	profile.MCPHistory = append(profile.MCPHistory, profiles.MCPMessage{Role: "assistant", Content: respMsg.Content, CreatedAt: now})
-	if len(profile.MCPHistory) > 10 {
-		profile.MCPHistory = profile.MCPHistory[len(profile.MCPHistory)-10:]
-	}
-
-	if err := a.store.UpsertProfile(ctx, profile); err != nil {
-		return "", nil, nil, fmt.Errorf("failed to save mcp history: %w", err)
-	}
-
-	return respMsg.Content, prefsChanged, areaChanged, nil
+func feedbackSystemPrompt(canManageSources bool, state string) string {
+	return strings.Join([]string{
+		agentIntroduction,
+		"Сейчас пользователь ответил отзывом на отчет бота об объявлении. Помоги уточнить профиль поиска на основе отзыва и данных объявления. В контексте отзыва есть telegram_chat_id и replied_message_id: по ним get_listing_evaluation_report вернет полный отчет. Город в ответ на отзыв не меняй.",
+		agentAbilities(canManageSources, false),
+		conversationRules,
+		"Текущее состояние настроек:\n" + state,
+		"Отвечай дружелюбно и по делу.",
+	}, "\n\n")
 }
 
 func profileSearchCity(profile profiles.Profile) cities.City {

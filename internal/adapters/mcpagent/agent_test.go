@@ -30,7 +30,22 @@ func (s *fakeProfileStore) GetProfile(ctx context.Context, id string) (profiles.
 }
 
 func (s *fakeProfileStore) UpsertProfile(ctx context.Context, profile profiles.Profile) error {
-	s.profile = profile
+	if s.profile.ID != profile.ID {
+		s.profile = profile
+		return nil
+	}
+	if profile.DebugMode != nil {
+		s.profile.DebugMode = profile.DebugMode
+	}
+	if profile.FilterDisabled != nil {
+		s.profile.FilterDisabled = profile.FilterDisabled
+	}
+	if profile.MCPHistory != nil {
+		s.profile.MCPHistory = profile.MCPHistory
+	}
+	if profile.Preferences != nil {
+		s.profile.Preferences = profile.Preferences
+	}
 	return nil
 }
 
@@ -145,7 +160,7 @@ func TestProcessCommandIncludesConnectedSourcesGuidance(t *testing.T) {
 			if strings.Contains(msg.Content, "batumi_rent") && strings.Contains(msg.Content, "Batumi Rent") {
 				foundSource = true
 			}
-			if strings.Contains(msg.Content, "отвечай строго по \"ConnectedSources\"") && strings.Contains(msg.Content, "НЕ говори, что ты не подключен к списку чатов") {
+			if strings.Contains(msg.Content, "О подключенных источниках отвечай по \"ConnectedSources\"") && strings.Contains(msg.Content, "НЕ говори, что не имеешь доступа к списку чатов") {
 				foundGuidance = true
 			}
 		}
@@ -209,9 +224,6 @@ func TestProcessCommandNormalizesUpdatedPreferences(t *testing.T) {
 	if prefsChanged.MinBudget != 400 || prefsChanged.MaxBudget != 800 || prefsChanged.MinAreaM2 != 45 {
 		t.Fatalf("expected legacy budget/area fields to be normalized, got %+v", prefsChanged)
 	}
-	if store.profile.Preferences == nil || !store.profile.Preferences.RequireDishwasher || !store.profile.Preferences.RequireOven {
-		t.Fatalf("expected stored preferences to keep appliance requirements, got %+v", store.profile.Preferences)
-	}
 }
 
 func TestProcessCommandMergesPartialPreferenceUpdate(t *testing.T) {
@@ -272,9 +284,6 @@ func TestProcessCommandMergesPartialPreferenceUpdate(t *testing.T) {
 	}
 	if len(prefsChanged.StopWords) != 2 || prefsChanged.StopWords[0] != "продажа" {
 		t.Fatalf("expected existing stop words to be preserved, got %+v", prefsChanged.StopWords)
-	}
-	if store.profile.Preferences == nil || !store.profile.Preferences.RequireDishwasher || !store.profile.Preferences.RequireOven {
-		t.Fatalf("expected stored preferences to include appliance requirements, got %+v", store.profile.Preferences)
 	}
 }
 

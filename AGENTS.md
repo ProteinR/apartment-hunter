@@ -7,7 +7,7 @@ This is a short map for future agents. Treat it as a starting point, then verify
 When you need to look at an actual Telegram post (for example, to reproduce a feedback or check what text/price a listing really contained), you MUST read it through the Telegram userbot/MCP, never through a web browser or by guessing from `t.me/...` links.
 
 - Use the userbot client in `internal/adapters/telegramuserbot` (`Fetch`/`Listen`), which authenticates with the `TELEGRAM_*` env vars in `.env`.
-- The bot's MCP mode (`/mcp`) is for managing preferences conversationally; for reading raw channel history use the userbot fetch path.
+- The bot's conversational agent manages preferences; for reading raw channel history use the userbot fetch path.
 - Browser scraping of `t.me` is unreliable (albums, hidden text, auth) and is not allowed for this repo.
 
 ## Big Picture
@@ -28,15 +28,16 @@ Profiles are keyed as `telegram_<chat_id>` via `profiles.IDForTelegramChat`.
 
 Bot commands live in `internal/adapters/telegram/bot.go`:
 
-- `/start`, `/preferences`, `/restart` start preference collection.
-- A free-text query is parsed by `preferenceparser.Service` using the OpenAI preferences adapter.
-- On Save, `saveDraft` saves two things:
+- The bot is conversational only: no reply keyboard (replies send `ReplyKeyboardRemove`), and `SetMyCommands` shows only `/start` and `/reset`. Every text message goes to the agent in `internal/adapters/mcpagent`; `profiles.mcp_mode` is no longer read and `/mcp` only explains this.
+- `/start`, `/preferences`, `/restart` create the profile if needed and send a fixed greeting (onboarding for a profile without preferences), appended to `mcp_history`. During onboarding the agent asks short questions and calls `update_preferences` only after the user confirms a summary.
+- When the agent changes preferences or the area, `saveDraft` saves two things:
   - latest preferences in `profiles.preferences`;
   - a historical search profile in `user_search_profiles`, including `search_area` geometry when it can be built.
-- `/subscribe`, pasted `t.me/name`, and `@name` add rows to `profile_channels`.
-- `/unsubscribe` removes rows from `profile_channels`.
+- The agent manages sources through `list_sources`, `add_sources`, `remove_sources`, implemented by `Bot` (`SourceManager`), and the notification volume through `set_notification_mode` (`profiles.debug_mode`). Hidden legacy commands `/channels`, `/subscribe`, `/unsubscribe`, `/debug`, `/city`, `/clear`/`/reset` still work.
 - The bot never joins chats automatically. The Telegram userbot account must already be a member: live updates only arrive from joined chats. On subscribe the bot resolves the username through the userbot (`ChannelAccess`), refuses unknown usernames and warns when the userbot is not a member.
-- In MCP mode an active `/preferences` session still takes priority, so the preview and Save flow work; `/mcp` ends any open session. The MCP agent may chain up to `maxAgentToolRounds` tool rounds per message, and `list_available_telegram_chats` is offered only to the profile whose chat id equals the userbot account id.
+- The agent may chain up to `maxAgentToolRounds` (8) tool rounds per message, and `list_available_telegram_chats` is offered only to the profile whose chat id equals the userbot account id. `ProcessCommand` and `ProcessFeedback` share one loop in `conversation.go`.
+- Agent history: up to 40 messages verbatim; older ones and those past `MCP_CONTEXT_TTL_HOURS` are compacted by an LLM call into one `summary` entry in `mcp_history`, which goes into the system prompt.
+- Without an LLM agent `/start` falls back to the old one-shot `preferenceparser` wizard with Save/Edit/Edit area/Cancel.
 
 Postgres tables to inspect first:
 
@@ -72,7 +73,7 @@ Evaluation `listing_id` values are profile-scoped (`<profile_id>/<channel>:<mess
 
 ## Search Cities
 
-Each profile searches in one city stored as `city` (`batumi` or `tbilisi`) inside its preferences JSON; see `internal/cities`. An empty value means Batumi. The bot takes the city from the query text, otherwise keeps the profile's current city; `/city tbilisi` switches it and clears the previous city's districts and search area, so the user sets districts again via `/preferences`. In MCP mode the agent changes the city only through an explicit `city` value in `update_preferences` (null keeps it; `resolve_address` takes an optional `city`); the bot then clears the old city's districts and area unless the same patch brings new location preferences, which are rebuilt for the new city. Listing feedback never changes the city. The city drives listing address geocoding (region suffix and max distance from the city center), search-area geometry, the geojson.io link and MCP `resolve_address`. Batumi-only shortcuts (Pushkin boundary, New Boulevard, 6 May park, 1 km sea corridor) apply only to Batumi profiles. A stored search area is inherited on save only within the same city and only when the save carries no area at all (an MCP or feedback edit that leaves the location preferences unchanged); a built area with no polygons, for example after removing all districts, clears it. A district without a radius gets a `DefaultDistrictRadiusMeters` (1500 m) circle around its geocoded center.
+Each profile searches in one city stored as `city` (`batumi` or `tbilisi`) inside its preferences JSON; see `internal/cities`. An empty value means Batumi. The bot takes the city from the query text, otherwise keeps the profile's current city; `/city tbilisi` switches it and clears the previous city's districts and search area, so the user sets districts again in conversation. The agent changes the city only through an explicit `city` value in `update_preferences` (null keeps it; `resolve_address` takes an optional `city`); the bot then clears the old city's districts and area unless the same patch brings new location preferences, which are rebuilt for the new city. Listing feedback never changes the city. The city drives listing address geocoding (region suffix and max distance from the city center), search-area geometry, the geojson.io link and MCP `resolve_address`. Batumi-only shortcuts (Pushkin boundary, New Boulevard, 6 May park, 1 km sea corridor) apply only to Batumi profiles. A stored search area is inherited on save only within the same city and only when the save carries no area at all (an MCP or feedback edit that leaves the location preferences unchanged); a built area with no polygons, for example after removing all districts, clears it. A district without a radius gets a `DefaultDistrictRadiusMeters` (1500 m) circle around its geocoded center.
 
 Live messages are filtered by `profileSubscribedToMessage`, which matches subscriptions against both channel id and username after trimming `@` and lowercasing.
 

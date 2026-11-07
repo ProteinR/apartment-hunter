@@ -1,6 +1,6 @@
 ---
 name: telegram-bot-communication
-description: Guide on how to find, configure, and communicate with the Apartment Hunter Telegram bot, including toggling debug/MCP modes, and managing user preferences via natural language.
+description: Guide on how to find, configure, and communicate with the Apartment Hunter Telegram bot, and managing the whole search profile through conversation.
 ---
 
 # Telegram Bot Communication
@@ -22,43 +22,32 @@ Use this skill when you need to understand how the Telegram bot works, how to fi
 ```bash
 TELEGRAM_MCP_AUTH_TOKEN='...' node Workflows/telegram-bot-communication/scripts/telegram_mcp.mjs tools/list
 TELEGRAM_MCP_AUTH_TOKEN='...' node Workflows/telegram-bot-communication/scripts/telegram_mcp.mjs tools/call get_me
-TELEGRAM_MCP_AUTH_TOKEN='...' node Workflows/telegram-bot-communication/scripts/telegram_mcp.mjs tools/call send_message '{"chat_id":"Apartmenthuner_bot","message":"/mcp on"}'
+TELEGRAM_MCP_AUTH_TOKEN='...' node Workflows/telegram-bot-communication/scripts/telegram_mcp.mjs tools/call send_message '{"chat_id":"Apartmenthuner_bot","message":"/start"}'
 ```
 
 The helper performs MCP `initialize`, sends `notifications/initialized`, supports JSON and SSE responses, and redacts token-like values in output.
 
-## Bot Modes
+## Conversation
 
-### 1. Regular Mode (Default)
-In regular mode, any text message sent by the user is treated as a natural language search query. The bot processes it and presents a confirmation flow:
-- **Save**: Saves the parsed preferences to the database.
-- **Edit**: Prompts the user to send an updated query.
-- **Edit Area**: Displays the current geofence GeoJSON for editing.
-- **Cancel**: Aborts the operation.
+The bot has no reply keyboard and no modes. Every text message goes to the Claude agent (`internal/adapters/mcpagent`), which configures the profile through tools. The Telegram menu lists only `/start` and `/reset`.
 
-### 2. MCP Mode (Conversational Agent)
-Activate MCP Mode to enable a conversational agent powered by LLM function calling.
-- **Toggle ON**: Send `/mcp on` or `/mcp` (toggle).
-- **Toggle OFF**: Send `/mcp off` or `/mcp` (toggle).
-- **Reset History**: Send `/mcp clear` or `/mcp reset`.
-- **How it works**:
-  - The bot maintains a **sliding context window** of the last 10 messages (persisted in the `profiles.mcp_history` database column).
-  - Users can discuss preferences in natural language (e.g. *"Убери духовку из удобств"* or *"Какие у меня сейчас фильтры?"*).
-  - The agent updates the database preferences using the `update_preferences` function call or toggles filtering using `set_filtering_status`.
+- `/start` (also `/preferences`, `/restart`): creates the profile if needed and sends a greeting without an LLM call. A profile without preferences gets the onboarding greeting; the agent then asks one or two questions per message (city, budget, size, districts, must-haves, nice-to-haves, dealbreakers) and calls `update_preferences` only after the user confirms a summary. The greeting turn is appended to history; `/start` does not erase it.
+- `/reset` (also `/clear`): clears `profiles.mcp_history`, including the summary; filters stay.
+- Sources: the agent calls `list_sources`, `add_sources`, `remove_sources` (implemented by the bot with the same userbot membership check as `/subscribe`). A pasted `@name` or `t.me/name` goes to the agent too.
+- Notifications: `set_notification_mode` with `matches_only` or `all_reports` sets `profiles.debug_mode`.
+- Replying to a listing report is feedback and goes to `ProcessFeedback`.
+- History: up to 40 recent messages are sent verbatim. Above that, older messages and messages older than `MCP_CONTEXT_TTL_HOURS` (default 24) are folded by one extra LLM call into a `summary` entry stored in `mcp_history` and added to the system prompt. If summarization fails, history is kept up to 80 messages.
+- `/mcp` only explains that a separate mode is no longer needed.
 
-### 3. Debug Mode
-Controls notification frequency for processed listings:
-- **Toggle**: Send `/debug`, `/debug on`, or `/debug off`.
-- **On**: Sends a notification report for *every* processed channel message (except obvious non-listings).
-- **Off**: Sends reports only for listings that pass all filters.
+## Hidden Legacy Commands
 
-## Useful Bot Commands
+They still work but are not shown anywhere:
 
-- `/start` or `/preferences` - Begin/restart step-by-step preference setup.
 - `/city`, `/city tbilisi`, `/city batumi` - Show or switch the profile's search city; switching rebuilds the search area.
-- `/channels` - Show the list of connected Telegram channel subscriptions.
-- `/subscribe @channel_username` - Subscribe to a source.
-- `/unsubscribe @channel_username` - Unsubscribe from a source.
+- `/channels`, `/subscribe @channel_username`, `/unsubscribe @channel_username` - Manage sources.
+- `/debug`, `/debug on`, `/debug off` - Notification volume.
+
+Without an agent (no LLM key) `/start` falls back to the old one-shot wizard with Save/Edit/Edit area/Cancel.
 
 ## Database Verification
 

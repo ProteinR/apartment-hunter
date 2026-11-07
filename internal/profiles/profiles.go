@@ -176,13 +176,6 @@ func DebugModeEnabled(profile Profile) bool {
 	return *profile.DebugMode
 }
 
-func MCPModeEnabled(profile Profile) bool {
-	if profile.MCPMode == nil {
-		return false
-	}
-	return *profile.MCPMode
-}
-
 func FilterDisabled(profile Profile) bool {
 	if profile.FilterDisabled == nil {
 		return false

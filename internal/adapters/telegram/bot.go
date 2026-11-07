@@ -36,6 +36,7 @@ type Bot struct {
 	mapRenderer      googlemaps.StaticMapRenderer
 	mcpAgent         *mcpagent.Agent
 	mu               sync.Mutex
+	chatLocks        map[int64]*sync.Mutex
 	allowedChats     []int64
 	allowedUsernames []string
 	defaultCity      cities.City
@@ -123,10 +124,14 @@ func New(token, outputDir string, opts ...Option) *Bot {
 		token:       token,
 		client:      &http.Client{Timeout: 20 * time.Second},
 		sessions:    map[int64]*preferenceSession{},
+		chatLocks:   map[int64]*sync.Mutex{},
 		defaultCity: cities.Batumi,
 	}
 	for _, opt := range opts {
 		opt(bot)
+	}
+	if bot.mcpAgent != nil {
+		bot.mcpAgent.SetSourceManager(bot)
 	}
 	return bot
 }
@@ -154,8 +159,14 @@ func (b *Bot) Run(ctxDone <-chan struct{}) error {
 	if err != nil {
 		return err
 	}
+	_, _ = api.SetMyCommands(ctx, &telegrambot.SetMyCommandsParams{Commands: botMenuCommands})
 	api.Start(ctx)
 	return nil
+}
+
+var botMenuCommands = []models.BotCommand{
+	{Command: "start", Description: "Начать или продолжить настройку поиска"},
+	{Command: "reset", Description: "Начать разговор заново, фильтры сохранятся"},
 }
 
 func (b *Bot) HandleText(chatID int64, text string) (string, error) {
@@ -192,6 +203,10 @@ func (b *Bot) handleUpdate(ctx context.Context, api *telegrambot.Bot, update *mo
 	if !isAllowed {
 		return
 	}
+	chatLock := b.chatLock(chatID)
+	chatLock.Lock()
+	defer chatLock.Unlock()
+	sendTyping(ctx, api, chatID)
 	if update.Message.ReplyToMessage != nil && b.getSession(chatID) == nil && !strings.HasPrefix(strings.TrimSpace(update.Message.Text), "/") {
 		reply, handled, err := b.saveReplyFeedback(ctx, update.Message)
 		if err != nil {
@@ -250,28 +265,27 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 	text = strings.TrimSpace(text)
 	if strings.HasPrefix(text, "/channels") {
 		reply, err := b.listChannels(context.Background(), chatID)
-		return textResponse{Text: reply, ReplyMarkup: mainCommandKeyboard()}, err
+		return textResponse{Text: reply, ReplyMarkup: removeKeyboard()}, err
 	}
 	if strings.HasPrefix(text, "/subscribe") {
 		reply, err := b.subscribeChannel(context.Background(), chatID, text)
-		return textResponse{Text: reply, ReplyMarkup: mainCommandKeyboard()}, err
+		return textResponse{Text: reply, ReplyMarkup: removeKeyboard()}, err
 	}
 	if strings.HasPrefix(text, "/unsubscribe") {
 		reply, err := b.unsubscribeChannel(context.Background(), chatID, text)
-		return textResponse{Text: reply, ReplyMarkup: mainCommandKeyboard()}, err
+		return textResponse{Text: reply, ReplyMarkup: removeKeyboard()}, err
 	}
 	if strings.HasPrefix(text, "/debug") {
 		reply, err := b.debugMode(context.Background(), chatID, text)
-		return textResponse{Text: reply, ReplyMarkup: mainCommandKeyboard()}, err
+		return textResponse{Text: reply, ReplyMarkup: removeKeyboard()}, err
 	}
 	if text == "/city" || strings.HasPrefix(text, "/city ") {
 		reply, err := b.cityCommand(context.Background(), chatID, text)
-		return textResponse{Text: reply, ReplyMarkup: mainCommandKeyboard()}, err
+		return textResponse{Text: reply, ReplyMarkup: removeKeyboard()}, err
 	}
 	if strings.HasPrefix(text, "/mcp") {
 		b.deleteSession(chatID)
-		reply, err := b.mcpMode(context.Background(), chatID, text)
-		return textResponse{Text: reply, ReplyMarkup: mainCommandKeyboard()}, err
+		return textResponse{Text: conversationModeNote, ReplyMarkup: removeKeyboard()}, nil
 	}
 	if text == "/clear" || text == "/reset" {
 		profileID := profiles.IDForTelegramChat(chatID)
@@ -285,25 +299,26 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 		}
 		return textResponse{
 			Text:        "Контекст общения сброшен. Сохраненные фильтры остались без изменений.",
-			ReplyMarkup: mainCommandKeyboard(),
+			ReplyMarkup: removeKeyboard(),
 		}, nil
 	}
-	if looksLikeChannelSubscription(text) {
+	if b.mcpAgent == nil && looksLikeChannelSubscription(text) {
 		reply, err := b.subscribeChannelsFromText(context.Background(), chatID, text)
-		return textResponse{Text: reply, ReplyMarkup: mainCommandKeyboard()}, err
+		return textResponse{Text: reply, ReplyMarkup: removeKeyboard()}, err
 	}
 	if text == "/start" || text == "/preferences" || text == "/restart" {
-		if text != "/start" || !b.mcpModeEnabled(chatID) {
-			b.setSession(chatID, &preferenceSession{State: "awaiting_query"})
+		if b.mcpAgent != nil {
+			return b.startConversation(context.Background(), chatID)
 		}
-		return textResponse{Text: preferencesStartMessage, ReplyMarkup: mainCommandKeyboard()}, nil
+		b.setSession(chatID, &preferenceSession{State: "awaiting_query"})
+		return textResponse{Text: preferencesStartMessage, ReplyMarkup: removeKeyboard()}, nil
 	}
 
 	session := b.getSession(chatID)
-	profile, ok, err := b.store.GetProfile(context.Background(), profiles.IDForTelegramChat(chatID))
-	if session == nil && err == nil && ok && profiles.MCPModeEnabled(profile) {
-		if b.mcpAgent == nil {
-			return textResponse{Text: "Агент MCP не настроен."}, nil
+	if session == nil && b.mcpAgent != nil {
+		profile, err := b.ensureProfile(context.Background(), chatID)
+		if err != nil {
+			return textResponse{}, err
 		}
 		reply, prefsChanged, areaChanged, err := b.mcpAgent.ProcessCommand(context.Background(), profile.ID, text)
 		if err != nil {
@@ -329,7 +344,7 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 		}
 		resp := textResponse{
 			Text:        reply,
-			ReplyMarkup: mainCommandKeyboard(),
+			ReplyMarkup: removeKeyboard(),
 		}
 		if shouldAttachMCPMap(text, reply, prefsChanged != nil || areaChanged != nil) {
 			if saStore, ok := b.store.(interface {
@@ -347,7 +362,7 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 	}
 
 	if session == nil {
-		return textResponse{Text: "Выберите команду кнопкой ниже или отправьте /preferences, чтобы настроить поиск квартиры.", ReplyMarkup: mainCommandKeyboard()}, nil
+		return textResponse{Text: "Отправь /start, чтобы настроить поиск квартиры.", ReplyMarkup: removeKeyboard()}, nil
 	}
 	switch session.State {
 	case "awaiting_query":
@@ -386,23 +401,129 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 				return textResponse{}, err
 			}
 			reply, err := b.afterPreferencesSavedMessage(context.Background(), chatID)
-			return textResponse{Text: reply, ReplyMarkup: mainCommandKeyboard()}, err
+			return textResponse{Text: reply, ReplyMarkup: removeKeyboard()}, err
 		case "edit":
 			session.State = "awaiting_query"
 			b.setSession(chatID, session)
-			return textResponse{Text: "Отправь исправленный запрос одним сообщением.", ReplyMarkup: mainCommandKeyboard()}, nil
+			return textResponse{Text: "Отправь исправленный запрос одним сообщением.", ReplyMarkup: removeKeyboard()}, nil
 		case "edit_area":
 			return searchAreaEditResponse(session.SearchArea, b.cityOf(session.Draft.Preferences)), nil
 		case "cancel":
 			b.deleteSession(chatID)
-			return textResponse{Text: "Настройка отменена.", ReplyMarkup: mainCommandKeyboard()}, nil
+			return textResponse{Text: "Настройка отменена.", ReplyMarkup: removeKeyboard()}, nil
 		default:
 			return textResponse{Text: "Выбери Save, Edit, Edit area или Cancel. Можно также отправить GeoJSON прямо сюда одним сообщением.", ReplyMarkup: confirmationKeyboard()}, nil
 		}
 	default:
 		b.deleteSession(chatID)
-		return textResponse{Text: "Выберите команду кнопкой ниже или отправьте /preferences, чтобы настроить поиск квартиры.", ReplyMarkup: mainCommandKeyboard()}, nil
+		return textResponse{Text: "Отправь /start, чтобы настроить поиск квартиры.", ReplyMarkup: removeKeyboard()}, nil
 	}
+}
+
+const (
+	newUserGreeting = `Привет! Я ищу квартиры в аренду: читаю Telegram-каналы с объявлениями и присылаю только те, что тебе подходят.
+
+Настроим поиск прямо в переписке — отвечай обычными сообщениями, можно коротко или сразу всё одним текстом. Для начала: в каком городе ищем, Батуми или Тбилиси, и какой бюджет в месяц?`
+	returningUserGreeting = `Привет! Поиск уже настроен. Просто напиши, что поменять: например, «подними бюджет до 700$», «добавь канал @name» или «присылай только подходящие». Чтобы увидеть текущие настройки и карту зоны, спроси «покажи мой поиск».`
+	conversationModeNote  = `Отдельный режим больше не нужен: просто пиши мне обычными сообщениями, я пойму и сам поменяю настройки. /reset начинает разговор заново, фильтры при этом сохраняются.`
+)
+
+func (b *Bot) chatLock(chatID int64) *sync.Mutex {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	lock, ok := b.chatLocks[chatID]
+	if !ok {
+		lock = &sync.Mutex{}
+		b.chatLocks[chatID] = lock
+	}
+	return lock
+}
+
+func (b *Bot) ensureProfile(ctx context.Context, chatID int64) (profiles.Profile, error) {
+	profileID := profiles.IDForTelegramChat(chatID)
+	profile, ok, err := b.store.GetProfile(ctx, profileID)
+	if err != nil || (ok && profile.TelegramChatID == chatID) {
+		return profile, err
+	}
+	update := profiles.Profile{ID: profileID, TelegramChatID: chatID}
+	if !ok {
+		matchesOnly := false
+		update.DebugMode = &matchesOnly
+	}
+	if err := b.store.UpsertProfile(ctx, update); err != nil {
+		return profiles.Profile{}, err
+	}
+	profile, _, err = b.store.GetProfile(ctx, profileID)
+	return profile, err
+}
+
+func (b *Bot) startConversation(ctx context.Context, chatID int64) (textResponse, error) {
+	b.deleteSession(chatID)
+	profile, err := b.ensureProfile(ctx, chatID)
+	if err != nil {
+		return textResponse{}, err
+	}
+	greeting := returningUserGreeting
+	if profile.Preferences == nil {
+		greeting = newUserGreeting
+	}
+	now := time.Now()
+	history := append(slices.Clone(profile.MCPHistory),
+		profiles.MCPMessage{Role: "user", Content: "/start", CreatedAt: now},
+		profiles.MCPMessage{Role: "assistant", Content: greeting, CreatedAt: now},
+	)
+	if err := b.store.UpsertProfile(ctx, profiles.Profile{ID: profile.ID, TelegramChatID: chatID, MCPHistory: history}); err != nil {
+		return textResponse{}, err
+	}
+	return textResponse{Text: greeting, ReplyMarkup: removeKeyboard()}, nil
+}
+
+func (b *Bot) ListSources(ctx context.Context, chatID int64) ([]string, error) {
+	return b.channelList(ctx, chatID)
+}
+
+func (b *Bot) AddSources(ctx context.Context, chatID int64, refs []string) (string, error) {
+	var results []string
+	for _, ref := range refs {
+		username, ok := parsePublicTelegramUsername(ref)
+		if !ok || username == "" {
+			results = append(results, ref+": не подключен. "+unsupportedChannelRefMessage(ref))
+			continue
+		}
+		reply, err := b.upsertChannel(ctx, chatID, username, "")
+		if err != nil {
+			return "", err
+		}
+		results = append(results, reply)
+	}
+	if len(results) == 0 {
+		return "no sources given", nil
+	}
+	return strings.Join(results, "\n"), nil
+}
+
+func (b *Bot) RemoveSources(ctx context.Context, chatID int64, refs []string) (string, error) {
+	var results []string
+	for _, ref := range refs {
+		username, ok := parsePublicTelegramUsername(ref)
+		if !ok || username == "" {
+			results = append(results, ref+": не похоже на @username или ссылку t.me/name")
+			continue
+		}
+		removed, err := b.store.RemoveProfileChannel(ctx, profiles.IDForTelegramChat(chatID), username)
+		if err != nil {
+			return "", err
+		}
+		if removed {
+			results = append(results, "Источник @"+username+" отключен")
+		} else {
+			results = append(results, "Источник @"+username+" не был подключен")
+		}
+	}
+	if len(results) == 0 {
+		return "no sources given", nil
+	}
+	return strings.Join(results, "\n"), nil
 }
 
 func (b *Bot) afterPreferencesSavedMessage(ctx context.Context, chatID int64) (string, error) {
@@ -643,58 +764,6 @@ func (b *Bot) debugMode(ctx context.Context, chatID int64, text string) (string,
 	}
 }
 
-func (b *Bot) mcpMode(ctx context.Context, chatID int64, text string) (string, error) {
-	parts := strings.Fields(strings.TrimSpace(text))
-	profileID := profiles.IDForTelegramChat(chatID)
-
-	if len(parts) == 1 {
-		profile, ok, err := b.store.GetProfile(ctx, profileID)
-		if err != nil {
-			return "", err
-		}
-		enabled := true
-		if ok {
-			enabled = !profiles.MCPModeEnabled(profile)
-		}
-		if err := b.store.UpsertProfile(ctx, profiles.Profile{ID: profileID, TelegramChatID: chatID, MCPMode: &enabled}); err != nil {
-			return "", err
-		}
-		return mcpModeStatusMessage(enabled), nil
-	}
-
-	if strings.EqualFold(parts[1], "status") {
-		profile, ok, err := b.store.GetProfile(ctx, profileID)
-		if err != nil {
-			return "", err
-		}
-		if !ok {
-			return "MCP mode: off", nil
-		}
-		return mcpModeStatusMessage(profiles.MCPModeEnabled(profile)), nil
-	}
-	switch strings.ToLower(parts[1]) {
-	case "on", "вкл", "enable", "enabled":
-		enabled := true
-		if err := b.store.UpsertProfile(ctx, profiles.Profile{ID: profileID, TelegramChatID: chatID, MCPMode: &enabled}); err != nil {
-			return "", err
-		}
-		return mcpModeStatusMessage(true), nil
-	case "off", "выкл", "disable", "disabled":
-		enabled := false
-		if err := b.store.UpsertProfile(ctx, profiles.Profile{ID: profileID, TelegramChatID: chatID, MCPMode: &enabled}); err != nil {
-			return "", err
-		}
-		return mcpModeStatusMessage(false), nil
-	case "clear", "сброс", "reset":
-		if err := b.store.UpsertProfile(ctx, profiles.Profile{ID: profileID, TelegramChatID: chatID, MCPHistory: []profiles.MCPMessage{}}); err != nil {
-			return "", err
-		}
-		return "Контекст агента успешно сброшен. Начинаем с чистого листа!", nil
-	default:
-		return "Использование: /mcp (переключение), /mcp on, /mcp off или /mcp clear", nil
-	}
-}
-
 func (b *Bot) saveReplyFeedback(ctx context.Context, message *models.Message) (string, bool, error) {
 	if b.store == nil {
 		return "", false, fmt.Errorf("profile store is required")
@@ -720,7 +789,7 @@ func (b *Bot) saveReplyFeedback(ctx context.Context, message *models.Message) (s
 	}
 
 	profile, profileOk, profileErr := b.store.GetProfile(ctx, profiles.IDForTelegramChat(message.Chat.ID))
-	if profileErr == nil && profileOk && profiles.MCPModeEnabled(profile) && b.mcpAgent != nil {
+	if profileErr == nil && profileOk && b.mcpAgent != nil {
 		reply, prefsChanged, areaChanged, agentErr := b.mcpAgent.ProcessFeedback(ctx, profile.ID, *listing, text, message.Chat.ID, message.ReplyToMessage.ID)
 		if agentErr != nil {
 			return "Отзыв сохранен, но ошибка агента: " + agentErr.Error(), true, nil
@@ -760,13 +829,6 @@ const (
 )
 
 const readerAccountNote = "Объявления читает аккаунт-читатель владельца бота, а я не вступаю в чаты автоматически. Новые объявления приходят только из чатов, где этот аккаунт состоит; если его там нет, я предупрежу при подключении."
-
-func mcpModeStatusMessage(enabled bool) string {
-	if enabled {
-		return "MCP mode: on\n\nТеперь я работаю в режиме гибкого агента. Напиши мне текстовую команду (например, 'Пришли мне GeoJSON зоны'), и я постараюсь ее выполнить."
-	}
-	return "MCP mode: off\n\nРежим агента выключен. Текстовые сообщения снова воспринимаются как фильтры для поиска квартиры."
-}
 
 func looksLikeChannelSubscription(text string) bool {
 	text = strings.TrimSpace(text)
@@ -1088,7 +1150,7 @@ func (b *Bot) cityCommand(ctx context.Context, chatID int64, text string) (strin
 		return "", err
 	}
 	if !found || profile.Preferences == nil {
-		return fmt.Sprintf("Фильтров пока нет. Отправь /preferences и укажи в запросе город: %s.", city.DisplayName), nil
+		return fmt.Sprintf("Город поиска: %s. Фильтров пока нет: просто напиши, какую квартиру ищем.", city.DisplayName), nil
 	}
 	if city.Key == current.Key {
 		return fmt.Sprintf("Город поиска уже %s.", city.DisplayName), nil
@@ -1104,12 +1166,7 @@ func (b *Bot) cityCommand(ctx context.Context, chatID int64, text string) (strin
 	if err := b.saveDraft(ctx, chatID, draft, &domain.GeoSearchArea{SRID: 4326}); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("Город поиска: %s. Районы и зона поиска от прошлого города сброшены, сейчас подходят объявления из любого района. Чтобы задать районы, отправь /preferences с описанием поиска.", city.DisplayName), nil
-}
-
-func (b *Bot) mcpModeEnabled(chatID int64) bool {
-	profile, ok, err := b.store.GetProfile(context.Background(), profiles.IDForTelegramChat(chatID))
-	return err == nil && ok && profiles.MCPModeEnabled(profile)
+	return fmt.Sprintf("Город поиска: %s. Районы и зона поиска от прошлого города сброшены, сейчас подходят объявления из любого района. Чтобы задать районы, просто напиши, где хочешь жить.", city.DisplayName), nil
 }
 
 func (b *Bot) getSession(chatID int64) *preferenceSession {
@@ -1138,6 +1195,13 @@ func (b *Bot) deleteSession(chatID int64) {
 
 func sendMessage(ctx context.Context, api *telegrambot.Bot, chatID int64, text string) error {
 	return sendMessageWithMarkup(ctx, api, chatID, text, nil)
+}
+
+func sendTyping(ctx context.Context, api *telegrambot.Bot, chatID int64) {
+	if api == nil {
+		return
+	}
+	_, _ = api.SendChatAction(ctx, &telegrambot.SendChatActionParams{ChatID: chatID, Action: models.ChatActionTyping})
 }
 
 func sendMessageWithMarkup(ctx context.Context, api *telegrambot.Bot, chatID int64, text string, markup models.ReplyMarkup) error {

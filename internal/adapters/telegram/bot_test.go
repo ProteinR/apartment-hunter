@@ -816,30 +816,25 @@ func TestDebugModeCanBeToggled(t *testing.T) {
 	}
 }
 
-func TestRepliesIncludeCommandKeyboard(t *testing.T) {
+func TestRepliesRemoveCommandKeyboardAndMenuListsOnlyStartAndReset(t *testing.T) {
 	store := newFakeProfileStore()
 	bot := New("test-token", t.TempDir(), WithProfileStore(store))
 
-	response, err := bot.handleTextResponse(42, "/start")
-	if err != nil {
-		t.Fatal(err)
-	}
-	keyboard, ok := response.ReplyMarkup.(*models.ReplyKeyboardMarkup)
-	if !ok {
-		t.Fatalf("expected command keyboard, got %T", response.ReplyMarkup)
-	}
-	for _, expected := range []string{"/preferences", "/channels", "/subscribe", "/unsubscribe", "/debug", "/mcp", "/clear"} {
-		if !keyboardHasButton(keyboard, expected) {
-			t.Fatalf("expected keyboard to contain %q: %+v", expected, keyboard.Keyboard)
+	for _, command := range []string{"/start", "/channels"} {
+		response, err := bot.handleTextResponse(42, command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := response.ReplyMarkup.(*models.ReplyKeyboardRemove); !ok {
+			t.Fatalf("expected %s to remove the reply keyboard, got %T", command, response.ReplyMarkup)
 		}
 	}
-
-	response, err = bot.handleTextResponse(42, "/channels")
-	if err != nil {
-		t.Fatal(err)
+	var commands []string
+	for _, command := range botMenuCommands {
+		commands = append(commands, command.Command)
 	}
-	if _, ok := response.ReplyMarkup.(*models.ReplyKeyboardMarkup); !ok {
-		t.Fatalf("expected command keyboard after /channels, got %T", response.ReplyMarkup)
+	if strings.Join(commands, ",") != "start,reset" {
+		t.Fatalf("expected the menu to list only start and reset, got %v", commands)
 	}
 }
 
@@ -940,6 +935,29 @@ func TestSaveReplyFeedbackStoresFeedback(t *testing.T) {
 	}
 }
 
+func TestReplyFeedbackGoesToAgentWithoutMCPMode(t *testing.T) {
+	store := newFakeProfileStore()
+	store.feedbackMatched = true
+	store.profiles["telegram_42"] = profiles.Profile{ID: "telegram_42", TelegramChatID: 42, Preferences: &domain.UserPreferences{MaxBudget: 600}}
+	agentServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Учту темный ремонт."}}]}`))
+	}))
+	defer agentServer.Close()
+	t.Setenv("OPENAI_BASE_URL", agentServer.URL)
+	bot := New("test-token", t.TempDir(), WithProfileStore(store), WithMCPAgent(mcpagent.New("test-key", store)))
+
+	reply, handled, err := bot.saveReplyFeedback(context.Background(), &models.Message{
+		ID:             101,
+		Text:           "слишком темно",
+		Chat:           models.Chat{ID: 42},
+		ReplyToMessage: &models.Message{ID: 55},
+	})
+	if err != nil || !handled || reply != "Учту темный ремонт." {
+		t.Fatalf("expected the agent reply to feedback, got %q handled=%v err=%v", reply, handled, err)
+	}
+}
+
 func TestSaveReplyFeedbackUnmatchedReplyReturnsNotHandled(t *testing.T) {
 	store := newFakeProfileStore()
 	bot := New("test-token", t.TempDir(), WithProfileStore(store))
@@ -962,17 +980,6 @@ func TestSaveReplyFeedbackUnmatchedReplyReturnsNotHandled(t *testing.T) {
 	if len(store.feedbacks) != 0 {
 		t.Fatalf("unexpected feedback saved: %+v", store.feedbacks)
 	}
-}
-
-func keyboardHasButton(keyboard *models.ReplyKeyboardMarkup, text string) bool {
-	for _, row := range keyboard.Keyboard {
-		for _, button := range row {
-			if button.Text == text {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 type fakeNormalizer struct {
@@ -1111,9 +1118,10 @@ func TestAllowedChatsFilter(t *testing.T) {
 	}
 }
 
-func TestPreferencesSessionTakesPriorityOverMCPMode(t *testing.T) {
+func TestPreferencesCommandStartsConversationInsteadOfWizard(t *testing.T) {
 	store := newFakeProfileStore()
 	profile := batumiMCPProfile(49)
+	profile.MCPMode = nil
 	store.profiles[profile.ID] = profile
 	agentCalls := 0
 	agentServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1123,27 +1131,14 @@ func TestPreferencesSessionTakesPriorityOverMCPMode(t *testing.T) {
 	}))
 	defer agentServer.Close()
 	t.Setenv("OPENAI_BASE_URL", agentServer.URL)
-	parser := preferenceparser.Service{
-		Normalizer: fakeNormalizer{normalized: "До 700 USD"},
-		Extractor:  fakeExtractor{prefs: domain.UserPreferences{BudgetMax: intPtr(700)}},
-	}
-	bot := New("test-token", t.TempDir(), WithProfileStore(store), WithPreferencesParser(parser), WithMCPAgent(mcpagent.New("test-key", store)))
+	bot := New("test-token", t.TempDir(), WithProfileStore(store), WithMCPAgent(mcpagent.New("test-key", store)))
 
-	if _, err := bot.HandleText(49, "/preferences"); err != nil {
-		t.Fatal(err)
+	reply, err := bot.HandleText(49, "/preferences")
+	if err != nil || reply != returningUserGreeting || bot.getSession(49) != nil {
+		t.Fatalf("expected the returning greeting without a wizard session, got %q %v", reply, err)
 	}
-	reply, err := bot.HandleText(49, "До 700$")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if agentCalls != 0 || !strings.Contains(reply, "Сохранить?") {
-		t.Fatalf("expected the preferences preview instead of the agent, got %d agent calls and %q", agentCalls, reply)
-	}
-	if reply, err = bot.HandleText(49, "Сохранить"); err != nil || !strings.Contains(reply, "Готово, фильтры сохранены.") {
-		t.Fatalf("expected save confirmation, got %q %v", reply, err)
-	}
-	if reply, err = bot.HandleText(49, "Что у меня в фильтрах?"); err != nil || reply != "Агент ответил." || agentCalls != 1 {
-		t.Fatalf("expected the agent after the session ends, got %q %v", reply, err)
+	if reply, err = bot.HandleText(49, "До 700$"); err != nil || reply != "Агент ответил." || agentCalls != 1 {
+		t.Fatalf("expected the agent to answer, got %q %v after %d calls", reply, err, agentCalls)
 	}
 }
 
@@ -1257,20 +1252,95 @@ func TestMCPEditWithEchoedLocationsKeepsStoredArea(t *testing.T) {
 	}
 }
 
-func TestStartInMCPModeKeepsAgentRouting(t *testing.T) {
+func TestStartGreetsNewUserAndRecordsGreetingInHistory(t *testing.T) {
 	store := newFakeProfileStore()
-	profile := batumiMCPProfile(54)
-	store.profiles[profile.ID] = profile
+	t.Setenv("OPENAI_BASE_URL", "http://127.0.0.1:1")
+	bot := New("test-token", t.TempDir(), WithProfileStore(store), WithMCPAgent(mcpagent.New("test-key", store)))
+
+	reply, err := bot.HandleText(54, "/start")
+	if err != nil || reply != newUserGreeting {
+		t.Fatalf("expected the onboarding greeting, got %q %v", reply, err)
+	}
+	profile, ok := store.profiles[profiles.IDForTelegramChat(54)]
+	if !ok || profile.TelegramChatID != 54 || bot.getSession(54) != nil {
+		t.Fatalf("expected a profile without a wizard session, got %+v", profile)
+	}
+	history := profile.MCPHistory
+	if len(history) != 2 || history[0].Role != "user" || history[1].Role != "assistant" || history[1].Content != newUserGreeting {
+		t.Fatalf("expected the greeting turn in history, got %+v", history)
+	}
+}
+
+func TestEnsureProfileDefaultsToMatchesOnlyAndRepairsMissingChatID(t *testing.T) {
+	store := newFakeProfileStore()
 	bot := New("test-token", t.TempDir(), WithProfileStore(store))
 
-	if _, err := bot.HandleText(54, "/start"); err != nil {
+	profile, err := bot.ensureProfile(context.Background(), 57)
+	if err != nil || profile.TelegramChatID != 57 || profile.DebugMode == nil || *profile.DebugMode {
+		t.Fatalf("expected a new matches-only profile with chat id, got %+v %v", profile, err)
+	}
+	allReports := true
+	store.profiles["telegram_58"] = profiles.Profile{ID: "telegram_58", DebugMode: &allReports}
+	profile, err = bot.ensureProfile(context.Background(), 58)
+	if err != nil || profile.TelegramChatID != 58 || !*profile.DebugMode {
+		t.Fatalf("expected the chat id repaired without touching debug mode, got %+v %v", profile, err)
+	}
+}
+
+func TestNewUserMessageCreatesProfileAndReachesAgent(t *testing.T) {
+	store := newFakeProfileStore()
+	agentServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"В каком городе ищем?"}}]}`))
+	}))
+	defer agentServer.Close()
+	t.Setenv("OPENAI_BASE_URL", agentServer.URL)
+	bot := New("test-token", t.TempDir(), WithProfileStore(store), WithMCPAgent(mcpagent.New("test-key", store)))
+
+	reply, err := bot.HandleText(55, "Привет, ищу квартиру")
+	if err != nil || reply != "В каком городе ищем?" {
+		t.Fatalf("expected the agent reply, got %q %v", reply, err)
+	}
+	if _, ok := store.profiles[profiles.IDForTelegramChat(55)]; !ok {
+		t.Fatal("expected the profile to be created")
+	}
+}
+
+func TestAgentAddsSourcesThroughBot(t *testing.T) {
+	store := newFakeProfileStore()
+	requests := 0
+	var toolResult string
+	agentServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		if requests == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"add_sources","arguments":"{\"sources\":[\"@joined_rent\",\"t.me/+private\"]}"}}]}}]}`))
+			return
+		}
+		var req struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		toolResult = req.Messages[len(req.Messages)-1].Content
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Подключил."}}]}`))
+	}))
+	defer agentServer.Close()
+	t.Setenv("OPENAI_BASE_URL", agentServer.URL)
+	checker := fakeChannelAccess{"joined_rent": {Found: true, Title: "Joined Rent", Member: true}}
+	bot := New("test-token", t.TempDir(), WithProfileStore(store), WithChannelAccessChecker(checker), WithMCPAgent(mcpagent.New("test-key", store)))
+
+	if _, err := bot.HandleText(56, "@joined_rent и t.me/+private"); err != nil {
 		t.Fatal(err)
 	}
-	if bot.getSession(54) != nil {
-		t.Fatal("expected /start in MCP mode not to open a preferences session")
+	channels := store.profiles[profiles.IDForTelegramChat(56)].Channels
+	if len(channels) != 1 || channels[0].Source.Username != "joined_rent" || channels[0].Source.Title != "Joined Rent" {
+		t.Fatalf("expected joined_rent to be subscribed, got %+v", channels)
 	}
-	if _, err := bot.HandleText(54, "/preferences"); err != nil || bot.getSession(54) == nil {
-		t.Fatalf("expected /preferences to open a session, got %v", err)
+	if !strings.Contains(toolResult, "Добавлен @joined_rent") || !strings.Contains(toolResult, "t.me/+private: не подключен") {
+		t.Fatalf("expected per-source results for the agent, got %q", toolResult)
 	}
 }
 
