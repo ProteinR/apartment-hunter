@@ -10,7 +10,7 @@ COPY cmd ./cmd
 COPY internal ./internal
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -trimpath -o /bin/apartment-hunter ./cmd/apartment-hunter
+    CGO_ENABLED=0 GOMAXPROCS=1 GOGC=25 go build -p 1 -gcflags=github.com/gotd/td/tg=-l -trimpath -o /bin/apartment-hunter ./cmd/apartment-hunter
 
 FROM alpine:3.22
 
