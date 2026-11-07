@@ -2,6 +2,8 @@ package preferenceparser
 
 import (
 	"context"
+	"regexp"
+	"slices"
 	"strings"
 
 	"apartment-hunter/internal/cities"
@@ -57,11 +59,63 @@ func (s Service) BuildDraft(ctx context.Context, input string) (Draft, error) {
 	if err != nil {
 		return Draft{}, err
 	}
+	prefs.LocationPreferences = withMissingAlternatives(prefs.LocationPreferences, input+"\n"+normalized)
 	return Draft{
 		RawQuery:        input,
 		NormalizedQuery: normalized,
 		Preferences:     NormalizePreferences(*prefs),
 	}, nil
+}
+
+var placeAlternatives = regexp.MustCompile(`(?m)(?:^|[\s,.;:(])(\p{Lu}[\p{L}-]+)\s+(?:или|либо|or)\s+(\p{Lu}[\p{L}-]+)(?:[.,;:!?)]|$)`)
+
+func withMissingAlternatives(locations []domain.LocationPreference, text string) []domain.LocationPreference {
+	for _, pair := range placeAlternatives.FindAllStringSubmatch(text, -1) {
+		first, firstFound := locationNamed(locations, pair[1])
+		second, secondFound := locationNamed(locations, pair[2])
+		switch {
+		case firstFound && !secondFound && isStandalonePlace(locations, pair[2]):
+			locations = append(locations, alternativeLocation(first, pair[2]))
+		case secondFound && !firstFound && isStandalonePlace(locations, pair[1]):
+			locations = append(locations, alternativeLocation(second, pair[1]))
+		}
+	}
+	return locations
+}
+
+func isStandalonePlace(locations []domain.LocationPreference, name string) bool {
+	if _, isCity := cities.Find(name); isCity {
+		return false
+	}
+	word := strings.ToLower(name)
+	for _, location := range locations {
+		for _, text := range []string{location.Name, location.CenterName, location.RawText} {
+			if slices.Contains(strings.Fields(strings.ToLower(text)), word) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func locationNamed(locations []domain.LocationPreference, name string) (domain.LocationPreference, bool) {
+	for _, location := range locations {
+		if strings.EqualFold(strings.TrimSpace(location.Name), name) || strings.EqualFold(strings.TrimSpace(location.CenterName), name) {
+			return location, true
+		}
+	}
+	return domain.LocationPreference{}, false
+}
+
+func alternativeLocation(sibling domain.LocationPreference, name string) domain.LocationPreference {
+	return domain.LocationPreference{
+		Name:              name,
+		CenterName:        name,
+		Type:              sibling.Type,
+		RadiusMeters:      sibling.RadiusMeters,
+		MaxDistanceMeters: sibling.MaxDistanceMeters,
+		RawText:           name,
+	}
 }
 
 type NaturalLanguagePreferencesParser struct {

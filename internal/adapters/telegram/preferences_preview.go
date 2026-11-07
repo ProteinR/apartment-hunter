@@ -255,8 +255,8 @@ func displaySlug(value string) string {
 			translated = append(translated, label)
 		}
 	}
-	if len(translated) == 0 {
-		return "неуточненное требование"
+	if len(translated) < len(strings.FieldsFunc(value, func(r rune) bool { return r == '_' })) {
+		return strings.ReplaceAll(value, "_", " ")
 	}
 	return strings.Join(translated, " ")
 }
@@ -271,6 +271,8 @@ var russianFreeTextReplacements = map[string]string{
 }
 
 var russianPreferenceLabels = map[string]string{
+	"air_conditioning":                       "кондиционер",
+	"air_conditioner":                        "кондиционер",
 	"bright":                                 "светлый ремонт",
 	"dark_old_renovation":                    "темный старый ремонт",
 	"dark_walls":                             "темные стены",

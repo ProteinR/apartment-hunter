@@ -433,3 +433,54 @@ func TestPostGISGeometryBuilderTreatsWholeCityAlternativeAsNoZone(t *testing.T) 
 		t.Fatalf("expected the whole city to mean no zone, got %+v after %v", area, queries)
 	}
 }
+
+type staticNormalizer string
+
+func (n staticNormalizer) Normalize(ctx context.Context, input string) (string, error) {
+	return string(n), nil
+}
+
+type staticExtractor domain.UserPreferences
+
+func (e staticExtractor) Extract(ctx context.Context, normalized string) (*domain.UserPreferences, error) {
+	prefs := domain.UserPreferences(e)
+	return &prefs, nil
+}
+
+func TestBuildDraftRestoresDroppedDistrictAlternative(t *testing.T) {
+	service := Service{
+		Normalizer: staticNormalizer("Ищу квартиру в районах Ваке или Сабуртало."),
+		Extractor:  staticExtractor{LocationPreferences: []domain.LocationPreference{{Name: "Ваке", CenterName: "Ваке", Type: "district"}}},
+	}
+	draft, err := service.BuildDraft(context.Background(), "район Ваке или Сабуртало")
+	if err != nil {
+		t.Fatal(err)
+	}
+	locations := draft.Preferences.LocationPreferences
+	if len(locations) != 2 || locations[1].Name != "Сабуртало" || locations[1].Type != "district" {
+		t.Fatalf("expected Saburtalo to be restored, got %+v", locations)
+	}
+}
+
+func TestBuildDraftSkipsMultiWordAndCityAlternatives(t *testing.T) {
+	for _, text := range []string{
+		"Район Ваке или Старый город, до 800$.",
+		"Ваке или Тбилиси.",
+		"Махинджаури или Новый бульвар.",
+	} {
+		service := Service{
+			Normalizer: staticNormalizer(text),
+			Extractor: staticExtractor{LocationPreferences: []domain.LocationPreference{
+				{Name: "Ваке", CenterName: "Ваке"},
+				{Name: "Махинджаури", CenterName: "Махинджаури"},
+			}},
+		}
+		draft, err := service.BuildDraft(context.Background(), text)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(draft.Preferences.LocationPreferences) != 2 {
+			t.Fatalf("expected no invented location for %q, got %+v", text, draft.Preferences.LocationPreferences)
+		}
+	}
+}

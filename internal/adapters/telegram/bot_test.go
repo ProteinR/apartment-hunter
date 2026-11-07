@@ -1273,3 +1273,12 @@ func TestStartInMCPModeKeepsAgentRouting(t *testing.T) {
 		t.Fatalf("expected /preferences to open a session, got %v", err)
 	}
 }
+
+func TestPreferenceValueDisplaysUnknownSlugsInsteadOfHidingThem(t *testing.T) {
+	if got := displayPreferenceValue("air_conditioning", "ru"); got != "кондиционер" {
+		t.Fatalf("expected air conditioning label, got %q", got)
+	}
+	if got := displayPreferenceValue("heated_floor", "ru"); got != "heated floor" {
+		t.Fatalf("expected the unknown slug to stay readable, got %q", got)
+	}
+}
