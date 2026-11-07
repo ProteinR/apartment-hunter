@@ -3,6 +3,7 @@ package telegram
 import (
 	"fmt"
 	"strings"
+	"unicode/utf16"
 
 	"apartment-hunter/internal/cities"
 	"apartment-hunter/internal/domain"
@@ -95,7 +96,7 @@ func buildPreferencesPreviewWithOptions(draft preferenceparser.Draft, includeQue
 }
 
 func telegramCaptionFits(text string) bool {
-	return len([]rune(text)) <= 1024
+	return len(utf16.Encode([]rune(text))) <= 1024
 }
 
 func appendList(b *strings.Builder, title string, values []string, lang string) {

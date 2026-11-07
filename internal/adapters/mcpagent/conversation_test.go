@@ -148,7 +148,8 @@ func TestProcessCommandSetsNotificationMode(t *testing.T) {
 }
 
 type fakeSourceManager struct {
-	added []string
+	added         []string
+	suggestedCity string
 }
 
 func (m *fakeSourceManager) ListSources(ctx context.Context, telegramChatID int64) ([]string, error) {
@@ -162,6 +163,35 @@ func (m *fakeSourceManager) AddSources(ctx context.Context, telegramChatID int64
 
 func (m *fakeSourceManager) RemoveSources(ctx context.Context, telegramChatID int64, refs []string) (string, error) {
 	return "", nil
+}
+
+func (m *fakeSourceManager) SuggestSources(ctx context.Context, telegramChatID int64, city string) (string, error) {
+	m.suggestedCity = city
+	return "- @" + city + "_popular", nil
+}
+
+func TestSuggestSourcesToolReturnsPopularSources(t *testing.T) {
+	store := &fakeProfileStore{profile: profiles.Profile{ID: "telegram_42", TelegramChatID: 42, Preferences: &domain.UserPreferences{MaxBudget: 600}}}
+	requests := 0
+	var toolResult string
+	server := newAgentServer(t, func(req chatRequest) string {
+		requests++
+		if requests == 1 {
+			return `{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"suggest_sources","arguments":"{}"}}]}}]}`
+		}
+		toolResult = req.Messages[len(req.Messages)-1].Content
+		return assistantReply("Могу подключить @batumi_popular.")
+	})
+	agent := New("test-key", store)
+	agent.apiURL = server.URL
+	agent.SetSourceManager(&fakeSourceManager{})
+
+	if _, _, _, err := agent.ProcessCommand(context.Background(), "telegram_42", "какие каналы подключить?"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(toolResult, "@batumi_popular") {
+		t.Fatalf("expected popular sources in tool result, got %q", toolResult)
+	}
 }
 
 func TestProcessCommandUsesOnboardingPromptAndSourceToolsForNewUser(t *testing.T) {
@@ -186,7 +216,7 @@ func TestProcessCommandUsesOnboardingPromptAndSourceToolsForNewUser(t *testing.T
 		t.Fatalf("expected onboarding instructions, got %q", systemPrompt)
 	}
 	joined := strings.Join(toolNames, ",")
-	for _, name := range []string{"list_sources", "add_sources", "remove_sources", "set_notification_mode"} {
+	for _, name := range []string{"list_sources", "add_sources", "remove_sources", "suggest_sources", "set_notification_mode"} {
 		if !strings.Contains(joined, name) {
 			t.Fatalf("expected tool %s, got %s", name, joined)
 		}
@@ -323,5 +353,31 @@ func TestAdminToolsAreOfferedOnlyToAdmin(t *testing.T) {
 		if (len(manager.granted) == 1) != tc.admin {
 			t.Fatalf("chat %d: expected grant executed=%v, got %v", tc.chatID, tc.admin, manager.granted)
 		}
+	}
+}
+
+func TestSuggestSourcesUsesCityChosenEarlierInTheSameTurn(t *testing.T) {
+	store := &fakeProfileStore{profile: profiles.Profile{ID: "telegram_42", TelegramChatID: 42}}
+	requests := 0
+	server := newAgentServer(t, func(req chatRequest) string {
+		requests++
+		switch requests {
+		case 1:
+			return `{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"update_preferences","arguments":"{\"city\":\"tbilisi\",\"max_budget\":700}"}}]}}]}`
+		case 2:
+			return `{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_2","type":"function","function":{"name":"suggest_sources","arguments":"{}"}}]}}]}`
+		}
+		return assistantReply("Готово.")
+	})
+	agent := New("test-key", store)
+	agent.apiURL = server.URL
+	sources := &fakeSourceManager{}
+	agent.SetSourceManager(sources)
+
+	if _, _, _, err := agent.ProcessCommand(context.Background(), "telegram_42", "да, запускай"); err != nil {
+		t.Fatal(err)
+	}
+	if sources.suggestedCity != "tbilisi" {
+		t.Fatalf("expected suggestions for tbilisi, got %q", sources.suggestedCity)
 	}
 }

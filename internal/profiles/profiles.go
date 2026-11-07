@@ -182,3 +182,16 @@ func FilterDisabled(profile Profile) bool {
 	}
 	return *profile.FilterDisabled
 }
+
+type PopularSource struct {
+	Username string
+	Title    string
+	Users    int
+}
+
+type QuietSearch struct {
+	ProfileID      string
+	TelegramChatID int64
+	QuietSince     time.Time
+	StatusCounts   map[string]int
+}

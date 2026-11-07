@@ -107,6 +107,9 @@ alter table profiles
 
 alter table profiles drop column if exists preferences;
 
+alter table profiles
+	add column if not exists quiet_nudge_at timestamptz default now();
+
 create table if not exists user_search_profiles (
 	id bigserial primary key,
 	user_id text not null,

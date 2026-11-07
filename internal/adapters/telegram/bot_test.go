@@ -409,7 +409,7 @@ func TestMCPMapRequestAttachesSearchAreaImage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.Text != "Прикрепляю изображение текущей зоны поиска." {
+	if response.Text != "Прикрепляю изображение текущей зоны поиска.\n\n"+searchAreaMapHint {
 		t.Fatalf("unexpected MCP reply %q", response.Text)
 	}
 	if response.PhotoFilename != "search-area-map.png" || string(response.PhotoBytes) != "png-bytes" {
@@ -1367,5 +1367,98 @@ func TestPreferenceValueTranslatesCommonAmenitiesAndFloorRules(t *testing.T) {
 		if got := displayPreferenceValue(slug, "ru"); got != want {
 			t.Fatalf("displayPreferenceValue(%q) = %q, want %q", slug, got, want)
 		}
+	}
+}
+
+func TestFirstSaveExplainsNextStepOnlyWhenSourcesExist(t *testing.T) {
+	for _, withSources := range []bool{true, false} {
+		store := newFakeProfileStore()
+		profile := profiles.Profile{ID: "telegram_61", TelegramChatID: 61}
+		if withSources {
+			profile.Channels = []profiles.ChannelSubscription{{Source: sources.ChannelRef{ID: "batumi_rent", Username: "batumi_rent"}}}
+		}
+		store.profiles[profile.ID] = profile
+		newScriptedAgentServer(t, `{"max_budget":600}`)
+		bot := New("test-token", t.TempDir(), WithProfileStore(store), WithMCPAgent(mcpagent.New("test-key", store)))
+
+		response, err := bot.handleTextResponse(61, "да, запускай")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(response.Text, searchStartedNote); got != withSources {
+			t.Fatalf("withSources=%v: unexpected next-step note in %q", withSources, response.Text)
+		}
+		if store.profiles[profile.ID].Preferences == nil {
+			t.Fatal("expected preferences to be saved")
+		}
+	}
+}
+
+func TestLaterSavesDoNotRepeatNextStepNote(t *testing.T) {
+	store := newFakeProfileStore()
+	profile := batumiMCPProfile(62)
+	profile.Channels = []profiles.ChannelSubscription{{Source: sources.ChannelRef{ID: "batumi_rent", Username: "batumi_rent"}}}
+	store.profiles[profile.ID] = profile
+	newScriptedAgentServer(t, `{"max_budget":700}`)
+	bot := New("test-token", t.TempDir(), WithProfileStore(store), WithMCPAgent(mcpagent.New("test-key", store)))
+
+	response, err := bot.handleTextResponse(62, "подними бюджет до 700")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(response.Text, searchStartedNote) {
+		t.Fatalf("expected no next-step note on a later edit, got %q", response.Text)
+	}
+}
+
+type popularSourcesStore struct {
+	*fakeProfileStore
+	city      string
+	profileID string
+}
+
+func (s *popularSourcesStore) PopularSources(ctx context.Context, profileID, city string, limit int) ([]profiles.PopularSource, error) {
+	s.city, s.profileID = city, profileID
+	if city != "tbilisi" {
+		return nil, nil
+	}
+	return []profiles.PopularSource{{Username: "tbilisi_flats", Title: "Tbilisi Flats", Users: 3}}, nil
+}
+
+func TestSuggestSourcesUsesProfileCity(t *testing.T) {
+	store := &popularSourcesStore{fakeProfileStore: newFakeProfileStore()}
+	store.profiles["telegram_63"] = profiles.Profile{ID: "telegram_63", TelegramChatID: 63, Preferences: &domain.UserPreferences{City: "tbilisi"}}
+	bot := New("test-token", t.TempDir(), WithProfileStore(store))
+
+	result, err := bot.SuggestSources(context.Background(), 63, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.city != "tbilisi" || store.profileID != "telegram_63" || !strings.Contains(result, "@tbilisi_flats — Tbilisi Flats") {
+		t.Fatalf("unexpected suggestions %q for city %q", result, store.city)
+	}
+	store.profiles["telegram_64"] = profiles.Profile{ID: "telegram_64", TelegramChatID: 64}
+	result, err = bot.SuggestSources(context.Background(), 64, "")
+	if err != nil || store.city != "batumi" || !strings.Contains(result, "no popular sources") {
+		t.Fatalf("expected an empty batumi answer, got %q %v", result, err)
+	}
+	if _, err := bot.SuggestSources(context.Background(), 64, "tbilisi"); err != nil || store.city != "tbilisi" {
+		t.Fatalf("expected the agent city to win over the stored one, got %q %v", store.city, err)
+	}
+}
+
+func TestSearchAreaMapHintKeepsLongRepliesUnchanged(t *testing.T) {
+	long := strings.Repeat("а", 1020)
+	if withSearchAreaMapHint(long) != long {
+		t.Fatal("expected a long reply to stay unchanged")
+	}
+	if !strings.HasSuffix(withSearchAreaMapHint("Готово."), searchAreaMapHint) {
+		t.Fatal("expected the map hint appended")
+	}
+}
+
+func TestNewUserGreetingShowsExampleQuery(t *testing.T) {
+	if !strings.Contains(newUserGreeting, "например: «Батуми, до 600$") {
+		t.Fatalf("expected an example query in the greeting, got %q", newUserGreeting)
 	}
 }

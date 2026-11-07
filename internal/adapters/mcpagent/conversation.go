@@ -28,6 +28,7 @@ type SourceManager interface {
 	ListSources(ctx context.Context, telegramChatID int64) ([]string, error)
 	AddSources(ctx context.Context, telegramChatID int64, refs []string) (string, error)
 	RemoveSources(ctx context.Context, telegramChatID int64, refs []string) (string, error)
+	SuggestSources(ctx context.Context, telegramChatID int64, city string) (string, error)
 }
 
 func (a *Agent) SetSourceManager(sources SourceManager) {
@@ -350,6 +351,7 @@ func (a *Agent) conversationTools(profile profiles.Profile, canListChats, canMan
 			functionTool("list_sources", "Возвращает актуальный список Telegram-каналов и групп, из которых сейчас читаются объявления для пользователя.", map[string]any{"type": "object", "properties": map[string]any{}}),
 			functionTool("add_sources", "Подключает публичные Telegram-каналы или группы с объявлениями об аренде как источники. Результат сообщает по каждому, подключен ли он и может ли бот его читать.", sourceRefsParameters("Ссылки t.me/name или @username, как их прислал пользователь")),
 			functionTool("remove_sources", "Отключает источники объявлений.", sourceRefsParameters("@username или ссылки t.me/name источников, которые нужно отключить")),
+			functionTool("suggest_sources", "Возвращает популярные публичные каналы и группы с арендой в городе поиска пользователя, которые уже читают другие пользователи бота и которые у него еще не подключены.", map[string]any{"type": "object", "properties": map[string]any{}}),
 		)
 	}
 	if canManageUsers {
@@ -513,6 +515,15 @@ func (a *Agent) executeTool(ctx context.Context, profile *profiles.Profile, tc t
 			return "no sources connected"
 		}
 		return strings.Join(sources, "\n")
+	case "suggest_sources":
+		if !a.mayManageSources(*profile) {
+			return "unknown function"
+		}
+		result, err := a.sources.SuggestSources(ctx, profile.TelegramChatID, profileSearchCity(*profile).Key)
+		if err != nil {
+			return "error: " + err.Error()
+		}
+		return result
 	case "add_sources", "remove_sources":
 		if !a.mayManageSources(*profile) {
 			return "unknown function"

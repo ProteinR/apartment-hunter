@@ -227,11 +227,10 @@ func (b *Bot) handleMessage(ctx context.Context, api *telegrambot.Bot, chatID in
 		return sendDocumentBytesWithMarkup(ctx, api, chatID, response.DocumentFilename, response.DocumentBytes, response.Text, response.ReplyMarkup)
 	}
 	if len(response.PhotoBytes) > 0 {
-		textRunes := []rune(response.Text)
-		if len(textRunes) <= 1024 {
+		if telegramCaptionFits(response.Text) {
 			return sendPhotoBytesWithMarkup(ctx, api, chatID, response.PhotoFilename, response.PhotoBytes, response.Text, response.ReplyMarkup)
 		}
-		if err := sendPhotoBytesWithMarkup(ctx, api, chatID, response.PhotoFilename, response.PhotoBytes, "Карта зоны поиска", nil); err != nil {
+		if err := sendPhotoBytesWithMarkup(ctx, api, chatID, response.PhotoFilename, response.PhotoBytes, searchAreaMapHint, nil); err != nil {
 			return err
 		}
 		return sendMessageWithMarkup(ctx, api, chatID, response.Text, response.ReplyMarkup)
@@ -336,6 +335,9 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 				return textResponse{Text: friendlyFailure("save filters", chatID, err), ReplyMarkup: removeKeyboard()}, nil
 			}
 			reply += cityNote
+			if profile.Preferences == nil && prefsChanged != nil && b.hasSources(context.Background(), chatID) {
+				reply = strings.TrimSpace(reply) + "\n\n" + searchStartedNote
+			}
 		}
 		resp := textResponse{
 			Text:        reply,
@@ -349,6 +351,7 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 					if mapImage, err := b.mapRenderer.SearchAreaImage(context.Background(), geoJSON); err == nil && len(mapImage) > 0 {
 						resp.PhotoFilename = "search-area-map.png"
 						resp.PhotoBytes = mapImage
+						resp.Text = withSearchAreaMapHint(resp.Text)
 					}
 				}
 			}
@@ -418,10 +421,23 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 const (
 	newUserGreeting = `Привет! Я ищу квартиры в аренду: читаю Telegram-каналы с объявлениями и присылаю только те, что тебе подходят.
 
-Настроим поиск прямо в переписке — отвечай обычными сообщениями, можно коротко или сразу всё одним текстом. Для начала: в каком городе ищем, Батуми или Тбилиси, и какой бюджет в месяц?`
+Настроим поиск прямо в переписке — отвечай обычными сообщениями. Можно сразу всё одним текстом, например: «Батуми, до 600$, от 45 м², рядом с Новым бульваром, с кондиционером, без советского ремонта».
+
+Или по шагам. Для начала: в каком городе ищем, Батуми или Тбилиси, и какой бюджет в месяц?`
 	returningUserGreeting = `Привет! Поиск уже настроен. Просто напиши, что поменять: например, «подними бюджет до 700$», «добавь канал @name» или «присылай только подходящие». Чтобы увидеть текущие настройки и карту зоны, спроси «покажи мой поиск».`
+	searchStartedNote     = `✅ Дальше я работаю сам: проверяю новые объявления в подключенных источниках и присылаю сюда только подходящие. Поменять поиск можно в любой момент — просто напиши.`
 	conversationModeNote  = `Отдельный режим больше не нужен: просто пиши мне обычными сообщениями, я пойму и сам поменяю настройки. /reset начинает разговор заново, фильтры при этом сохраняются.`
 )
+
+const searchAreaMapHint = "🗺 На карте — зона, где я ищу. Если нужно шире, уже или в другом месте, просто напиши."
+
+func withSearchAreaMapHint(text string) string {
+	withHint := strings.TrimSpace(text) + "\n\n" + searchAreaMapHint
+	if !telegramCaptionFits(withHint) {
+		return text
+	}
+	return withHint
+}
 
 func (b *Bot) chatLock(chatID int64) *sync.Mutex {
 	b.mu.Lock()
@@ -471,6 +487,44 @@ func (b *Bot) startConversation(ctx context.Context, chatID int64) (textResponse
 		return textResponse{}, err
 	}
 	return textResponse{Text: greeting, ReplyMarkup: removeKeyboard()}, nil
+}
+
+func (b *Bot) hasSources(ctx context.Context, chatID int64) bool {
+	sources, err := b.channelList(ctx, chatID)
+	return err == nil && len(sources) > 0
+}
+
+type popularSourceStore interface {
+	PopularSources(ctx context.Context, profileID, city string, limit int) ([]profiles.PopularSource, error)
+}
+
+const popularSourcesLimit = 5
+
+func (b *Bot) SuggestSources(ctx context.Context, chatID int64, cityKey string) (string, error) {
+	store, ok := b.store.(popularSourceStore)
+	if !ok {
+		return "no suggestions available", nil
+	}
+	city, ok := cities.Find(cityKey)
+	if !ok {
+		city = b.profileCity(ctx, chatID)
+	}
+	popular, err := store.PopularSources(ctx, profiles.IDForTelegramChat(chatID), city.Key, popularSourcesLimit)
+	if err != nil {
+		return "", err
+	}
+	if len(popular) == 0 {
+		return "no popular sources for " + city.Key + " yet", nil
+	}
+	lines := []string{"Popular sources in " + city.Key + " that other users already read (not connected for this user yet):"}
+	for _, source := range popular {
+		line := "- @" + source.Username
+		if source.Title != "" {
+			line += " — " + source.Title
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n"), nil
 }
 
 func (b *Bot) ListSources(ctx context.Context, chatID int64) ([]string, error) {

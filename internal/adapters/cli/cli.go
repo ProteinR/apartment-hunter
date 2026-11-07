@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf16"
 
 	"apartment-hunter/internal/adapters/geocodingmock"
 	"apartment-hunter/internal/adapters/googlemaps"
@@ -35,7 +36,7 @@ import (
 	pgstore "apartment-hunter/internal/storage/postgres"
 )
 
-const telegramPhotoCaptionMaxRunes = 1024
+const telegramPhotoCaptionMaxUnits = 1024
 
 type App struct {
 	In  io.Reader
@@ -301,6 +302,24 @@ func (a App) telegramProcessWithContext(parent context.Context, onlyProfileID st
 	if pipeline.botToken == "" {
 		fmt.Fprintf(a.Out, "Telegram notifications disabled: TELEGRAM_BOT_TOKEN is not set\n")
 	}
+	nudgeDone := make(chan struct{})
+	if pipeline.botToken != "" {
+		nudger := quietSearchNudger{
+			store: store,
+			send: func(ctx context.Context, chatID int64, text string) error {
+				_, err := telegram.SendTextMessageID(ctx, pipeline.botToken, chatID, text)
+				return err
+			},
+			onlyProfileID: onlyProfileID,
+			errOut:        a.Err,
+		}
+		go func() {
+			defer close(nudgeDone)
+			nudger.Run(ctx, quietSearchCheckInterval)
+		}()
+	} else {
+		close(nudgeDone)
+	}
 	catchUpDone := make(chan struct{})
 	go func() {
 		defer close(catchUpDone)
@@ -310,6 +329,7 @@ func (a App) telegramProcessWithContext(parent context.Context, onlyProfileID st
 	err = reader.Listen(ctx, worker.HandleLiveMessage)
 	cancel()
 	<-catchUpDone
+	<-nudgeDone
 	return err
 }
 
@@ -384,7 +404,7 @@ func (p listingPipeline) process(ctx context.Context, profile profiles.Profile, 
 
 func (p listingPipeline) notify(ctx context.Context, profile profiles.Profile, message sources.ChannelMessage, record domain.ListingEvaluationRecord) error {
 	fmt.Fprintf(p.out, "Sending notification for %s/%d to chat %d\n", message.ChannelID, message.MessageID, profile.TelegramChatID)
-	notificationText := evaluation.NotificationText(record)
+	notificationText := evaluation.NotificationText(record) + listingReplyHint
 	var botMessageID int
 	var err error
 	if mapImage, ok, mapErr := listingSearchAreaMapImage(ctx, p.store, p.mapRenderer, record); mapErr != nil {
@@ -415,8 +435,10 @@ func (p listingPipeline) notify(ctx context.Context, profile profiles.Profile, m
 	return nil
 }
 
+const listingReplyHint = "\n\n💬 Ответь на это сообщение, что нравится или не подходит, и я подстрою поиск."
+
 func telegramCaptionFits(text string) bool {
-	return len([]rune(text)) <= telegramPhotoCaptionMaxRunes
+	return len(utf16.Encode([]rune(text))) <= telegramPhotoCaptionMaxUnits
 }
 
 // albumTextResolver fetches the caption/text of a grouped Telegram album by scanning
