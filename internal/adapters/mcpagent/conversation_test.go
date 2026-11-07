@@ -381,3 +381,13 @@ func TestSuggestSourcesUsesCityChosenEarlierInTheSameTurn(t *testing.T) {
 		t.Fatalf("expected suggestions for tbilisi, got %q", sources.suggestedCity)
 	}
 }
+
+func TestAgentAbilitiesForbidOfferingReaderChatsToNonOwners(t *testing.T) {
+	const forbidden = "никогда не предлагай поискать или посмотреть, на что подписан владелец бота"
+	if !strings.Contains(agentAbilities(true, false, false), forbidden) {
+		t.Fatal("expected non-owners to be told not to offer reader chats")
+	}
+	if strings.Contains(agentAbilities(true, true, false), forbidden) {
+		t.Fatal("expected the owner to keep the reader chats offer")
+	}
+}
