@@ -191,7 +191,8 @@ Use stable English slugs only for machine-readable enum/list fields such as requ
 Ambiguous location phrases must be preserved in unresolved_location_rules in the original input language.
 Extract any stop words (words or phrases that should trigger rejection of the listing) mentioned by the user into the stop_words array in their original language.
 Set city to "batumi" or "tbilisi" only when the input names that city explicitly; otherwise use null.
-Create one location_preferences object per named district, landmark or place; alternatives such as "Vake or Saburtalo" are separate objects, and the search covers any of them.
+Create one location_preferences object per named district, landmark or place. Districts joined by "или", "or", "либо", commas or "/" are alternatives: output every one of them as its own object, never only the first. Example: "район Ваке или Сабуртало" gives two objects, {"name":"Ваке","center_name":"Ваке","raw_text":"район Ваке"} and {"name":"Сабуртало","center_name":"Сабуртало","raw_text":"район Сабуртало"}. Alternatives are not ambiguous and do not go to unresolved_location_rules.
+Amenities marked "обязательно", "нужна", "нужен", "must" or "required" go to required_amenities; amenities marked "желательно", "хорошо бы" or "preferably" go to preferred_amenities.
 Each object names exactly one place in name and center_name, without words like "district" or "or".
 Set radius_meters only when the input gives a distance; otherwise use null.
 Do not create a location_preferences object for the whole city; a city name alone only sets city.`
