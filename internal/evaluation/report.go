@@ -48,7 +48,7 @@ func BuildReport(record domain.ListingEvaluationRecord, prefs domain.UserPrefere
 		lines = append(lines, "", "⚠️ Ошибка: "+record.FailureReason)
 	}
 	if record.AIUsage != nil && record.AIUsage.TotalTokens > 0 {
-		lines = append(lines, "", fmt.Sprintf("🤖 OpenAI: %s, tokens %d, cost $%.6f", record.AIUsage.Model, record.AIUsage.TotalTokens, record.AIUsage.CostUSD))
+		lines = append(lines, "", fmt.Sprintf("🤖 %s: %s, tokens %d, cost $%.6f", aiProviderLabel(record.AIUsage.Provider), record.AIUsage.Model, record.AIUsage.TotalTokens, record.AIUsage.CostUSD))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -301,3 +301,9 @@ func appliancesNote(listing domain.ApartmentListing, prefs domain.UserPreference
 	return " (нет: " + strings.Join(missing, ", ") + ")"
 }
 
+func aiProviderLabel(provider string) string {
+	if strings.EqualFold(strings.TrimSpace(provider), "anthropic") {
+		return "Anthropic"
+	}
+	return "OpenAI"
+}

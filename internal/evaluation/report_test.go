@@ -238,3 +238,18 @@ func TestBuildReportSimplifiesLocationNote(t *testing.T) {
 	}
 }
 
+func TestBuildReportNamesAIProviderFromUsage(t *testing.T) {
+	for provider, expected := range map[string]string{
+		"anthropic":  "🤖 Anthropic: claude-haiku-5-5, tokens 1200, cost $0.000150",
+		"openrouter": "🤖 OpenAI: claude-haiku-5-5, tokens 1200, cost $0.000150",
+	} {
+		report := BuildReport(domain.ListingEvaluationRecord{
+			Listing: domain.ApartmentListing{Title: "Apartment"},
+			Status:  "passed",
+			AIUsage: &domain.AIUsage{Provider: provider, Model: "claude-haiku-5-5", TotalTokens: 1200, CostUSD: 0.00015},
+		}, domain.UserPreferences{})
+		if !strings.Contains(report, expected) {
+			t.Fatalf("expected report to contain %q:\n%s", expected, report)
+		}
+	}
+}

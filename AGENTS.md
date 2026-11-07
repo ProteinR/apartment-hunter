@@ -20,7 +20,7 @@ When you need to look at an actual Telegram post (for example, to reproduce a fe
 - `internal/storage/postgres` owns schema and persistence.
 - `internal/evaluation` is the main listing processing pipeline.
 
-Text models (preferences parser and MCP agent) use Anthropic when `ANTHROPIC_API_KEY` is set: official Go SDK, model `ANTHROPIC_MODEL` (default `claude-haiku-5-5`), optional `ANTHROPIC_EFFORT`. The parser sends its schema as `output_config.format`, stripped of numeric/string/array constraints that Anthropic structured outputs reject; nullable enums must use `anyOf`. Without the Anthropic key both fall back to the OpenRouter/OpenAI chat-completions path. Vision (`openaivision`) stays on OpenAI.
+Text models (preferences parser and MCP agent) use Anthropic when `ANTHROPIC_API_KEY` is set: official Go SDK, model `ANTHROPIC_MODEL` (default `claude-haiku-5-5`), optional `ANTHROPIC_EFFORT`. The parser sends its schema as `output_config.format`, stripped of numeric/string/array constraints that Anthropic structured outputs reject; nullable enums must use `anyOf`. Without the Anthropic key both fall back to the OpenRouter/OpenAI chat-completions path. Listing photo analysis (`openaivision`) also uses Anthropic when `ANTHROPIC_API_KEY` is set: model `ANTHROPIC_VISION_MODEL`, else `ANTHROPIC_MODEL`, base64 JPEG image blocks and the same sanitized schema; cost uses Haiku 5.5 prices ($0.10/$0.01/$0.50 per million input/cache-read/output tokens, overridable via `ANTHROPIC_VISION_*_PRICE_PER_MILLION_USD`). Without the key it falls back to OpenRouter/OpenAI `OPENAI_VISION_MODEL`. The report line names the provider from `AIUsage.Provider`.
 
 ## Telegram Profiles And Subscriptions
 

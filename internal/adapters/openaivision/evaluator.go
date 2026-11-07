@@ -22,6 +22,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
+
 	"apartment-hunter/internal/domain"
 )
 
@@ -30,6 +33,14 @@ const (
 	defaultModel       = "openai/gpt-4o-mini"
 	defaultMaxImageDim = 768
 	defaultMaxPhotos   = 8
+
+	DefaultAnthropicModel = "claude-haiku-5-5"
+	anthropicMaxTokens    = 16000
+
+	providerOpenRouter = "openrouter"
+	providerAnthropic  = "anthropic"
+
+	systemInstructions = "You evaluate rental apartment listings. Use the listing text and photos. Return only structured JSON matching the schema. Be conservative: mark visual defects true only when clearly visible or directly stated. Mark dishwasher and oven true when they are directly stated in text or clearly visible in the kitchen photos."
 )
 
 type Evaluator struct {
@@ -40,6 +51,9 @@ type Evaluator struct {
 	maxPhotos   int
 	pricing     Pricing
 	client      *http.Client
+
+	anthropic *anthropic.Client
+	effort    string
 
 	mu      sync.Mutex
 	lastErr error
@@ -117,7 +131,30 @@ func New(apiKey string, opts ...Option) *Evaluator {
 	return e
 }
 
+func NewAnthropic(apiKey, model, effort string, opts ...option.RequestOption) *Evaluator {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		model = DefaultAnthropicModel
+	}
+	client := anthropic.NewClient(append([]option.RequestOption{option.WithAPIKey(strings.TrimSpace(apiKey)), option.WithRequestTimeout(90 * time.Second)}, opts...)...)
+	e := New(apiKey, WithModel(model), WithPricing(anthropicPricingFromEnv()))
+	e.anthropic = &client
+	e.effort = strings.TrimSpace(effort)
+	return e
+}
+
 func FromEnv(opts ...Option) (*Evaluator, error) {
+	if anthropicKey := strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")); anthropicKey != "" {
+		model := strings.TrimSpace(os.Getenv("ANTHROPIC_VISION_MODEL"))
+		if model == "" {
+			model = os.Getenv("ANTHROPIC_MODEL")
+		}
+		evaluator := NewAnthropic(anthropicKey, model, os.Getenv("ANTHROPIC_EFFORT"))
+		for _, opt := range opts {
+			opt(evaluator)
+		}
+		return evaluator, nil
+	}
 	apiKey := strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY"))
 	if apiKey == "" {
 		apiKey = strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
@@ -126,7 +163,7 @@ func FromEnv(opts ...Option) (*Evaluator, error) {
 		return nil, errors.New("neither OPENROUTER_API_KEY nor OPENAI_API_KEY is configured for OpenAI vision evaluator")
 	}
 	envOpts := []Option{}
-	
+
 	model := strings.TrimSpace(os.Getenv("OPENROUTER_VISION_MODEL"))
 	if model == "" {
 		model = strings.TrimSpace(os.Getenv("OPENAI_VISION_MODEL"))
@@ -134,7 +171,7 @@ func FromEnv(opts ...Option) (*Evaluator, error) {
 	if model != "" {
 		envOpts = append(envOpts, WithModel(model))
 	}
-	
+
 	baseURL := strings.TrimSpace(os.Getenv("OPENROUTER_BASE_URL"))
 	if baseURL == "" {
 		baseURL = strings.TrimSpace(os.Getenv("OPENAI_BASE_URL"))
@@ -142,7 +179,7 @@ func FromEnv(opts ...Option) (*Evaluator, error) {
 	if baseURL != "" {
 		envOpts = append(envOpts, WithAPIURL(strings.TrimRight(baseURL, "/")+"/chat/completions"))
 	}
-	
+
 	envOpts = append(envOpts, opts...)
 	return New(apiKey, envOpts...), nil
 }
@@ -180,23 +217,20 @@ func (e *Evaluator) analyze(ctx context.Context, listing domain.ApartmentListing
 		return domain.ListingInsights{}, domain.AIUsage{}, errors.New("missing API key")
 	}
 
+	photos := e.encodedPhotos(ctx, listing)
+	if e.anthropic != nil {
+		return e.analyzeAnthropic(ctx, listing, photos)
+	}
+
 	content := []contentItem{{
 		Type: "text",
 		Text: listingPrompt(listing),
 	}}
-
-	for i, photo := range listing.Photos {
-		if i >= e.maxPhotos {
-			break
-		}
-		dataURL, err := e.resizedPhotoDataURL(ctx, photo.URL)
-		if err != nil {
-			continue
-		}
+	for _, photo := range photos {
 		content = append(content, contentItem{
 			Type: "image_url",
 			ImageURL: &contentImageURL{
-				URL:    dataURL,
+				URL:    "data:image/jpeg;base64," + photo,
 				Detail: "low",
 			},
 		})
@@ -207,7 +241,7 @@ func (e *Evaluator) analyze(ctx context.Context, listing domain.ApartmentListing
 		Messages: []chatMessage{
 			{
 				Role:    "system",
-				Content: "You evaluate rental apartment listings. Use the listing text and photos. Return only structured JSON matching the schema. Be conservative: mark visual defects true only when clearly visible or directly stated. Mark dishwasher and oven true when they are directly stated in text or clearly visible in the kitchen photos.",
+				Content: systemInstructions,
 			},
 			{
 				Role:    "user",
@@ -261,7 +295,64 @@ func (e *Evaluator) analyze(ctx context.Context, listing domain.ApartmentListing
 	return normalizeInsights(insights), usage, nil
 }
 
-func (e *Evaluator) resizedPhotoDataURL(ctx context.Context, source string) (string, error) {
+func (e *Evaluator) analyzeAnthropic(ctx context.Context, listing domain.ApartmentListing, photos []string) (domain.ListingInsights, domain.AIUsage, error) {
+	content := []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(listingPrompt(listing))}
+	for _, photo := range photos {
+		content = append(content, anthropic.NewImageBlockBase64("image/jpeg", photo))
+	}
+	params := anthropic.MessageNewParams{
+		Model:     anthropic.Model(e.model),
+		MaxTokens: anthropicMaxTokens,
+		System:    []anthropic.TextBlockParam{{Text: systemInstructions}},
+		Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(content...)},
+		OutputConfig: anthropic.OutputConfigParam{
+			Effort: anthropic.OutputConfigEffort(e.effort),
+			Format: anthropic.JSONOutputFormatParam{Schema: anthropicSchema(jsonSchemaFormat().Schema).(map[string]any)},
+		},
+	}
+	resp, err := e.anthropic.Messages.New(ctx, params)
+	if err != nil {
+		return domain.ListingInsights{}, domain.AIUsage{}, fmt.Errorf("vision anthropic api: %w", err)
+	}
+	cachedInput := int(resp.Usage.CacheReadInputTokens)
+	input := int(resp.Usage.InputTokens+resp.Usage.CacheCreationInputTokens) + cachedInput
+	output := int(resp.Usage.OutputTokens)
+	usage := usageFromResponse(providerAnthropic, e.model, e.pricing, input, cachedInput, output, 0, input+output)
+	switch resp.StopReason {
+	case anthropic.StopReasonRefusal:
+		return domain.ListingInsights{}, usage, errors.New("vision anthropic model refused the request")
+	case anthropic.StopReasonMaxTokens:
+		return domain.ListingInsights{}, usage, errors.New("vision anthropic response hit max_tokens")
+	}
+	var text strings.Builder
+	for _, block := range resp.Content {
+		if variant, ok := block.AsAny().(anthropic.TextBlock); ok {
+			text.WriteString(variant.Text)
+		}
+	}
+	var insights domain.ListingInsights
+	if err := json.Unmarshal([]byte(text.String()), &insights); err != nil {
+		return domain.ListingInsights{}, usage, err
+	}
+	return normalizeInsights(insights), usage, nil
+}
+
+func (e *Evaluator) encodedPhotos(ctx context.Context, listing domain.ApartmentListing) []string {
+	var photos []string
+	for i, photo := range listing.Photos {
+		if i >= e.maxPhotos {
+			break
+		}
+		encoded, err := e.resizedPhotoBase64(ctx, photo.URL)
+		if err != nil {
+			continue
+		}
+		photos = append(photos, encoded)
+	}
+	return photos
+}
+
+func (e *Evaluator) resizedPhotoBase64(ctx context.Context, source string) (string, error) {
 	source = strings.TrimSpace(source)
 	if source == "" || strings.HasPrefix(source, "mock://") {
 		return "", errors.New("unsupported photo source")
@@ -281,7 +372,7 @@ func (e *Evaluator) resizedPhotoDataURL(ctx context.Context, source string) (str
 	if err := jpeg.Encode(&out, resized, &jpeg.Options{Quality: 82}); err != nil {
 		return "", err
 	}
-	return "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(out.Bytes()), nil
+	return base64.StdEncoding.EncodeToString(out.Bytes()), nil
 }
 
 func (e *Evaluator) setLastError(err error) {
@@ -413,8 +504,8 @@ type chatMessage struct {
 }
 
 type contentItem struct {
-	Type     string            `json:"type"`
-	Text     string            `json:"text,omitempty"`
+	Type     string           `json:"type"`
+	Text     string           `json:"text,omitempty"`
 	ImageURL *contentImageURL `json:"image_url,omitempty"`
 }
 
@@ -498,10 +589,10 @@ func extractOutputTextAndUsage(body []byte, model string, pricing Pricing) (stri
 			} `json:"message"`
 		} `json:"choices"`
 		Usage struct {
-			PromptTokens            int `json:"prompt_tokens"`
-			CompletionTokens        int `json:"completion_tokens"`
-			TotalTokens             int `json:"total_tokens"`
-			PromptTokensDetails     struct {
+			PromptTokens        int `json:"prompt_tokens"`
+			CompletionTokens    int `json:"completion_tokens"`
+			TotalTokens         int `json:"total_tokens"`
+			PromptTokensDetails struct {
 				CachedTokens int `json:"cached_tokens"`
 			} `json:"prompt_tokens_details"`
 			CompletionTokensDetails struct {
@@ -515,17 +606,17 @@ func extractOutputTextAndUsage(body []byte, model string, pricing Pricing) (stri
 	if len(response.Choices) == 0 {
 		return "", domain.AIUsage{}, errors.New("API response did not contain choices")
 	}
-	usage := usageFromResponse(model, pricing, response.Usage.PromptTokens, response.Usage.PromptTokensDetails.CachedTokens, response.Usage.CompletionTokens, response.Usage.CompletionTokensDetails.ReasoningTokens, response.Usage.TotalTokens)
+	usage := usageFromResponse(providerOpenRouter, model, pricing, response.Usage.PromptTokens, response.Usage.PromptTokensDetails.CachedTokens, response.Usage.CompletionTokens, response.Usage.CompletionTokensDetails.ReasoningTokens, response.Usage.TotalTokens)
 	return response.Choices[0].Message.Content, usage, nil
 }
 
-func usageFromResponse(model string, pricing Pricing, inputTokens, cachedInputTokens, outputTokens, reasoningTokens, totalTokens int) domain.AIUsage {
+func usageFromResponse(provider, model string, pricing Pricing, inputTokens, cachedInputTokens, outputTokens, reasoningTokens, totalTokens int) domain.AIUsage {
 	billableInput := max(0, inputTokens-cachedInputTokens)
 	cost := (float64(billableInput)*pricing.InputPerMillionUSD +
 		float64(cachedInputTokens)*pricing.CachedInputPerMillionUSD +
 		float64(outputTokens)*pricing.OutputPerMillionUSD) / 1_000_000
 	return domain.AIUsage{
-		Provider:                      "openrouter",
+		Provider:                      provider,
 		Model:                         model,
 		InputTokens:                   inputTokens,
 		CachedInputTokens:             cachedInputTokens,
@@ -545,6 +636,48 @@ func pricingFromEnv() Pricing {
 		CachedInputPerMillionUSD: envFloat("OPENAI_VISION_CACHED_INPUT_PRICE_PER_MILLION_USD", 0.10),
 		OutputPerMillionUSD:      envFloat("OPENAI_VISION_OUTPUT_PRICE_PER_MILLION_USD", 1.60),
 	}
+}
+
+func anthropicPricingFromEnv() Pricing {
+	return Pricing{
+		InputPerMillionUSD:       envFloat("ANTHROPIC_VISION_INPUT_PRICE_PER_MILLION_USD", 0.10),
+		CachedInputPerMillionUSD: envFloat("ANTHROPIC_VISION_CACHED_INPUT_PRICE_PER_MILLION_USD", 0.01),
+		OutputPerMillionUSD:      envFloat("ANTHROPIC_VISION_OUTPUT_PRICE_PER_MILLION_USD", 0.50),
+	}
+}
+
+var anthropicUnsupportedSchemaKeys = map[string]bool{
+	"minimum":          true,
+	"maximum":          true,
+	"exclusiveMinimum": true,
+	"exclusiveMaximum": true,
+	"multipleOf":       true,
+	"minLength":        true,
+	"maxLength":        true,
+	"minItems":         true,
+	"maxItems":         true,
+	"uniqueItems":      true,
+}
+
+func anthropicSchema(node any) any {
+	switch value := node.(type) {
+	case map[string]any:
+		cleaned := make(map[string]any, len(value))
+		for key, child := range value {
+			if anthropicUnsupportedSchemaKeys[key] {
+				continue
+			}
+			cleaned[key] = anthropicSchema(child)
+		}
+		return cleaned
+	case []any:
+		cleaned := make([]any, len(value))
+		for i, child := range value {
+			cleaned[i] = anthropicSchema(child)
+		}
+		return cleaned
+	}
+	return node
 }
 
 func envFloat(name string, fallback float64) float64 {
