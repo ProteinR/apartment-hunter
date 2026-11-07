@@ -12,12 +12,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
+
 	"apartment-hunter/internal/domain"
 )
 
 const (
 	defaultAPIURL = "https://openrouter.ai/api/v1/chat/completions"
 	defaultModel  = "openai/gpt-4o-mini"
+
+	DefaultAnthropicModel = "claude-haiku-5-5"
+	anthropicMaxTokens    = 16000
 )
 
 type Parser struct {
@@ -25,6 +31,9 @@ type Parser struct {
 	model  string
 	apiURL string
 	client *http.Client
+
+	anthropic *anthropic.Client
+	effort    string
 }
 
 type Option func(*Parser)
@@ -66,7 +75,28 @@ func New(apiKey string, opts ...Option) *Parser {
 	return p
 }
 
+func NewAnthropic(apiKey, model, effort string, opts ...option.RequestOption) *Parser {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		model = DefaultAnthropicModel
+	}
+	client := anthropic.NewClient(append([]option.RequestOption{option.WithAPIKey(strings.TrimSpace(apiKey)), option.WithRequestTimeout(90 * time.Second)}, opts...)...)
+	return &Parser{
+		apiKey:    strings.TrimSpace(apiKey),
+		model:     model,
+		anthropic: &client,
+		effort:    strings.TrimSpace(effort),
+	}
+}
+
 func FromEnv(opts ...Option) (*Parser, error) {
+	if anthropicKey := strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")); anthropicKey != "" {
+		parser := NewAnthropic(anthropicKey, os.Getenv("ANTHROPIC_MODEL"), os.Getenv("ANTHROPIC_EFFORT"))
+		for _, opt := range opts {
+			opt(parser)
+		}
+		return parser, nil
+	}
 	apiKey := strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY"))
 	if apiKey == "" {
 		apiKey = strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
@@ -74,9 +104,9 @@ func FromEnv(opts ...Option) (*Parser, error) {
 	if apiKey == "" {
 		return nil, errors.New("neither OPENROUTER_API_KEY nor OPENAI_API_KEY is configured for natural language preferences parser")
 	}
-	
+
 	envOpts := []Option{}
-	
+
 	model := strings.TrimSpace(os.Getenv("OPENROUTER_PREFERENCES_MODEL"))
 	if model == "" {
 		model = strings.TrimSpace(os.Getenv("OPENAI_PREFERENCES_MODEL"))
@@ -84,7 +114,7 @@ func FromEnv(opts ...Option) (*Parser, error) {
 	if model != "" {
 		envOpts = append(envOpts, WithModel(model))
 	}
-	
+
 	baseURL := strings.TrimSpace(os.Getenv("OPENROUTER_BASE_URL"))
 	if baseURL == "" {
 		baseURL = strings.TrimSpace(os.Getenv("OPENAI_BASE_URL"))
@@ -92,7 +122,7 @@ func FromEnv(opts ...Option) (*Parser, error) {
 	if baseURL != "" {
 		envOpts = append(envOpts, WithAPIURL(strings.TrimRight(baseURL, "/")+"/chat/completions"))
 	}
-	
+
 	envOpts = append(envOpts, opts...)
 	return New(apiKey, envOpts...), nil
 }
@@ -118,6 +148,9 @@ func (p *Parser) Extract(ctx context.Context, normalizedInput string) (*domain.U
 func (p *Parser) call(ctx context.Context, instructions, input, schemaName string, schema map[string]any, out any) error {
 	if p.apiKey == "" {
 		return errors.New("missing API key")
+	}
+	if p.anthropic != nil {
+		return p.callAnthropic(ctx, instructions, input, schema, out)
 	}
 	payload := chatRequest{
 		Model: p.model,
@@ -167,6 +200,36 @@ func (p *Parser) call(ctx context.Context, instructions, input, schemaName strin
 		return err
 	}
 	return json.Unmarshal([]byte(outputText), out)
+}
+
+func (p *Parser) callAnthropic(ctx context.Context, instructions, input string, schema map[string]any, out any) error {
+	params := anthropic.MessageNewParams{
+		Model:     anthropic.Model(p.model),
+		MaxTokens: anthropicMaxTokens,
+		System:    []anthropic.TextBlockParam{{Text: instructions}},
+		Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(input))},
+		OutputConfig: anthropic.OutputConfigParam{
+			Effort: anthropic.OutputConfigEffort(p.effort),
+			Format: anthropic.JSONOutputFormatParam{Schema: anthropicSchema(schema).(map[string]any)},
+		},
+	}
+	resp, err := p.anthropic.Messages.New(ctx, params)
+	if err != nil {
+		return fmt.Errorf("preferences anthropic api: %w", err)
+	}
+	switch resp.StopReason {
+	case anthropic.StopReasonRefusal:
+		return errors.New("preferences anthropic model refused the request")
+	case anthropic.StopReasonMaxTokens:
+		return errors.New("preferences anthropic response hit max_tokens")
+	}
+	var text strings.Builder
+	for _, block := range resp.Content {
+		if variant, ok := block.AsAny().(anthropic.TextBlock); ok {
+			text.WriteString(variant.Text)
+		}
+	}
+	return json.Unmarshal([]byte(text.String()), out)
 }
 
 const normalizationInstructions = `Ты выполняешь только нормализацию требований пользователя.
@@ -239,7 +302,7 @@ func PreferencesSchema() map[string]any {
 			"location_preferences", "weights", "unresolved_location_rules", "stop_words",
 		},
 		"properties": map[string]any{
-			"city":                map[string]any{"type": []string{"string", "null"}, "enum": []any{"batumi", "tbilisi", nil}},
+			"city":                map[string]any{"anyOf": []any{map[string]any{"type": "string", "enum": []string{"batumi", "tbilisi"}}, map[string]any{"type": "null"}}},
 			"budget_min":          nullableInteger(),
 			"budget_max":          nullableInteger(),
 			"area_min":            nullableNumber(),
@@ -331,4 +394,38 @@ func extractOutputText(body []byte) (string, error) {
 		return "", errors.New("API response did not contain choices")
 	}
 	return response.Choices[0].Message.Content, nil
+}
+
+var anthropicUnsupportedSchemaKeys = map[string]bool{
+	"minimum":          true,
+	"maximum":          true,
+	"exclusiveMinimum": true,
+	"exclusiveMaximum": true,
+	"multipleOf":       true,
+	"minLength":        true,
+	"maxLength":        true,
+	"minItems":         true,
+	"maxItems":         true,
+	"uniqueItems":      true,
+}
+
+func anthropicSchema(node any) any {
+	switch value := node.(type) {
+	case map[string]any:
+		cleaned := make(map[string]any, len(value))
+		for key, child := range value {
+			if anthropicUnsupportedSchemaKeys[key] {
+				continue
+			}
+			cleaned[key] = anthropicSchema(child)
+		}
+		return cleaned
+	case []any:
+		cleaned := make([]any, len(value))
+		for i, child := range value {
+			cleaned[i] = anthropicSchema(child)
+		}
+		return cleaned
+	}
+	return node
 }

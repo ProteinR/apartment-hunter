@@ -20,6 +20,8 @@ When you need to look at an actual Telegram post (for example, to reproduce a fe
 - `internal/storage/postgres` owns schema and persistence.
 - `internal/evaluation` is the main listing processing pipeline.
 
+Text models (preferences parser and MCP agent) use Anthropic when `ANTHROPIC_API_KEY` is set: official Go SDK, model `ANTHROPIC_MODEL` (default `claude-haiku-5-5`), optional `ANTHROPIC_EFFORT`. The parser sends its schema as `output_config.format`, stripped of numeric/string/array constraints that Anthropic structured outputs reject; nullable enums must use `anyOf`. Without the Anthropic key both fall back to the OpenRouter/OpenAI chat-completions path. Vision (`openaivision`) stays on OpenAI.
+
 ## Telegram Profiles And Subscriptions
 
 Profiles are keyed as `telegram_<chat_id>` via `profiles.IDForTelegramChat`.

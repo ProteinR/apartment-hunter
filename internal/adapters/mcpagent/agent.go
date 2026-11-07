@@ -13,6 +13,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
+
 	"apartment-hunter/internal/adapters/openaipreferences"
 	"apartment-hunter/internal/cities"
 	"apartment-hunter/internal/domain"
@@ -22,9 +25,10 @@ import (
 )
 
 const (
-	maxAgentToolRounds   = 4
-	accountLookupTimeout = 10 * time.Second
-	emptyAgentReply      = "Не получилось довести действие до конца. Сформулируй просьбу иначе или проверь фильтры командой /preferences."
+	defaultAnthropicModel = "claude-haiku-5-5"
+	maxAgentToolRounds    = 4
+	accountLookupTimeout  = 10 * time.Second
+	emptyAgentReply       = "Не получилось довести действие до конца. Сформулируй просьбу иначе или проверь фильтры командой /preferences."
 )
 
 type ProfileStore interface {
@@ -52,6 +56,8 @@ type Agent struct {
 	store      ProfileStore
 	geocoder   Geocoder
 	chatLister TelegramChatLister
+	anthropic  *anthropic.Client
+	effort     string
 }
 
 func New(apiKey string, store ProfileStore) *Agent {
@@ -111,7 +117,22 @@ func (a *Agent) mayListTelegramChats(ctx context.Context, profile profiles.Profi
 	return err == nil && accountID == profile.TelegramChatID
 }
 
+func NewAnthropic(apiKey string, store ProfileStore, opts ...option.RequestOption) *Agent {
+	agent := New(apiKey, store)
+	agent.model = strings.TrimSpace(os.Getenv("ANTHROPIC_MODEL"))
+	if agent.model == "" {
+		agent.model = defaultAnthropicModel
+	}
+	agent.effort = strings.TrimSpace(os.Getenv("ANTHROPIC_EFFORT"))
+	client := anthropic.NewClient(append([]option.RequestOption{option.WithAPIKey(apiKey), option.WithRequestTimeout(90 * time.Second)}, opts...)...)
+	agent.anthropic = &client
+	return agent
+}
+
 func FromEnv(store ProfileStore) (*Agent, error) {
+	if anthropicKey := strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")); anthropicKey != "" {
+		return NewAnthropic(anthropicKey, store), nil
+	}
 	apiKey := strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY"))
 	if apiKey == "" {
 		apiKey = strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
@@ -135,6 +156,8 @@ type chatMessage struct {
 	Name       string     `json:"name,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
 	ToolCalls  []toolCall `json:"tool_calls,omitempty"`
+
+	anthropicContent []anthropic.ContentBlockParamUnion
 }
 
 type chatTool struct {
@@ -1300,6 +1323,9 @@ func multiPolygonCoordinatesWKT(polygons [][][][]float64) string {
 }
 
 func (a *Agent) makeChatRequest(ctx context.Context, reqBody chatRequest) (chatMessage, error) {
+	if a.anthropic != nil {
+		return a.makeAnthropicRequest(ctx, reqBody)
+	}
 	body, err := json.Marshal(reqBody)
 	if err != nil {
 		return chatMessage{}, err
