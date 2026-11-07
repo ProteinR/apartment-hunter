@@ -1282,3 +1282,20 @@ func TestPreferenceValueDisplaysUnknownSlugsInsteadOfHidingThem(t *testing.T) {
 		t.Fatalf("expected the unknown slug to stay readable, got %q", got)
 	}
 }
+
+func TestPreferenceValueTranslatesCommonAmenitiesAndFloorRules(t *testing.T) {
+	cases := map[string]string{
+		"balcony":         "балкон",
+		"washing_machine": "стиральная машина",
+		"not_first_floor": "не первый этаж",
+		"no_last_floor":   "не последний этаж",
+		"first_floor":     "первый этаж",
+		"ground_floor":    "первый этаж",
+		"light_floor":     "light floor",
+	}
+	for slug, want := range cases {
+		if got := displayPreferenceValue(slug, "ru"); got != want {
+			t.Fatalf("displayPreferenceValue(%q) = %q, want %q", slug, got, want)
+		}
+	}
+}
