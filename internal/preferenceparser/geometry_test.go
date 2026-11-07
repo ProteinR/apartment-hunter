@@ -385,7 +385,6 @@ func TestPostGISGeometryBuilderUsesDefaultRadiusForDistrictWithoutRadius(t *test
 	area, err := builder.BuildSearchGeometry(context.Background(), cities.Tbilisi, []domain.LocationPreference{
 		{Name: "Сабуртало", Type: "area", CenterName: "Сабуртало", RawText: "район Сабуртало"},
 		{Name: "", RawText: "где-нибудь"},
-		{Name: "Тбилиси", CenterName: "Тбилиси", RawText: "в Тбилиси"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -412,5 +411,25 @@ func TestIsWholeCityLocationRespectsExplicitRadius(t *testing.T) {
 	}
 	if IsWholeCityLocation(domain.LocationPreference{Name: "Ваке"}) {
 		t.Fatal("expected a district not to mean the whole city")
+	}
+}
+
+func TestNormalizePreferencesKeepsEveryLocation(t *testing.T) {
+	prefs := NormalizePreferences(domain.UserPreferences{LocationPreferences: []domain.LocationPreference{{Name: "Ваке"}, {Name: "Сабуртало"}}})
+	if len(prefs.LocationPreferences) != 2 {
+		t.Fatalf("expected both districts to be kept, got %+v", prefs.LocationPreferences)
+	}
+}
+
+func TestPostGISGeometryBuilderTreatsWholeCityAlternativeAsNoZone(t *testing.T) {
+	var queries []string
+	builder := PostGISGeometryBuilder{Resolver: recordingGeoResolver{place: &domain.ResolvedPlace{Latitude: 41.71, Longitude: 44.75}, queries: &queries}}
+
+	area, err := builder.BuildSearchGeometry(context.Background(), cities.Tbilisi, []domain.LocationPreference{{Name: "Тбилиси"}, {Name: "Ваке"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if area == nil || area.WKT != "" || len(queries) != 0 {
+		t.Fatalf("expected the whole city to mean no zone, got %+v after %v", area, queries)
 	}
 }

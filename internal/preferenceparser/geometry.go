@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -33,14 +34,15 @@ func (b PostGISGeometryBuilder) BuildSearchGeometry(ctx context.Context, city ci
 		segments = 48
 	}
 
+	if slices.ContainsFunc(prefs, IsWholeCityLocation) {
+		return &domain.GeoSearchArea{SRID: 4326}, nil
+	}
+
 	var polygons [][][]float64
 	var unresolved []string
 	for i := range prefs {
 		loc := prefs[i]
 		radius := radiusMeters(loc)
-		if IsWholeCityLocation(loc) {
-			continue
-		}
 		if radius <= 0 {
 			if locationQuery(loc) == "" && loc.Latitude == 0 && loc.Longitude == 0 {
 				continue
