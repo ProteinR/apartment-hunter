@@ -7,6 +7,7 @@ import (
 	"html"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"slices"
 	"strconv"
@@ -37,6 +38,10 @@ type Bot struct {
 	mcpAgent         *mcpagent.Agent
 	mu               sync.Mutex
 	chatLocks        map[int64]*sync.Mutex
+	accessStore      AccessStore
+	admins           adminRegistry
+	accessThrottle   accessThrottle
+	notifier         notifier
 	allowedChats     []int64
 	allowedUsernames []string
 	defaultCity      cities.City
@@ -132,6 +137,7 @@ func New(token, outputDir string, opts ...Option) *Bot {
 	}
 	if bot.mcpAgent != nil {
 		bot.mcpAgent.SetSourceManager(bot)
+		bot.mcpAgent.SetAccessManager(bot)
 	}
 	return bot
 }
@@ -159,6 +165,9 @@ func (b *Bot) Run(ctxDone <-chan struct{}) error {
 	if err != nil {
 		return err
 	}
+	b.notifier = func(ctx context.Context, chatID int64, text string, markup models.ReplyMarkup) error {
+		return sendMessageWithMarkup(ctx, api, chatID, text, markup)
+	}
 	_, _ = api.SetMyCommands(ctx, &telegrambot.SetMyCommandsParams{Commands: botMenuCommands})
 	api.Start(ctx)
 	return nil
@@ -174,43 +183,29 @@ func (b *Bot) HandleText(chatID int64, text string) (string, error) {
 }
 
 func (b *Bot) handleUpdate(ctx context.Context, api *telegrambot.Bot, update *models.Update) {
+	if update.CallbackQuery != nil {
+		b.handleCallback(ctx, api, update.CallbackQuery)
+		return
+	}
 	if update.Message == nil || update.Message.Text == "" {
 		return
 	}
 
-	chatID := update.Message.Chat.ID
-	isAllowed := false
-	if len(b.allowedChats) == 0 && len(b.allowedUsernames) == 0 {
-		isAllowed = true
-	} else {
-		for _, id := range b.allowedChats {
-			if id == chatID {
-				isAllowed = true
-				break
-			}
-		}
-		if !isAllowed && update.Message.From != nil && update.Message.From.Username != "" {
-			senderUsername := strings.TrimPrefix(update.Message.From.Username, "@")
-			for _, username := range b.allowedUsernames {
-				cleaned := strings.TrimPrefix(username, "@")
-				if strings.EqualFold(cleaned, senderUsername) {
-					isAllowed = true
-					break
-				}
-			}
-		}
-	}
-	if !isAllowed {
+	if !isPrivateChatMessage(update.Message) {
 		return
 	}
+	chatID := update.Message.Chat.ID
 	chatLock := b.chatLock(chatID)
 	chatLock.Lock()
 	defer chatLock.Unlock()
+	if !b.authorizeMessage(ctx, update.Message) {
+		return
+	}
 	sendTyping(ctx, api, chatID)
 	if update.Message.ReplyToMessage != nil && b.getSession(chatID) == nil && !strings.HasPrefix(strings.TrimSpace(update.Message.Text), "/") {
 		reply, handled, err := b.saveReplyFeedback(ctx, update.Message)
 		if err != nil {
-			_ = sendMessage(ctx, api, chatID, "Error: "+err.Error())
+			_ = sendMessage(ctx, api, chatID, friendlyFailure("reply feedback", chatID, err))
 			return
 		}
 		if handled {
@@ -219,7 +214,7 @@ func (b *Bot) handleUpdate(ctx context.Context, api *telegrambot.Bot, update *mo
 		}
 	}
 	if err := b.handleMessage(ctx, api, chatID, update.Message.Text); err != nil {
-		_ = sendMessage(ctx, api, chatID, "Error: "+err.Error())
+		_ = sendMessage(ctx, api, chatID, friendlyFailure("message", chatID, err))
 	}
 }
 
@@ -322,7 +317,7 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 		}
 		reply, prefsChanged, areaChanged, err := b.mcpAgent.ProcessCommand(context.Background(), profile.ID, text)
 		if err != nil {
-			return textResponse{Text: "Ошибка агента: " + err.Error()}, nil
+			return textResponse{Text: friendlyFailure("agent", chatID, err), ReplyMarkup: removeKeyboard()}, nil
 		}
 		if prefsChanged != nil || areaChanged != nil {
 			var draft preferenceparser.Draft
@@ -335,10 +330,10 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 			cityNote, area := b.applyAgentCityChange(profile, &draft, areaChanged)
 			area, err = b.agentSearchArea(context.Background(), profile, &draft, area)
 			if err != nil {
-				return textResponse{Text: "Ошибка построения зоны поиска: " + err.Error()}, nil
+				return textResponse{Text: friendlyFailure("search area", chatID, err), ReplyMarkup: removeKeyboard()}, nil
 			}
 			if err := b.saveDraft(context.Background(), chatID, draft, area); err != nil {
-				return textResponse{Text: "Ошибка сохранения новых фильтров: " + err.Error()}, nil
+				return textResponse{Text: friendlyFailure("save filters", chatID, err), ReplyMarkup: removeKeyboard()}, nil
 			}
 			reply += cityNote
 		}
@@ -1195,6 +1190,13 @@ func (b *Bot) deleteSession(chatID int64) {
 
 func sendMessage(ctx context.Context, api *telegrambot.Bot, chatID int64, text string) error {
 	return sendMessageWithMarkup(ctx, api, chatID, text, nil)
+}
+
+const failureReplyText = "Не получилось ответить: что-то сломалось на моей стороне. Попробуй еще раз через минуту, а если не поможет — напиши иначе."
+
+func friendlyFailure(stage string, chatID int64, err error) string {
+	fmt.Fprintf(os.Stderr, "telegram bot %s failed for chat %d: %v\n", stage, chatID, err)
+	return failureReplyText
 }
 
 func sendTyping(ctx context.Context, api *telegrambot.Bot, chatID int64) {

@@ -38,6 +38,8 @@ Bot commands live in `internal/adapters/telegram/bot.go`:
 - The agent may chain up to `maxAgentToolRounds` (8) tool rounds per message, and `list_available_telegram_chats` is offered only to the profile whose chat id equals the userbot account id. `ProcessCommand` and `ProcessFeedback` share one loop in `conversation.go`.
 - Agent history: up to 40 messages verbatim; older ones and those past `MCP_CONTEXT_TTL_HOURS` are compacted by an LLM call into one `summary` entry in `mcp_history`, which goes into the system prompt.
 - Without an LLM agent `/start` falls back to the old one-shot `preferenceparser` wizard with Save/Edit/Edit area/Cancel.
+- Access (`internal/adapters/telegram/access.go`): with both env allowlists empty anyone may use the bot. Otherwise a user passes when listed in `TELEGRAM_ALLOWED_CHAT_IDS`/`TELEGRAM_ALLOWED_USERNAMES`, is an admin, or has an `allowed` row in Postgres `bot_access` (matched by chat id or lowercased username; the chat id is filled in on the first message). Admins are `TELEGRAM_ADMIN_CHAT_IDS` plus the userbot account id (`AccountUserID`, cached, retried at most once a minute). A stranger gets a reply, a `pending` row and an Allow/Deny inline request to every admin (callback `access:allow|deny:<chat_id>`); repeat messages get a short reminder, `denied` users are ignored. Admins also manage access by chat through agent tools `list_bot_users`, `grant_bot_access`, `revoke_bot_access`; env users and admins cannot be revoked there.
+- The agent records every named district or landmark in `location_preferences` by name and does not geocode it first: the bot builds the area (1500 m default circle). Districts left in `unresolved_location_rules` produce no area.
 
 Postgres tables to inspect first:
 

@@ -171,15 +171,7 @@ func (a App) telegram(args []string) error {
 	}
 	fmt.Fprintf(a.Out, "Telegram bot started. Saving profiles to Postgres\n")
 
-	var allowedChatIDs []int64
-	if allowedEnv := strings.TrimSpace(os.Getenv("TELEGRAM_ALLOWED_CHAT_IDS")); allowedEnv != "" {
-		for _, part := range strings.Split(allowedEnv, ",") {
-			part = strings.TrimSpace(part)
-			if id, err := strconv.ParseInt(part, 10, 64); err == nil {
-				allowedChatIDs = append(allowedChatIDs, id)
-			}
-		}
-	}
+	allowedChatIDs := parseChatIDs(os.Getenv("TELEGRAM_ALLOWED_CHAT_IDS"))
 	if profileID := strings.TrimSpace(os.Getenv("APARTMENT_HUNTER_PROFILE_ID")); profileID != "" {
 		if strings.HasPrefix(profileID, "telegram_") {
 			if id, err := strconv.ParseInt(strings.TrimPrefix(profileID, "telegram_"), 10, 64); err == nil {
@@ -210,7 +202,12 @@ func (a App) telegram(args []string) error {
 	botOptions = append(botOptions,
 		telegram.WithAllowedChats(allowedChatIDs),
 		telegram.WithAllowedUsernames(allowedUsernames),
+		telegram.WithAccessStore(store),
+		telegram.WithAdminChats(parseChatIDs(os.Getenv("TELEGRAM_ADMIN_CHAT_IDS"))),
 	)
+	if userbot != nil {
+		botOptions = append(botOptions, telegram.WithAdminAccount(userbot))
+	}
 	err = telegram.New(token, outputDir, botOptions...).Run(ctx.Done())
 	stop()
 	return err
@@ -661,6 +658,16 @@ func newLocationResolver() geocoding.Resolver {
 		return geocodingmock.New()
 	}
 	return geocoding.RequiredChain{google, geocodingmock.NewKnown()}
+}
+
+func parseChatIDs(value string) []int64 {
+	var ids []int64
+	for _, part := range strings.Split(value, ",") {
+		if id, err := strconv.ParseInt(strings.TrimSpace(part), 10, 64); err == nil && id > 0 {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 func newGoogleGeocoder() *googlemaps.Geocoder {

@@ -268,3 +268,60 @@ func (s *recordingProfileStore) UpsertProfile(ctx context.Context, profile profi
 	s.upserts = append(s.upserts, profile)
 	return s.fakeProfileStore.UpsertProfile(ctx, profile)
 }
+
+type fakeAccessManager struct {
+	admin   int64
+	granted []string
+}
+
+func (m *fakeAccessManager) IsAdmin(ctx context.Context, telegramChatID int64) bool {
+	return telegramChatID == m.admin
+}
+
+func (m *fakeAccessManager) ListBotUsers(ctx context.Context) (string, error) {
+	return "- @anna: доступ открыт", nil
+}
+
+func (m *fakeAccessManager) GrantBotAccess(ctx context.Context, ref string) (string, error) {
+	m.granted = append(m.granted, ref)
+	return "Доступ для " + ref + " открыт.", nil
+}
+
+func (m *fakeAccessManager) RevokeBotAccess(ctx context.Context, ref string) (string, error) {
+	return "", nil
+}
+
+func TestAdminToolsAreOfferedOnlyToAdmin(t *testing.T) {
+	for _, tc := range []struct {
+		chatID int64
+		admin  bool
+	}{{chatID: 1, admin: true}, {chatID: 2, admin: false}} {
+		store := &fakeProfileStore{profile: profiles.Profile{ID: "telegram_x", TelegramChatID: tc.chatID, Preferences: &domain.UserPreferences{MaxBudget: 600}}}
+		manager := &fakeAccessManager{admin: 1}
+		requests := 0
+		server := newAgentServer(t, func(req chatRequest) string {
+			requests++
+			if requests == 1 {
+				offered := false
+				for _, tool := range req.Tools {
+					offered = offered || tool.Function.Name == "grant_bot_access"
+				}
+				if offered != tc.admin || strings.Contains(req.Messages[0].Content, "администратор бота") != tc.admin {
+					t.Fatalf("chat %d: expected admin tools offered=%v", tc.chatID, tc.admin)
+				}
+				return `{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"grant_bot_access","arguments":"{\"user\":\"@anna\"}"}}]}}]}`
+			}
+			return assistantReply("Ок.")
+		})
+		agent := New("test-key", store)
+		agent.apiURL = server.URL
+		agent.SetAccessManager(manager)
+
+		if _, _, _, err := agent.ProcessCommand(context.Background(), "telegram_x", "добавь @anna"); err != nil {
+			t.Fatal(err)
+		}
+		if (len(manager.granted) == 1) != tc.admin {
+			t.Fatalf("chat %d: expected grant executed=%v, got %v", tc.chatID, tc.admin, manager.granted)
+		}
+	}
+}

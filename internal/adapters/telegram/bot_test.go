@@ -1040,8 +1040,8 @@ func TestAllowedChatsFilter(t *testing.T) {
 	{
 		update := &models.Update{
 			Message: &models.Message{
-				Chat: models.Chat{ID: 456},
-				From: &models.User{Username: "other_user"},
+				Chat: models.Chat{ID: 456, Type: models.ChatTypePrivate},
+				From: &models.User{ID: 456, Username: "other_user"},
 				Text: "/start",
 			},
 		}
@@ -1053,8 +1053,8 @@ func TestAllowedChatsFilter(t *testing.T) {
 	{
 		update := &models.Update{
 			Message: &models.Message{
-				Chat: models.Chat{ID: 123},
-				From: &models.User{Username: "other_user"},
+				Chat: models.Chat{ID: 123, Type: models.ChatTypePrivate},
+				From: &models.User{ID: 123, Username: "other_user"},
 				Text: "/start",
 			},
 		}
@@ -1087,8 +1087,8 @@ func TestAllowedChatsFilter(t *testing.T) {
 	{
 		update := &models.Update{
 			Message: &models.Message{
-				Chat: models.Chat{ID: 999},
-				From: &models.User{Username: "spy_bots"},
+				Chat: models.Chat{ID: 999, Type: models.ChatTypePrivate},
+				From: &models.User{ID: 999, Username: "spy_bots"},
 				Text: "/start",
 			},
 		}

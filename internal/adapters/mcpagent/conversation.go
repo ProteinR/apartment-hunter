@@ -34,11 +34,27 @@ func (a *Agent) SetSourceManager(sources SourceManager) {
 	a.sources = sources
 }
 
+type AccessManager interface {
+	IsAdmin(ctx context.Context, telegramChatID int64) bool
+	ListBotUsers(ctx context.Context) (string, error)
+	GrantBotAccess(ctx context.Context, ref string) (string, error)
+	RevokeBotAccess(ctx context.Context, ref string) (string, error)
+}
+
+func (a *Agent) SetAccessManager(manager AccessManager) {
+	a.accessManager = manager
+}
+
+func (a *Agent) mayManageAccess(ctx context.Context, profile profiles.Profile) bool {
+	return a.accessManager != nil && a.accessManager.IsAdmin(ctx, profile.TelegramChatID)
+}
+
 type conversationTurn struct {
 	systemPrompt   string
 	userContent    string
 	historyContent string
 	canListChats   bool
+	canManageUsers bool
 }
 
 type conversationChanges struct {
@@ -65,7 +81,7 @@ func (a *Agent) converse(ctx context.Context, profile profiles.Profile, turn con
 	reqBody := chatRequest{
 		Model:    a.model,
 		Messages: messages,
-		Tools:    a.conversationTools(profile, turn.canListChats),
+		Tools:    a.conversationTools(profile, turn.canListChats, turn.canManageUsers),
 	}
 	respMsg, err := a.makeChatRequest(ctx, reqBody)
 	if err != nil {
@@ -80,7 +96,7 @@ func (a *Agent) converse(ctx context.Context, profile profiles.Profile, turn con
 				Role:       "tool",
 				ToolCallID: tc.ID,
 				Name:       tc.Function.Name,
-				Content:    a.executeTool(ctx, &profile, tc, turn.canListChats, &changes),
+				Content:    a.executeTool(ctx, &profile, tc, turn, &changes),
 			})
 		}
 		reqBody.Messages = messages
@@ -254,7 +270,7 @@ func sourceRefsParameters(description string) map[string]any {
 	}
 }
 
-func (a *Agent) conversationTools(profile profiles.Profile, canListChats bool) []chatTool {
+func (a *Agent) conversationTools(profile profiles.Profile, canListChats, canManageUsers bool) []chatTool {
 	tools := []chatTool{
 		functionTool("set_filtering_status", "Включает или выключает общую фильтрацию объявлений. Если фильтрация выключена, все объявления будут проходить независимо от правил.", map[string]any{
 			"type": "object",
@@ -336,6 +352,20 @@ func (a *Agent) conversationTools(profile profiles.Profile, canListChats bool) [
 			functionTool("remove_sources", "Отключает источники объявлений.", sourceRefsParameters("@username или ссылки t.me/name источников, которые нужно отключить")),
 		)
 	}
+	if canManageUsers {
+		userRef := map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"user": map[string]any{"type": "string", "description": "@username или числовой Telegram id пользователя"},
+			},
+			"required": []string{"user"},
+		}
+		tools = append(tools,
+			functionTool("list_bot_users", "Показывает администратору, у кого есть доступ к боту, кто ждет решения и кому доступ закрыт.", map[string]any{"type": "object", "properties": map[string]any{}}),
+			functionTool("grant_bot_access", "Открывает пользователю доступ к боту. Если пользователь уже писал боту, он сразу получит приветствие.", userRef),
+			functionTool("revoke_bot_access", "Закрывает пользователю доступ к боту.", userRef),
+		)
+	}
 	if canListChats {
 		tools = append(tools, functionTool("list_available_telegram_chats", "Возвращает public Telegram-каналы и группы, на которые уже подписан userbot-аккаунт. Используй для выбора релевантных источников объявлений, которые можно предложить подключить через add_sources.", map[string]any{
 			"type": "object",
@@ -355,7 +385,7 @@ func marshalToolResult(value any) string {
 	return string(data)
 }
 
-func (a *Agent) executeTool(ctx context.Context, profile *profiles.Profile, tc toolCall, canListChats bool, changes *conversationChanges) string {
+func (a *Agent) executeTool(ctx context.Context, profile *profiles.Profile, tc toolCall, turn conversationTurn, changes *conversationChanges) string {
 	arguments := []byte(tc.Function.Arguments)
 	switch tc.Function.Name {
 	case "set_filtering_status":
@@ -500,12 +530,34 @@ func (a *Agent) executeTool(ctx context.Context, profile *profiles.Profile, tc t
 			return "error: " + err.Error()
 		}
 		return result
+	case "list_bot_users", "grant_bot_access", "revoke_bot_access":
+		if !turn.canManageUsers || !a.mayManageAccess(ctx, *profile) {
+			return "unknown function"
+		}
+		var args struct {
+			User string `json:"user"`
+		}
+		json.Unmarshal(arguments, &args)
+		var result string
+		var err error
+		switch tc.Function.Name {
+		case "list_bot_users":
+			result, err = a.accessManager.ListBotUsers(ctx)
+		case "grant_bot_access":
+			result, err = a.accessManager.GrantBotAccess(ctx, args.User)
+		default:
+			result, err = a.accessManager.RevokeBotAccess(ctx, args.User)
+		}
+		if err != nil {
+			return "error: " + err.Error()
+		}
+		return result
 	case "list_available_telegram_chats":
 		var args struct {
 			Limit int `json:"limit"`
 		}
 		json.Unmarshal(arguments, &args)
-		if !canListChats {
+		if !turn.canListChats {
 			return "unknown function"
 		}
 		if a.chatLister == nil {

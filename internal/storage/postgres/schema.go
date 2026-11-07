@@ -222,4 +222,17 @@ create index if not exists listing_feedbacks_status_created_idx
 
 create index if not exists listing_feedbacks_listing_idx
 	on listing_feedbacks (listing_id);
+
+create table if not exists bot_access (
+	id bigserial primary key,
+	telegram_chat_id bigint unique,
+	username text not null default '',
+	display_name text not null default '',
+	status text not null,
+	created_at timestamptz not null default now(),
+	updated_at timestamptz not null default now()
+);
+
+create unique index if not exists bot_access_username_idx
+	on bot_access (username) where username <> '';
 `

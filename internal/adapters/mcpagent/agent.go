@@ -47,17 +47,18 @@ type TelegramChatLister interface {
 }
 
 type Agent struct {
-	apiKey     string
-	model      string
-	apiURL     string
-	ttlHours   int
-	client     *http.Client
-	store      ProfileStore
-	geocoder   Geocoder
-	chatLister TelegramChatLister
-	anthropic  *anthropic.Client
-	effort     string
-	sources    SourceManager
+	apiKey        string
+	model         string
+	apiURL        string
+	ttlHours      int
+	client        *http.Client
+	store         ProfileStore
+	geocoder      Geocoder
+	chatLister    TelegramChatLister
+	anthropic     *anthropic.Client
+	effort        string
+	sources       SourceManager
+	accessManager AccessManager
 }
 
 func New(apiKey string, store ProfileStore) *Agent {
@@ -193,11 +194,13 @@ func (a *Agent) ProcessCommand(ctx context.Context, profileID string, text strin
 		return "", nil, nil, err
 	}
 	canListChats := a.mayListTelegramChats(ctx, profile)
+	canManageUsers := a.mayManageAccess(ctx, profile)
 	return a.converse(ctx, profile, conversationTurn{
-		systemPrompt:   commandSystemPrompt(profile, a.mayManageSources(profile), canListChats, state),
+		systemPrompt:   commandSystemPrompt(profile, a.mayManageSources(profile), canListChats, canManageUsers, state),
 		userContent:    text,
 		historyContent: text,
 		canListChats:   canListChats,
+		canManageUsers: canManageUsers,
 	})
 }
 
@@ -223,7 +226,7 @@ func (a *Agent) ProcessFeedback(ctx context.Context, profileID string, listing d
 
 const agentIntroduction = `Ты — ассистент Telegram-бота, который ищет квартиры в аренду: он читает Telegram-каналы и группы с объявлениями, проверяет каждое объявление по профилю поиска пользователя (бюджет, площадь, район, ремонт по фото и т.д.) и присылает подходящие. Кнопок и меню у бота нет: пользователь настраивает всё, просто переписываясь с тобой. Поэтому ты сам выясняешь, что ему нужно, и сам меняешь настройки инструментами.`
 
-func agentAbilities(canManageSources, canListChats bool) string {
+func agentAbilities(canManageSources, canListChats, canManageUsers bool) string {
 	lines := []string{
 		"Что ты умеешь:",
 		"- Рассказывать, какие сейчас стоят настройки и как ты видишь идеальную квартиру пользователя.",
@@ -231,6 +234,7 @@ func agentAbilities(canManageSources, canListChats bool) string {
 		"- Менять профиль поиска инструментом update_preferences, НО только после того, как согласуешь изменения с пользователем, или если он прямо попросил их внести. Передавай только поля, которые меняются.",
 		"- Управлять стоп-словами в поле stop_words.",
 		"- Работать с географией: resolve_address находит координаты, calculate_distance считает расстояние, update_search_area задает зону поиска из GeoJSON.",
+		"- Каждый названный район, улицу или ориентир записывай в location_preferences отдельным объектом с name и center_name (например, «Ваке или Сабуртало» — два объекта). Координаты и зону бот строит сам по названию, вызывать resolve_address для этого не нужно; без радиуса бот берет круг 1500 м. Никогда не переноси названные места в unresolved_location_rules из-за того, что resolve_address их не нашел. После сохранения бот сам пришлет карту зоны.",
 		"- Включать или выключать фильтрацию целиком (set_filtering_status).",
 		"- Менять режим уведомлений (set_notification_mode): только подходящие объявления или отчет по каждому объявлению с причиной.",
 		"- Искать по уже проверенным объявлениям (search_local_listings) и объяснять решение по конкретному объявлению (get_listing_evaluation_report).",
@@ -239,6 +243,9 @@ func agentAbilities(canManageSources, canListChats bool) string {
 		lines = append(lines, "- Управлять источниками объявлений: list_sources показывает подключенные Telegram-каналы и группы, add_sources подключает новые (@username или ссылки t.me/name), remove_sources отключает. Когда пользователь присылает @username или ссылку t.me, сразу подключи ее через add_sources и перескажи результат своими словами.")
 	} else {
 		lines = append(lines, "- Подсказывать, как подключить источник: пользователь присылает @username или ссылку t.me/name публичного канала или группы с объявлениями.")
+	}
+	if canManageUsers {
+		lines = append(lines, "- Пользователь — администратор бота. По его просьбе управляй доступом других людей: list_bot_users показывает список, grant_bot_access открывает доступ по @username или числовому id, revoke_bot_access закрывает. Пересказывай результат своими словами.")
 	}
 	if canListChats {
 		lines = append(lines, "- Просматривать публичные каналы и группы, доступные аккаунту-читателю (list_available_telegram_chats), чтобы предложить релевантные источники. Это НЕ список уже подключенных источников. Предлагай только чаты про аренду и недвижимость в городе поиска; если подходящих нет, так и скажи.")
@@ -254,6 +261,7 @@ const onboardingInstructions = `Сейчас у пользователя еще 
 - Задавай один-два коротких вопроса за сообщение. Если пользователь сразу рассказал многое, не переспрашивай то, что уже известно, — переходи к недостающему.
 - Выясни примерно в таком порядке: город (Батуми или Тбилиси); бюджет в месяц в USD; площадь или число комнат; районы или ориентиры и насколько далеко от них можно; что обязательно (например посудомойка, кондиционер, можно с животными); что желательно; что точно не подходит (тип ремонта, этаж, вид из окна и т.п.).
 - Если пользователь хочет сам нарисовать зону на карте, сначала сохрани профиль после подтверждения сводки, а зону прими следующим сообщением.
+- Не задавай технических вопросов о том, как задать район (координаты, радиус, полигон): просто запиши названные места, а после сохранения предложи расширить или сузить зону словами, если карта не подходит.
 - Для запуска поиска достаточно города, бюджета и района (или явного «район не важен»). Остальное спроси, но не настаивай, если пользователь не хочет уточнять.
 - Когда данных хватает, покажи короткую сводку человеческим языком и спроси, запускать ли поиск. НЕ вызывай update_preferences, пока пользователь не подтвердил сводку («да», «ок», «запускай» и т.п.). После подтверждения сохрани все одним вызовом update_preferences.`
 
@@ -272,14 +280,14 @@ const conversationRules = `ВАЖНО:
 - Если пользователь хочет сам нарисовать зону поиска, дай пошаговую инструкцию: 1) открыть geojson.io, 2) нарисовать полигон инструментом Draw a polygon, 3) скопировать JSON справа и прислать в чат текстом или файлом.
 - Задавай уточняющие вопросы, если пожелания размыты (например, «хочу бабушкин вариант» → предложи отсеивать советский ремонт).`
 
-func commandSystemPrompt(profile profiles.Profile, canManageSources, canListChats bool, state string) string {
+func commandSystemPrompt(profile profiles.Profile, canManageSources, canListChats, canManageUsers bool, state string) string {
 	stage := configuredInstructions
 	if profile.Preferences == nil {
 		stage = onboardingInstructions
 	}
 	return strings.Join([]string{
 		agentIntroduction,
-		agentAbilities(canManageSources, canListChats),
+		agentAbilities(canManageSources, canListChats, canManageUsers),
 		stage,
 		conversationRules,
 		"Текущее состояние настроек:\n" + state,
@@ -291,7 +299,7 @@ func feedbackSystemPrompt(canManageSources bool, state string) string {
 	return strings.Join([]string{
 		agentIntroduction,
 		"Сейчас пользователь ответил отзывом на отчет бота об объявлении. Помоги уточнить профиль поиска на основе отзыва и данных объявления. В контексте отзыва есть telegram_chat_id и replied_message_id: по ним get_listing_evaluation_report вернет полный отчет. Город в ответ на отзыв не меняй.",
-		agentAbilities(canManageSources, false),
+		agentAbilities(canManageSources, false, false),
 		conversationRules,
 		"Текущее состояние настроек:\n" + state,
 		"Отвечай дружелюбно и по делу.",
