@@ -32,3 +32,7 @@ package-lock.json
 /test_mcp*.js
 /test_mcp.sh
 /query.go
+
+# Third-party content kept only locally
+fixtures/real_ad_photo_*.jpg
+housing_facts/raw/video_zapavalov_batumi_rent.md
