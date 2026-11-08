@@ -59,6 +59,7 @@ type ProfileStore interface {
 	UpsertProfileChannel(ctx context.Context, profileID string, sub profiles.ChannelSubscription) (bool, error)
 	RemoveProfileChannel(ctx context.Context, profileID, channel string) (bool, error)
 	SaveListingFeedback(ctx context.Context, feedback domain.ListingFeedback) (string, *domain.ApartmentListing, error)
+	ListingFeedbackExists(ctx context.Context, telegramChatID int64, feedbackMessageID int) (bool, error)
 }
 
 type preferenceSession struct {
@@ -814,20 +815,24 @@ func (b *Bot) debugMode(ctx context.Context, chatID int64, text string) (string,
 }
 
 func (b *Bot) saveReplyFeedback(ctx context.Context, message *models.Message) (string, bool, error) {
-	if b.store == nil {
-		return "", false, fmt.Errorf("profile store is required")
-	}
 	if message.ReplyToMessage == nil {
 		return "Ответь на сообщение с отчетом по квартире и напиши отзыв.", false, nil
 	}
-	text := strings.TrimSpace(message.Text)
+	return b.saveListingFeedback(ctx, message.Chat.ID, message.ID, message.ReplyToMessage.ID, message.Text)
+}
+
+func (b *Bot) saveListingFeedback(ctx context.Context, chatID int64, feedbackMessageID int, notificationMessageID int, text string) (string, bool, error) {
+	if b.store == nil {
+		return "", false, fmt.Errorf("profile store is required")
+	}
+	text = strings.TrimSpace(text)
 	if text == "" {
 		return "Пустой отзыв не сохранен.", false, nil
 	}
 	id, listing, err := b.store.SaveListingFeedback(ctx, domain.ListingFeedback{
-		TelegramChatID:    message.Chat.ID,
-		FeedbackMessageID: message.ID,
-		RepliedMessageID:  message.ReplyToMessage.ID,
+		TelegramChatID:    chatID,
+		FeedbackMessageID: feedbackMessageID,
+		RepliedMessageID:  notificationMessageID,
 		Text:              text,
 	})
 	if err != nil {
@@ -837,9 +842,9 @@ func (b *Bot) saveReplyFeedback(ctx context.Context, message *models.Message) (s
 		return "", false, nil
 	}
 
-	profile, profileOk, profileErr := b.store.GetProfile(ctx, profiles.IDForTelegramChat(message.Chat.ID))
+	profile, profileOk, profileErr := b.store.GetProfile(ctx, profiles.IDForTelegramChat(chatID))
 	if profileErr == nil && profileOk && b.mcpAgent != nil {
-		reply, prefsChanged, areaChanged, agentErr := b.mcpAgent.ProcessFeedback(ctx, profile.ID, *listing, text, message.Chat.ID, message.ReplyToMessage.ID)
+		reply, prefsChanged, areaChanged, agentErr := b.mcpAgent.ProcessFeedback(ctx, profile.ID, *listing, text, chatID, notificationMessageID)
 		if agentErr != nil {
 			return "Отзыв сохранен, но ошибка агента: " + agentErr.Error(), true, nil
 		}
@@ -855,7 +860,7 @@ func (b *Bot) saveReplyFeedback(ctx context.Context, message *models.Message) (s
 			if areaErr != nil {
 				return "Отзыв сохранен, но ошибка построения зоны поиска: " + areaErr.Error(), true, nil
 			}
-			if draftErr := b.saveDraft(ctx, message.Chat.ID, draft, area); draftErr != nil {
+			if draftErr := b.saveDraft(ctx, chatID, draft, area); draftErr != nil {
 				return "Отзыв сохранен, но ошибка применения фильтров: " + draftErr.Error(), true, nil
 			}
 		}

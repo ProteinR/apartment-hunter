@@ -259,6 +259,10 @@ func (b *Bot) notify(ctx context.Context, chatID int64, text string, markup mode
 }
 
 func (b *Bot) handleCallback(ctx context.Context, api *telegrambot.Bot, query *models.CallbackQuery) {
+	if query.Data == ListingRejectCallbackData {
+		b.handleListingRejectCallback(ctx, api, query)
+		return
+	}
 	if !b.IsAdmin(ctx, query.From.ID) {
 		if api != nil {
 			_, _ = api.AnswerCallbackQuery(ctx, &telegrambot.AnswerCallbackQueryParams{CallbackQueryID: query.ID, Text: "Решать запросы может только администратор."})

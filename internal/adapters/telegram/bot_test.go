@@ -113,6 +113,15 @@ func (s *fakeProfileStore) SaveListingFeedback(ctx context.Context, feedback dom
 	return feedback.ID, &domain.ApartmentListing{ID: "dummy-listing"}, nil
 }
 
+func (s *fakeProfileStore) ListingFeedbackExists(ctx context.Context, telegramChatID int64, feedbackMessageID int) (bool, error) {
+	for _, feedback := range s.feedbacks {
+		if feedback.TelegramChatID == telegramChatID && feedback.FeedbackMessageID == feedbackMessageID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (s *fakeProfileStore) LatestSearchAreaGeoJSON(ctx context.Context, profileID string) (string, bool, error) {
 	if strings.TrimSpace(s.latestGeoJSON) == "" {
 		return "", false, nil

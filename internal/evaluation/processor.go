@@ -95,8 +95,12 @@ type geocodeRequestQueryFormatter interface {
 }
 
 type Result struct {
-	Record domain.ListingEvaluationRecord
+	Record             domain.ListingEvaluationRecord
+	ReportView         ReportView
+	NotificationPhotos [][]byte
 }
+
+const maxNotificationPhotos = 9
 
 func (p Processor) ProcessMessage(ctx context.Context, source domain.ListingSourceRef, message sources.ChannelMessage) (Result, error) {
 	started := time.Now()
@@ -577,6 +581,10 @@ func cleanupLocalPhotoFiles(photos []domain.ApartmentPhoto) {
 }
 
 func (p Processor) finish(ctx context.Context, started time.Time, record domain.ListingEvaluationRecord) (Result, error) {
+	var notificationPhotos [][]byte
+	if record.Status == "passed" || record.Status == "rejected_ai" {
+		notificationPhotos = readLocalPhotoFiles(record.Listing.Photos, maxNotificationPhotos)
+	}
 	record.Listing = listingWithoutLocalPhotoFiles(record.Listing)
 	record.Report = BuildReport(record, p.Prefs)
 	err := p.save(ctx, record)
@@ -585,7 +593,25 @@ func (p Processor) finish(ctx context.Context, started time.Time, record domain.
 	} else {
 		p.logPipeline(ctx, pipelineEvent(started, record.Source, record.Listing, "saved", record.Status, ""))
 	}
-	return Result{Record: record}, err
+	return Result{Record: record, ReportView: BuildReportView(record, p.Prefs), NotificationPhotos: notificationPhotos}, err
+}
+
+func readLocalPhotoFiles(photos []domain.ApartmentPhoto, limit int) [][]byte {
+	var images [][]byte
+	for _, photo := range photos {
+		if len(images) >= limit {
+			break
+		}
+		if !strings.HasPrefix(photo.URL, "file://") {
+			continue
+		}
+		data, err := os.ReadFile(strings.TrimPrefix(photo.URL, "file://"))
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		images = append(images, data)
+	}
+	return images
 }
 
 func listingWithoutLocalPhotoFiles(listing domain.ApartmentListing) domain.ApartmentListing {

@@ -506,7 +506,7 @@ func (r *Repository) SaveListingFeedback(ctx context.Context, feedback domain.Li
 		from listing_evaluations
 		where telegram_chat_id = $1
 			and (bot_message_id = $2 or message_id = $2)
-		order by updated_at desc, id desc
+		order by coalesce(bot_message_id = $2, false) desc, updated_at desc, id desc
 		limit 1
 	`, feedback.TelegramChatID, feedback.RepliedMessageID).Scan(&evaluationID, &listingID, &profileID, &listingJSON)
 	if err != nil {
@@ -534,6 +534,17 @@ func (r *Repository) SaveListingFeedback(ctx context.Context, feedback domain.Li
 	`, evaluationID, listingID, nullString(profileID), feedback.TelegramChatID,
 		feedback.FeedbackMessageID, feedback.RepliedMessageID, feedback.Text).Scan(&id)
 	return id, &listing, err
+}
+
+func (r *Repository) ListingFeedbackExists(ctx context.Context, telegramChatID int64, feedbackMessageID int) (bool, error) {
+	var exists bool
+	err := r.db.QueryRowContext(ctx, `
+		select exists(
+			select 1 from listing_feedbacks
+			where telegram_chat_id = $1 and feedback_message_id = $2
+		)
+	`, telegramChatID, feedbackMessageID).Scan(&exists)
+	return exists, err
 }
 
 func (r *Repository) UpdateEvaluationNotificationMessageID(ctx context.Context, listingID string, botMessageID int) error {
