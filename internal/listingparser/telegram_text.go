@@ -20,8 +20,17 @@ var (
 	currencyFirstPricePattern  = regexp.MustCompile(`(?i)(?:[$₾]|\x{1F4B2}|usd|gel|lari)` + priceSeparator + priceNumber)
 	numberFirstPricePattern    = regexp.MustCompile(`(?i)` + priceNumber + trailingCurrencySeparator + `(?:[$₾]|\x{1F4B2}|usd|gel|lari|лари|доллар\p{L}*|долл?(?:[^\p{L}]|$))`)
 	priceKeywordPattern        = regexp.MustCompile(`(?i)(?:цена|стоимость|price|\x{1F4B0}|\x{1F4B5}|\x{1F4B8})` + priceSeparator + priceNumber)
-	structureAfterPricePattern = regexp.MustCompile(`(?i)^[ \t]*(?:этаж|месяц|мин|комнат|спальн|bedroom|[+/][0-9])`)
+	structureAfterPricePattern = regexp.MustCompile(`(?i)^[ \t]*(?:этаж|мес|мин|комнат|спальн|bedroom|[+/][0-9])`)
 	unitAfterPricePattern      = regexp.MustCompile(`(?i)^[ \t]*(?:км|km|метр\p{L}*|м\.|м|m)(?:[^\p{L}]|$)`)
+	percentAfterPricePattern   = regexp.MustCompile(`^[ \t]*%`)
+	usdEquivalentGapPattern    = regexp.MustCompile(`(?i)^[ \t]*(?:[(/≈~=][ \t(/≈~=]*(?:(?:или|около|ок\.?|примерно|approx\.?)[ \t(/≈~=]*)?|(?:или|около|ок\.?|примерно|approx\.?)[ \t(/≈~=]*)$`)
+	usdPaymentGapPattern       = regexp.MustCompile(`(?i)^[^\n]*(?:в долларах|in dollars|in usd)[ \t:—–-]*$`)
+	rentLabelPattern           = regexp.MustCompile(`(?i)(?:цена|price|стоимость|аренд|rent|\x{1F4B0}|\x{1F4B5}|\x{1F4B8})`)
+	extraCostLinePattern       = regexp.MustCompile(`(?i)(?:^|[^\p{L}])(?:коммунал|интернет|парковк|стоянк|уборк|cleaning|utilit|parking|налог|обслуживан|мусор|квартплат|осмд|тсж|жкх|свет(?:[^\p{L}]|$)|газ(?:[^\p{L}]|$)|вод[аыу](?:[^\p{L}]|$))`)
+	dailyPricePattern          = regexp.MustCompile(`(?i)(?:сут(?:к|ок)|посуточ|в день|daily|per night|/ночь|за ночь)`)
+	costModifierPattern        = regexp.MustCompile(`(?i)(?:^|[^\p{L}])(?:с|со|без|включая|кроме|with|without|including|excluding)[ \t]+(?:уч[её]та[ \t]+)?\p{L}+`)
+	minGELPerUSD               = 2.3
+	maxGELPerUSD               = 3.2
 	yearAfterPricePattern      = regexp.MustCompile(`(?i)^[ \t]*(?:год\p{L}*|г\.)`)
 	floorBeforeNumberPattern   = regexp.MustCompile(`(?i)(?:^|[^0-9 \t])[ \t]*(?:этаж\p{L}*|floor)[ \t:]*$`)
 	digitGroupBeforePattern    = regexp.MustCompile(`[0-9][ \t.,]+$`)
@@ -29,7 +38,7 @@ var (
 	unitBeforeNumberPattern    = regexp.MustCompile(`(?i)[мm]$`)
 	phoneTailAfterPricePattern = regexp.MustCompile(`^[ \t-]+[0-9]{2}[ \t-]+[0-9]{2}`)
 	minKeywordOnlyPrice        = 100
-	areaPattern                = regexp.MustCompile(`(?i)([0-9]+(?:[.,][0-9]+)?)\s*(?:m2|m²|м2|м²|кв\.?\s?м\.?|м\.?\s?кв\.?|sqm|²)`)
+	areaPattern                = regexp.MustCompile(`(?i)([0-9]+(?:[.,][0-9]+)?)\s*(?:m2|m²|м2|м²|кв\.?\s?м\.?|м\.?\s?кв\.?|sq\.?\s?m\.?|²)`)
 )
 
 func FromChannelMessage(message sources.ChannelMessage) domain.ApartmentListing {
@@ -99,6 +108,8 @@ const (
 )
 
 type priceCandidate struct {
+	matchStart  int
+	matchEnd    int
 	numberStart int
 	value       int
 	currency    string
@@ -106,13 +117,64 @@ type priceCandidate struct {
 
 func parsePrice(text string) int {
 	candidates := priceCandidates(text)
-	for _, candidate := range candidates {
-		if candidate.currency == currencyUSD && !isDepositContext(text, candidate.numberStart) {
-			return candidate.value
-		}
-	}
+	var eligible []priceCandidate
 	for _, candidate := range candidates {
 		if !isDepositContext(text, candidate.numberStart) {
+			eligible = append(eligible, candidate)
+		}
+	}
+	if len(eligible) == 0 {
+		return depositOnlyPrice(candidates)
+	}
+	rentCandidates := filterCandidates(eligible, func(candidate priceCandidate) bool {
+		clause := clauseAt(text, candidate.numberStart)
+		return !isDailyPriceClause(clause) && !isExtraCostClause(clause)
+	})
+	if len(rentCandidates) == 0 {
+		rentCandidates = filterCandidates(eligible, func(candidate priceCandidate) bool {
+			return !isDailyPriceClause(clauseAt(text, candidate.numberStart))
+		})
+	}
+	if len(rentCandidates) == 0 {
+		rentCandidates = eligible
+	}
+	chosen := bestRentCandidate(text, rentCandidates)
+	return usdEquivalentOf(text, chosen, eligible).value
+}
+
+func filterCandidates(candidates []priceCandidate, keep func(priceCandidate) bool) []priceCandidate {
+	var kept []priceCandidate
+	for _, candidate := range candidates {
+		if keep(candidate) {
+			kept = append(kept, candidate)
+		}
+	}
+	return kept
+}
+
+func isDailyPriceClause(clause string) bool {
+	return dailyPricePattern.MatchString(clause)
+}
+
+func isExtraCostClause(clause string) bool {
+	return extraCostLinePattern.MatchString(costModifierPattern.ReplaceAllString(clause, " "))
+}
+
+func clauseAt(text string, position int) string {
+	line := lineAt(text, position)
+	lineStart := strings.LastIndex(text[:position], "\n") + 1
+	offset := position - lineStart
+	clauseStart := strings.LastIndexAny(line[:offset], ",;+()") + 1
+	clauseEnd := strings.IndexAny(line[offset:], ",;+()")
+	if clauseEnd == -1 {
+		return line[clauseStart:]
+	}
+	return line[clauseStart : offset+clauseEnd]
+}
+
+func depositOnlyPrice(candidates []priceCandidate) int {
+	for _, candidate := range candidates {
+		if candidate.currency != currencyNone {
 			return candidate.value
 		}
 	}
@@ -120,6 +182,71 @@ func parsePrice(text string) int {
 		return candidates[0].value
 	}
 	return 0
+}
+
+func bestRentCandidate(text string, candidates []priceCandidate) priceCandidate {
+	best := candidates[0]
+	bestRank := rentCandidateRank(text, best)
+	for _, candidate := range candidates[1:] {
+		if rank := rentCandidateRank(text, candidate); rank < bestRank {
+			best, bestRank = candidate, rank
+		}
+	}
+	return best
+}
+
+func rentCandidateRank(text string, candidate priceCandidate) int {
+	switch {
+	case candidate.currency != currencyNone && rentLabelPattern.MatchString(lineAt(text, candidate.numberStart)):
+		return 0
+	case candidate.currency != currencyNone:
+		return 1
+	default:
+		return 2
+	}
+}
+
+func usdEquivalentOf(text string, chosen priceCandidate, candidates []priceCandidate) priceCandidate {
+	if chosen.currency != currencyGEL {
+		return chosen
+	}
+	for index, candidate := range candidates {
+		if candidate.numberStart <= chosen.numberStart || candidate.currency != currencyUSD {
+			continue
+		}
+		if isPlausibleUSDEquivalent(chosen.value, candidate.value) || isAdjacentUSDEquivalent(text, chosen, candidate, candidates[:index]) {
+			return candidate
+		}
+		return chosen
+	}
+	return chosen
+}
+
+func isPlausibleUSDEquivalent(gelValue, usdValue int) bool {
+	ratio := float64(gelValue) / float64(usdValue)
+	return ratio >= minGELPerUSD && ratio <= maxGELPerUSD
+}
+
+func isAdjacentUSDEquivalent(text string, chosen, usd priceCandidate, earlier []priceCandidate) bool {
+	if usd.matchStart < chosen.matchEnd {
+		return false
+	}
+	for _, candidate := range earlier {
+		if candidate.numberStart > chosen.numberStart {
+			return false
+		}
+	}
+	gap := text[chosen.matchEnd:usd.matchStart]
+	return usdEquivalentGapPattern.MatchString(gap) || usdPaymentGapPattern.MatchString(gap)
+}
+
+func lineAt(text string, position int) string {
+	lineStart := strings.LastIndex(text[:position], "\n") + 1
+	lineEnd := strings.Index(text[position:], "\n")
+	if lineEnd == -1 {
+		return text[lineStart:]
+	}
+	return text[lineStart : position+lineEnd]
 }
 
 func priceCandidates(text string) []priceCandidate {
@@ -162,7 +289,7 @@ type priceMatch struct {
 }
 
 func (match priceMatch) candidate() priceCandidate {
-	return priceCandidate{numberStart: match.numberStart, value: match.value, currency: match.currency()}
+	return priceCandidate{matchStart: match.matchStart, matchEnd: match.matchEnd, numberStart: match.numberStart, value: match.value, currency: match.currency()}
 }
 
 func (match priceMatch) currency() string {
@@ -236,7 +363,7 @@ func acceptKeywordOnlyPrice(match priceMatch) (priceMatch, bool) {
 		return match, false
 	}
 	rest := match.text[match.numberEnd:]
-	if unitAfterPricePattern.MatchString(rest) || yearAfterPricePattern.MatchString(rest) || phoneTailAfterPricePattern.MatchString(rest) {
+	if unitAfterPricePattern.MatchString(rest) || percentAfterPricePattern.MatchString(rest) || yearAfterPricePattern.MatchString(rest) || phoneTailAfterPricePattern.MatchString(rest) {
 		return match, false
 	}
 	return match, !startsWithArea(match.text[match.numberStart:])
@@ -299,7 +426,7 @@ func startsWithArea(text string) bool {
 func isDepositContext(text string, numberStart int) bool {
 	lineStart := strings.LastIndex(text[:numberStart], "\n") + 1
 	linePrefix := strings.ToLower(text[lineStart:numberStart])
-	for _, depositKeyword := range []string{"депозит", "залог", "deposit", "комиссия", "commission"} {
+	for _, depositKeyword := range []string{"депозит", "залог", "deposit", "комиссия", "commission", "предоплат", "prepay", "страховк"} {
 		idx := strings.LastIndex(linePrefix, depositKeyword)
 		if idx == -1 {
 			continue
