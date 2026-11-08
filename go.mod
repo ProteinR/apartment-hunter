@@ -2,7 +2,7 @@ module apartment-hunter
 
 go 1.25.0
 
-require github.com/go-telegram/bot v1.21.0
+require github.com/go-telegram/bot v1.27.0
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.84.0
