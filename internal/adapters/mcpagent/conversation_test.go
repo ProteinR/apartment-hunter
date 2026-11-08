@@ -391,3 +391,63 @@ func TestAgentAbilitiesForbidOfferingReaderChatsToNonOwners(t *testing.T) {
 		t.Fatal("expected the owner to keep the reader chats offer")
 	}
 }
+
+type fakeSettingsWidgetSender struct {
+	sentTo []int64
+}
+
+func (s *fakeSettingsWidgetSender) SendSettingsWidget(ctx context.Context, telegramChatID int64) (string, error) {
+	s.sentTo = append(s.sentTo, telegramChatID)
+	return "settings widget sent to the chat", nil
+}
+
+func TestOpenSettingsWidgetToolSendsWidgetForConfiguredProfile(t *testing.T) {
+	store := &fakeProfileStore{profile: profiles.Profile{ID: "telegram_42", TelegramChatID: 42, Preferences: &domain.UserPreferences{MaxBudget: 600}}}
+	requests := 0
+	var toolResult string
+	server := newAgentServer(t, func(req chatRequest) string {
+		requests++
+		if requests == 1 {
+			offered := false
+			for _, tool := range req.Tools {
+				offered = offered || tool.Function.Name == "open_settings_widget"
+			}
+			if !offered {
+				t.Fatal("expected open_settings_widget to be offered")
+			}
+			return `{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"open_settings_widget","arguments":"{}"}}]}}]}`
+		}
+		toolResult = req.Messages[len(req.Messages)-1].Content
+		return assistantReply("Виджет в чате.")
+	})
+	agent := New("test-key", store)
+	agent.apiURL = server.URL
+	sender := &fakeSettingsWidgetSender{}
+	agent.SetSettingsWidgetSender(sender)
+
+	if _, _, _, err := agent.ProcessCommand(context.Background(), "telegram_42", "покажи настройки"); err != nil {
+		t.Fatal(err)
+	}
+	if len(sender.sentTo) != 1 || sender.sentTo[0] != 42 || toolResult != "settings widget sent to the chat" {
+		t.Fatalf("expected one widget for chat 42, got %v and %q", sender.sentTo, toolResult)
+	}
+}
+
+func TestOpenSettingsWidgetToolHiddenDuringOnboarding(t *testing.T) {
+	store := &fakeProfileStore{profile: profiles.Profile{ID: "telegram_42", TelegramChatID: 42}}
+	server := newAgentServer(t, func(req chatRequest) string {
+		for _, tool := range req.Tools {
+			if tool.Function.Name == "open_settings_widget" {
+				t.Fatal("expected open_settings_widget to be hidden without preferences")
+			}
+		}
+		return assistantReply("В каком городе ищем?")
+	})
+	agent := New("test-key", store)
+	agent.apiURL = server.URL
+	agent.SetSettingsWidgetSender(&fakeSettingsWidgetSender{})
+
+	if _, _, _, err := agent.ProcessCommand(context.Background(), "telegram_42", "привет"); err != nil {
+		t.Fatal(err)
+	}
+}

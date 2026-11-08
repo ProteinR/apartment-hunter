@@ -19,32 +19,33 @@ h1{font-size:16px;margin:0 0 10px}
 <div class="r"><div class="l">Бюджет до<b id="bv"></b></div><div class="t" id="bt"><i></i><s></s><u></u></div></div>
 <div class="r"><div class="l">Площадь от<b id="av"></b></div><div class="t" id="at"><i></i><s></s><u></u></div></div>
 <div class="r"><div class="l">Обязательно</div><div class="g" id="m"></div></div>
-<div class="r"><div class="l">Районы</div><div class="g" id="d"></div><p class="h">Тап по району убирает его из поиска</p></div>
+<div class="r" id="dr"><div class="l">Районы</div><div class="g" id="d"></div><p class="h">Тап по району убирает его из поиска</p></div>
 <div id="s">Сохранить</div>
 <script>
-const T=window.TelegramWidget,$=i=>document.getElementById(i);
-let D={c:"Батуми",b:700,a:50,m:5,d:["Новый бульвар","6 Мая парк"],k:3};
+const T=window.TelegramWidget,H=T&&T.HapticFeedback,$=i=>document.getElementById(i);
+let D={c:"",b:0,a:0,m:0,d:[],v:"",u:""};
 try{const j=T&&T.chatData&&JSON.parse(T.chatData);if(j)D=Object.assign(D,j)}catch(e){}
-const M=["Посудомойка","Духовка","Кондиционер","Балкон"];
-$("h").textContent="Поиск · "+D.c;
-function slider(id,vid,min,max,step,key,fmt){
+D.k=(1<<D.d.length)-1;
+$("h").textContent="Поиск"+(D.c?" · "+D.c:"");
+function slider(id,vid,min,max,step,key,fmt,top){
 const t=$(id),s=t.children[1],u=t.children[2];let w=0,L=0,on=0;
-const draw=()=>{const p=(D[key]-min)/(max-min)*100;s.style.width=p+"%";u.style.left=p+"%";$(vid).textContent=fmt(D[key])};
-const set=x=>{x-=L;let v=min+Math.max(0,Math.min(1,x/w))*(max-min);v=Math.round(v/step)*step;if(v!=D[key]){D[key]=v;draw();T&&T.HapticFeedback.selectionChanged()}};
+const pos=v=>v==0&&top?max:Math.max(min,Math.min(max,v));
+const draw=()=>{const p=(pos(D[key])-min)/(max-min)*100;s.style.width=p+"%";u.style.left=p+"%";$(vid).textContent=fmt(D[key])};
+const set=x=>{x-=L;let v=min+Math.max(0,Math.min(1,x/w))*(max-min);v=Math.round(v/step)*step;if(top&&v>=max)v=0;if(v!=D[key]){D[key]=v;draw();H&&H.selectionChanged()}};
 t.addEventListener("pointerdown",e=>{on=1;const r=t.getBoundingClientRect();L=r.left;w=r.width||300;set(e.clientX)});
 t.addEventListener("pointermove",e=>{on&&set(e.clientX)});
 t.addEventListener("pointerup",()=>on=0);
 t.addEventListener("pointercancel",()=>on=0);
 draw()}
-slider("bt","bv",200,2000,50,"b",v=>" $"+v);
-slider("at","av",20,150,5,"a",v=>" "+v+" м²");
+slider("bt","bv",100,3000,50,"b",v=>v?" $"+v:" без лимита",1);
+slider("at","av",0,150,5,"a",v=>v?" "+v+" м²":" любая",0);
 function chips(id,names,key){const g=$(id);names.forEach((n,i)=>{const c=document.createElement("div");c.className="c";c.textContent=n;
 const f=()=>c.classList.toggle("on",!!(D[key]>>i&1));f();
-c.addEventListener("click",()=>{D[key]^=1<<i;f();T&&T.HapticFeedback.impactOccurred("light")});g.appendChild(c)})}
-chips("m",M,"m");
-chips("d",D.d,"k");
-$("s").addEventListener("click",()=>{const p="set_b"+D.b+"a"+D.a+"m"+D.m+"k"+D.k;
-T&&T.HapticFeedback.notificationOccurred("success");
-T?T.openTelegramLink("https://t.me/Apartmenthuner_bot?start="+p):$("s").textContent=p});
+c.addEventListener("click",()=>{D[key]^=1<<i;f();H&&H.impactOccurred("light")});g.appendChild(c)})}
+chips("m",["Посудомойка","Духовка"],"m");
+if(D.d.length)chips("d",D.d,"k");else $("dr").hidden=true;
+$("s").addEventListener("click",()=>{const p="set_b"+D.b+"a"+D.a+"m"+D.m+"k"+D.k+"v"+D.v;
+H&&H.notificationOccurred("success");
+T&&D.u?T.openTelegramLink("https://t.me/"+D.u+"?start="+p):$("s").textContent=p});
 T&&T.ready();
 </script>

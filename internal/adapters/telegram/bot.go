@@ -46,6 +46,9 @@ type Bot struct {
 	allowedUsernames []string
 	defaultCity      cities.City
 	channelAccess    ChannelAccessChecker
+	username         string
+	widgetEndpoint   string
+	getMeEndpoint    string
 }
 
 type ChannelAccessChecker interface {
@@ -139,6 +142,7 @@ func New(token, outputDir string, opts ...Option) *Bot {
 	if bot.mcpAgent != nil {
 		bot.mcpAgent.SetSourceManager(bot)
 		bot.mcpAgent.SetAccessManager(bot)
+		bot.mcpAgent.SetSettingsWidgetSender(bot)
 	}
 	return bot
 }
@@ -176,6 +180,7 @@ func (b *Bot) Run(ctxDone <-chan struct{}) error {
 
 var botMenuCommands = []models.BotCommand{
 	{Command: "start", Description: "Начать или продолжить настройку поиска"},
+	{Command: "settings", Description: "Открыть настройки поиска"},
 	{Command: "reset", Description: "Начать разговор заново, фильтры сохранятся"},
 }
 
@@ -224,6 +229,14 @@ func (b *Bot) handleMessage(ctx context.Context, api *telegrambot.Bot, chatID in
 	if err != nil {
 		return err
 	}
+	if response.Widget != nil {
+		err := b.postWidget(ctx, chatID, *response.Widget)
+		if err == nil {
+			return nil
+		}
+		fmt.Fprintf(os.Stderr, "telegram bot settings widget failed for chat %d: %v\n", chatID, err)
+		return sendMessageWithMarkup(ctx, api, chatID, response.Text, response.ReplyMarkup)
+	}
 	if len(response.DocumentBytes) > 0 {
 		return sendDocumentBytesWithMarkup(ctx, api, chatID, response.DocumentFilename, response.DocumentBytes, response.Text, response.ReplyMarkup)
 	}
@@ -251,6 +264,7 @@ type textResponse struct {
 	PhotoBytes       []byte
 	DocumentFilename string
 	DocumentBytes    []byte
+	Widget           *settingsWidget
 }
 
 func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error) {
@@ -300,6 +314,12 @@ func (b *Bot) handleTextResponse(chatID int64, text string) (textResponse, error
 	if b.mcpAgent == nil && looksLikeChannelSubscription(text) {
 		reply, err := b.subscribeChannelsFromText(context.Background(), chatID, text)
 		return textResponse{Text: reply, ReplyMarkup: removeKeyboard()}, err
+	}
+	if isWidgetSettingsStart(text) {
+		return b.applyWidgetSettingsStart(context.Background(), chatID, text)
+	}
+	if text == "/settings" || strings.HasPrefix(text, "/settings@") {
+		return b.settingsWidgetResponse(context.Background(), chatID)
 	}
 	if text == "/start" || text == "/preferences" || text == "/restart" {
 		if b.mcpAgent != nil {

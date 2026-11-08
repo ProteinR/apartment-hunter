@@ -35,6 +35,18 @@ func (a *Agent) SetSourceManager(sources SourceManager) {
 	a.sources = sources
 }
 
+type SettingsWidgetSender interface {
+	SendSettingsWidget(ctx context.Context, telegramChatID int64) (string, error)
+}
+
+func (a *Agent) SetSettingsWidgetSender(sender SettingsWidgetSender) {
+	a.settingsWidget = sender
+}
+
+func (a *Agent) maySendSettingsWidget(profile profiles.Profile) bool {
+	return a.settingsWidget != nil && profile.TelegramChatID != 0 && profile.Preferences != nil
+}
+
 type AccessManager interface {
 	IsAdmin(ctx context.Context, telegramChatID int64) bool
 	ListBotUsers(ctx context.Context) (string, error)
@@ -346,6 +358,9 @@ func (a *Agent) conversationTools(profile profiles.Profile, canListChats, canMan
 	if profile.Preferences == nil {
 		tools = slices.DeleteFunc(tools, func(tool chatTool) bool { return tool.Function.Name == "update_search_area" })
 	}
+	if a.maySendSettingsWidget(profile) {
+		tools = append(tools, functionTool("open_settings_widget", "Присылает в чат интерактивный виджет настроек поиска с текущими значениями: бюджет до, площадь от, обязательные посудомойка и духовка, районы. Пользователь меняет их ползунками и тапами и нажимает «Сохранить», бот применяет изменения сам. Вызывай, когда пользователь просит показать или открыть настройки, панель, ползунки или хочет быстро подправить бюджет, площадь или районы. После вызова коротко скажи, что виджет в чате.", map[string]any{"type": "object", "properties": map[string]any{}}))
+	}
 	if a.mayManageSources(profile) {
 		tools = append(tools,
 			functionTool("list_sources", "Возвращает актуальный список Telegram-каналов и групп, из которых сейчас читаются объявления для пользователя.", map[string]any{"type": "object", "properties": map[string]any{}}),
@@ -503,6 +518,15 @@ func (a *Agent) executeTool(ctx context.Context, profile *profiles.Profile, tc t
 			return "not found"
 		}
 		return marshalToolResult(record)
+	case "open_settings_widget":
+		if !a.maySendSettingsWidget(*profile) {
+			return "unknown function"
+		}
+		result, err := a.settingsWidget.SendSettingsWidget(ctx, profile.TelegramChatID)
+		if err != nil {
+			return "error: " + err.Error()
+		}
+		return result
 	case "list_sources":
 		if !a.mayManageSources(*profile) {
 			return "unknown function"

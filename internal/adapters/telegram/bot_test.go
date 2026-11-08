@@ -825,7 +825,7 @@ func TestDebugModeCanBeToggled(t *testing.T) {
 	}
 }
 
-func TestRepliesRemoveCommandKeyboardAndMenuListsOnlyStartAndReset(t *testing.T) {
+func TestRepliesRemoveCommandKeyboardAndMenuListsStartSettingsAndReset(t *testing.T) {
 	store := newFakeProfileStore()
 	bot := New("test-token", t.TempDir(), WithProfileStore(store))
 
@@ -842,8 +842,8 @@ func TestRepliesRemoveCommandKeyboardAndMenuListsOnlyStartAndReset(t *testing.T)
 	for _, command := range botMenuCommands {
 		commands = append(commands, command.Command)
 	}
-	if strings.Join(commands, ",") != "start,reset" {
-		t.Fatalf("expected the menu to list only start and reset, got %v", commands)
+	if strings.Join(commands, ",") != "start,settings,reset" {
+		t.Fatalf("expected the menu to list start, settings and reset, got %v", commands)
 	}
 }
 

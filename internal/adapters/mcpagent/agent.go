@@ -47,18 +47,19 @@ type TelegramChatLister interface {
 }
 
 type Agent struct {
-	apiKey        string
-	model         string
-	apiURL        string
-	ttlHours      int
-	client        *http.Client
-	store         ProfileStore
-	geocoder      Geocoder
-	chatLister    TelegramChatLister
-	anthropic     *anthropic.Client
-	effort        string
-	sources       SourceManager
-	accessManager AccessManager
+	apiKey         string
+	model          string
+	apiURL         string
+	ttlHours       int
+	client         *http.Client
+	store          ProfileStore
+	geocoder       Geocoder
+	chatLister     TelegramChatLister
+	anthropic      *anthropic.Client
+	effort         string
+	sources        SourceManager
+	accessManager  AccessManager
+	settingsWidget SettingsWidgetSender
 }
 
 func New(apiKey string, store ProfileStore) *Agent {
