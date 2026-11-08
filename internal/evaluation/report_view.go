@@ -30,9 +30,6 @@ type ReportView struct {
 	StatusLabel      string
 	Price            int
 	AreaM2           float64
-	District         string
-	Latitude         float64
-	Longitude        float64
 	Criteria         []ReportCriterion
 	RejectionReasons []string
 	FailureReason    string
@@ -62,9 +59,6 @@ func BuildReportView(record domain.ListingEvaluationRecord, prefs domain.UserPre
 		StatusLabel:   statusLabel(record.Status),
 		Price:         record.Listing.Price,
 		AreaM2:        record.Listing.AreaM2,
-		District:      strings.TrimSpace(record.Listing.District),
-		Latitude:      record.Listing.Latitude,
-		Longitude:     record.Listing.Longitude,
 		FailureReason: record.FailureReason,
 		MessageLink:   record.Source.MessageLink,
 		SourceLabel:   reportSourceLabel(record.Source),

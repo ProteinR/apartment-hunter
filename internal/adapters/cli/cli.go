@@ -272,19 +272,19 @@ func (a App) telegramProcessWithContext(parent context.Context, onlyProfileID st
 		return err
 	}
 	pipeline := listingPipeline{
-		store:             store,
-		reader:            reader,
-		analyzer:          analyzer,
-		geocoder:          newGoogleGeocoder(),
-		defaultCity:       cities.Batumi,
-		geocodeLog:        newGeocodeLogger(a.Out),
-		pipelineLog:       newPipelineLogger(a.Out),
-		botToken:          strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
-		mapRenderer:       googlemaps.StaticMapRenderer{APIKey: strings.TrimSpace(os.Getenv("APARTMENT_HUNTER_GOOGLE_MAPS_API_KEY"))},
-		richNotifications: richNotificationsEnabled(os.Getenv("TELEGRAM_RICH_NOTIFICATIONS")),
-		cardNotifications: richNotificationsEnabled(os.Getenv("TELEGRAM_CARD_NOTIFICATIONS")),
-		out:               a.Out,
-		errOut:            a.Err,
+		store:                store,
+		reader:               reader,
+		analyzer:             analyzer,
+		geocoder:             newGoogleGeocoder(),
+		defaultCity:          cities.Batumi,
+		geocodeLog:           newGeocodeLogger(a.Out),
+		pipelineLog:          newPipelineLogger(a.Out),
+		botToken:             strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
+		mapRenderer:          googlemaps.StaticMapRenderer{APIKey: strings.TrimSpace(os.Getenv("APARTMENT_HUNTER_GOOGLE_MAPS_API_KEY"))},
+		richNotifications:    richNotificationsEnabled(os.Getenv("TELEGRAM_RICH_NOTIFICATIONS")),
+		collageNotifications: richNotificationsEnabled(os.Getenv("TELEGRAM_COLLAGE_NOTIFICATIONS")),
+		out:                  a.Out,
+		errOut:               a.Err,
 	}
 	worker := &listingWorker{
 		store:           store,
@@ -354,19 +354,19 @@ func requireProcessableProfile(ctx context.Context, store *pgstore.Repository, p
 }
 
 type listingPipeline struct {
-	store             *pgstore.Repository
-	reader            *telegramuserbot.Client
-	analyzer          evaluation.AnalyzerWithUsage
-	geocoder          *googlemaps.Geocoder
-	defaultCity       cities.City
-	geocodeLog        evaluation.GeocodeLogger
-	pipelineLog       evaluation.PipelineLogger
-	botToken          string
-	mapRenderer       googlemaps.StaticMapRenderer
-	richNotifications bool
-	cardNotifications bool
-	out               io.Writer
-	errOut            io.Writer
+	store                *pgstore.Repository
+	reader               *telegramuserbot.Client
+	analyzer             evaluation.AnalyzerWithUsage
+	geocoder             *googlemaps.Geocoder
+	defaultCity          cities.City
+	geocodeLog           evaluation.GeocodeLogger
+	pipelineLog          evaluation.PipelineLogger
+	botToken             string
+	mapRenderer          googlemaps.StaticMapRenderer
+	richNotifications    bool
+	collageNotifications bool
+	out                  io.Writer
+	errOut               io.Writer
 }
 
 func (p listingPipeline) processorFor(profile profiles.Profile) evaluation.Processor {
@@ -410,21 +410,25 @@ func (p listingPipeline) process(ctx context.Context, profile profiles.Profile, 
 func (p listingPipeline) notify(ctx context.Context, profile profiles.Profile, message sources.ChannelMessage, result evaluation.Result) error {
 	record := result.Record
 	fmt.Fprintf(p.out, "Sending notification for %s/%d to chat %d\n", message.ChannelID, message.MessageID, profile.TelegramChatID)
-	mapImage, searchAreaGeoJSON, hasMap, mapErr := listingSearchAreaMapImage(ctx, p.store, p.mapRenderer, record)
+	mapRenderer := p.mapRenderer
+	if p.collageNotifications {
+		mapRenderer.Size = telegram.ListingCollageMapSize
+	}
+	mapImage, hasMap, mapErr := listingSearchAreaMapImage(ctx, p.store, mapRenderer, record)
 	if mapErr != nil {
 		fmt.Fprintf(p.errOut, "Telegram map skipped for %s/%d: %v\n", message.ChannelID, message.MessageID, mapErr)
 	}
 	if !hasMap {
 		mapImage = nil
 	}
-	botMessageID, sent, cardNote, albumSent, err := p.sendCardNotification(ctx, profile, message, result, mapImage, searchAreaGeoJSON)
+	format := "collage"
+	botMessageID, sent, collageNote, err := p.sendCollageNotification(ctx, profile, message, result, mapImage)
 	if err != nil {
 		logPipelineEvent(ctx, p.pipelineLog, record, "notification_sent", "failed", err.Error())
 		return err
 	}
-	format := "card"
 	richNote := ""
-	if !sent && !albumSent {
+	if !sent {
 		format = "rich"
 		botMessageID, sent, richNote, err = p.sendRichNotification(ctx, profile, message, result, mapImage)
 		if err != nil {
@@ -434,11 +438,7 @@ func (p listingPipeline) notify(ctx context.Context, profile profiles.Profile, m
 	}
 	if !sent {
 		format = "plain"
-		plainMap := mapImage
-		if albumSent {
-			plainMap = nil
-		}
-		botMessageID, err = p.sendPlainNotification(ctx, profile, message, record, plainMap)
+		botMessageID, err = p.sendPlainNotification(ctx, profile, message, record, mapImage)
 		if err != nil {
 			logPipelineEvent(ctx, p.pipelineLog, record, "notification_sent", "failed", err.Error())
 			return err
@@ -448,34 +448,29 @@ func (p listingPipeline) notify(ctx context.Context, profile profiles.Profile, m
 		logPipelineEvent(ctx, p.pipelineLog, record, "notification_saved", "failed", err.Error())
 		return err
 	}
-	logPipelineEvent(ctx, p.pipelineLog, record, "notification_sent", "sent", strings.TrimSpace(fmt.Sprintf("format=%s map=%t photos=%d %s %s", format, len(mapImage) > 0, len(result.NotificationPhotos), cardNote, richNote)))
+	logPipelineEvent(ctx, p.pipelineLog, record, "notification_sent", "sent", strings.TrimSpace(fmt.Sprintf("format=%s map=%t photos=%d %s %s", format, len(mapImage) > 0, len(result.NotificationPhotos), collageNote, richNote)))
 	logPipelineEvent(ctx, p.pipelineLog, record, "notification_saved", "saved", "")
 	return nil
 }
 
-func (p listingPipeline) sendCardNotification(ctx context.Context, profile profiles.Profile, message sources.ChannelMessage, result evaluation.Result, mapImage []byte, searchAreaGeoJSON string) (int, bool, string, bool, error) {
-	if !p.cardNotifications {
-		return 0, false, "card_disabled", false, nil
+func (p listingPipeline) sendCollageNotification(ctx context.Context, profile profiles.Profile, message sources.ChannelMessage, result evaluation.Result, mapImage []byte) (int, bool, string, error) {
+	if !p.collageNotifications {
+		return 0, false, "collage_disabled", nil
 	}
-	sent, err := telegram.SendListingCardNotification(ctx, p.botToken, profile.TelegramChatID, telegram.ListingCardNotification{
-		Report:            result.ReportView,
-		MapImage:          mapImage,
-		Photos:            result.NotificationPhotos,
-		SearchAreaGeoJSON: searchAreaGeoJSON,
-		Caption:           strings.TrimSpace(listingCardCaption),
+	botMessageID, err := telegram.SendListingCollageNotification(ctx, p.botToken, profile.TelegramChatID, telegram.ListingCollageNotification{
+		Report:   result.ReportView,
+		MapImage: mapImage,
+		Photos:   result.NotificationPhotos,
+		Hint:     listingCollageHint,
 	})
-	note := fmt.Sprintf("album=%d", sent.AlbumItems)
-	if sent.AlbumError != "" {
-		note += " album_error=" + sent.AlbumError
-	}
 	if err == nil {
-		return sent.MessageID, true, note, sent.AlbumSent, nil
+		return botMessageID, true, "", nil
 	}
-	if errors.Is(err, telegram.ErrListingCardRejected) {
-		fmt.Fprintf(p.errOut, "Telegram listing card rejected for %s/%d, falling back: %v\n", message.ChannelID, message.MessageID, err)
-		return 0, false, note + " card_error=" + err.Error(), sent.AlbumSent, nil
+	if errors.Is(err, telegram.ErrListingCollageRejected) {
+		fmt.Fprintf(p.errOut, "Telegram listing collage rejected for %s/%d, falling back: %v\n", message.ChannelID, message.MessageID, err)
+		return 0, false, "collage_error=" + err.Error(), nil
 	}
-	return 0, false, note, sent.AlbumSent, err
+	return 0, false, "", err
 }
 
 func (p listingPipeline) sendRichNotification(ctx context.Context, profile profiles.Profile, message sources.ChannelMessage, result evaluation.Result, mapImage []byte) (int, bool, string, error) {
@@ -523,7 +518,7 @@ func richNotificationsEnabled(value string) bool {
 	}
 }
 
-const listingCardCaption = "💬 Ответь на карточку, что нравится или не подходит, и я подстрою поиск."
+const listingCollageHint = "💬 Ответь на это сообщение, что нравится или не подходит, и я подстрою поиск."
 
 const listingReplyHint = "\n\n💬 Ответь на это сообщение, что нравится или не подходит, и я подстрою поиск."
 
@@ -615,19 +610,19 @@ func listingSearchAreaMapURL(ctx context.Context, store latestSearchAreaStore, r
 	return mapURL, true, nil
 }
 
-func listingSearchAreaMapImage(ctx context.Context, store latestSearchAreaStore, renderer googlemaps.StaticMapRenderer, record domain.ListingEvaluationRecord) ([]byte, string, bool, error) {
+func listingSearchAreaMapImage(ctx context.Context, store latestSearchAreaStore, renderer googlemaps.StaticMapRenderer, record domain.ListingEvaluationRecord) ([]byte, bool, error) {
 	if !shouldSendListingSearchAreaMap(record) || store == nil {
-		return nil, "", false, nil
+		return nil, false, nil
 	}
 	geoJSON, _, err := store.LatestSearchAreaGeoJSON(ctx, record.Source.ProfileID)
 	if err != nil {
-		return nil, "", false, err
+		return nil, false, err
 	}
 	image, err := renderer.ListingSearchAreaImage(ctx, record.Listing, geoJSON)
 	if err != nil || len(image) == 0 {
-		return nil, geoJSON, false, err
+		return nil, false, err
 	}
-	return image, geoJSON, true, nil
+	return image, true, nil
 }
 
 func shouldSendListingSearchAreaMap(record domain.ListingEvaluationRecord) bool {

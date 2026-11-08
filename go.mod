@@ -7,6 +7,7 @@ require github.com/go-telegram/bot v1.27.0
 require (
 	github.com/anthropics/anthropic-sdk-go v1.84.0
 	github.com/lib/pq v1.10.9
+	golang.org/x/image v0.31.0
 )
 
 require (
