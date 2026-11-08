@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -13,8 +14,22 @@ import (
 )
 
 var (
-	pricePattern = regexp.MustCompile(`(?i)(?:[$₾][ \t]*([0-9][0-9 \t.,]{0,8})|(?:usd|gel|lari)[ \t]*([0-9][0-9 \t.,]{0,8})|([0-9][0-9 \t.,]{0,8})[ \t]*(?:[$₾]|usd|gel|lari))`)
-	areaPattern  = regexp.MustCompile(`(?i)([0-9]+(?:[.,][0-9]+)?)\s*(?:m2|m²|м2|м²|кв\.?\s?м\.?|м\.?\s?кв\.?|sqm|²)`)
+	priceSeparator             = `[ \t:=\-–—\p{So}\p{Sk}\x{FE0F}\x{200D}]*`
+	trailingCurrencySeparator  = `[ \t\x{FE0F}]*`
+	priceNumber                = `([0-9]{1,3}(?:[ .,][0-9]{3})+|[0-9]+)`
+	currencyFirstPricePattern  = regexp.MustCompile(`(?i)(?:[$₾]|\x{1F4B2}|usd|gel|lari)` + priceSeparator + priceNumber)
+	numberFirstPricePattern    = regexp.MustCompile(`(?i)` + priceNumber + trailingCurrencySeparator + `(?:[$₾]|\x{1F4B2}|usd|gel|lari|лари|доллар\p{L}*|долл?(?:[^\p{L}]|$))`)
+	priceKeywordPattern        = regexp.MustCompile(`(?i)(?:цена|стоимость|price|\x{1F4B0}|\x{1F4B5}|\x{1F4B8})` + priceSeparator + priceNumber)
+	structureAfterPricePattern = regexp.MustCompile(`(?i)^[ \t]*(?:этаж|месяц|мин|комнат|спальн|bedroom|[+/][0-9])`)
+	unitAfterPricePattern      = regexp.MustCompile(`(?i)^[ \t]*(?:км|km|метр\p{L}*|м\.|м|m)(?:[^\p{L}]|$)`)
+	yearAfterPricePattern      = regexp.MustCompile(`(?i)^[ \t]*(?:год\p{L}*|г\.)`)
+	floorBeforeNumberPattern   = regexp.MustCompile(`(?i)(?:^|[^0-9 \t])[ \t]*(?:этаж\p{L}*|floor)[ \t:]*$`)
+	digitGroupBeforePattern    = regexp.MustCompile(`[0-9][ \t.,]+$`)
+	maxPriceValue              = 999999
+	unitBeforeNumberPattern    = regexp.MustCompile(`(?i)[мm]$`)
+	phoneTailAfterPricePattern = regexp.MustCompile(`^[ \t-]+[0-9]{2}[ \t-]+[0-9]{2}`)
+	minKeywordOnlyPrice        = 100
+	areaPattern                = regexp.MustCompile(`(?i)([0-9]+(?:[.,][0-9]+)?)\s*(?:m2|m²|м2|м²|кв\.?\s?м\.?|м\.?\s?кв\.?|sqm|²)`)
 )
 
 func FromChannelMessage(message sources.ChannelMessage) domain.ApartmentListing {
@@ -77,80 +92,223 @@ func firstNonEmptyLine(text string) string {
 	return ""
 }
 
+const (
+	currencyUSD  = "usd"
+	currencyGEL  = "gel"
+	currencyNone = ""
+)
+
+type priceCandidate struct {
+	numberStart int
+	value       int
+	currency    string
+}
+
 func parsePrice(text string) int {
-	matches := pricePattern.FindAllStringSubmatchIndex(text, -1)
-	if len(matches) == 0 {
-		return 0
-	}
-
-	var firstParsedPrice int
-	hasFirstParsedPrice := false
-
-	for _, m := range matches {
-		var value string
-		for i := 1; i < len(m)/2; i++ {
-			startIdx := m[2*i]
-			endIdx := m[2*i+1]
-			if startIdx != -1 && endIdx != -1 {
-				val := strings.TrimSpace(text[startIdx:endIdx])
-				if val != "" {
-					value = val
-					break
-				}
-			}
-		}
-		if value == "" {
-			continue
-		}
-		value = strings.NewReplacer(" ", "", ",", "", ".", "").Replace(value)
-		price, err := strconv.Atoi(value)
-		if err != nil || price <= 0 {
-			continue
-		}
-
-		if !hasFirstParsedPrice {
-			firstParsedPrice = price
-			hasFirstParsedPrice = true
-		}
-
-		// Find the start of the line containing the match
-		lineStart := 0
-		for idx := m[0] - 1; idx >= 0; idx-- {
-			if text[idx] == '\n' {
-				lineStart = idx + 1
-				break
-			}
-		}
-		linePrefix := strings.ToLower(text[lineStart:m[0]])
-
-		hasDepositKeyword := false
-		for _, kw := range []string{"депозит", "залог", "deposit", "комиссия", "commission"} {
-			idx := strings.LastIndex(linePrefix, kw)
-			if idx != -1 {
-				hasRentAfter := false
-				suffix := linePrefix[idx+len(kw):]
-				for _, rentKw := range []string{"цена", "price", "стоимость", "rent"} {
-					if strings.Contains(suffix, rentKw) {
-						hasRentAfter = true
-						break
-					}
-				}
-				if !hasRentAfter {
-					hasDepositKeyword = true
-					break
-				}
-			}
-		}
-
-		if !hasDepositKeyword {
-			return price
+	candidates := priceCandidates(text)
+	for _, candidate := range candidates {
+		if candidate.currency == currencyUSD && !isDepositContext(text, candidate.numberStart) {
+			return candidate.value
 		}
 	}
-
-	if hasFirstParsedPrice {
-		return firstParsedPrice
+	for _, candidate := range candidates {
+		if !isDepositContext(text, candidate.numberStart) {
+			return candidate.value
+		}
+	}
+	if len(candidates) > 0 {
+		return candidates[0].value
 	}
 	return 0
+}
+
+func priceCandidates(text string) []priceCandidate {
+	numberFirst := findPriceMatches(text, numberFirstPricePattern, acceptNumberFirstPrice)
+	currencyFirst := findPriceMatches(text, currencyFirstPricePattern, acceptCurrencyFirstPrice)
+	keywordOnly := findPriceMatches(text, priceKeywordPattern, acceptKeywordOnlyPrice)
+
+	var candidates []priceCandidate
+	for _, match := range numberFirst {
+		candidates = append(candidates, match.candidate())
+	}
+	for _, match := range currencyFirst {
+		if !currencyClaimedByNumberFirst(match, numberFirst) {
+			candidates = append(candidates, match.candidate())
+		}
+	}
+	for _, match := range keywordOnly {
+		candidates = append(candidates, match.candidate())
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].numberStart < candidates[j].numberStart
+	})
+	unique := candidates[:0]
+	for _, candidate := range candidates {
+		if len(unique) > 0 && unique[len(unique)-1].numberStart == candidate.numberStart {
+			continue
+		}
+		unique = append(unique, candidate)
+	}
+	return unique
+}
+
+type priceMatch struct {
+	text        string
+	matchStart  int
+	matchEnd    int
+	numberStart int
+	numberEnd   int
+	value       int
+}
+
+func (match priceMatch) candidate() priceCandidate {
+	return priceCandidate{numberStart: match.numberStart, value: match.value, currency: match.currency()}
+}
+
+func (match priceMatch) currency() string {
+	marker := strings.ToLower(match.text[match.matchStart:match.numberStart] + match.text[match.numberEnd:match.matchEnd])
+	switch {
+	case containsAny(marker, "$", "\U0001F4B2", "usd", "дол"):
+		return currencyUSD
+	case containsAny(marker, "₾", "gel", "lari", "лари"):
+		return currencyGEL
+	default:
+		return currencyNone
+	}
+}
+
+func findPriceMatches(text string, pattern *regexp.Regexp, accept func(priceMatch) (priceMatch, bool)) []priceMatch {
+	var matches []priceMatch
+	for _, indexes := range pattern.FindAllStringSubmatchIndex(text, -1) {
+		value, ok := parsePriceNumber(text[indexes[2]:indexes[3]])
+		if !ok {
+			continue
+		}
+		match := priceMatch{text: text, matchStart: indexes[0], matchEnd: indexes[1], numberStart: indexes[2], numberEnd: indexes[3], value: value}
+		if accepted, ok := accept(match); ok {
+			matches = append(matches, accepted)
+		}
+	}
+	return matches
+}
+
+func currencyClaimedByNumberFirst(currencyFirst priceMatch, numberFirst []priceMatch) bool {
+	for _, match := range numberFirst {
+		if currencyFirst.matchStart >= match.matchStart && currencyFirst.matchStart < match.matchEnd {
+			return true
+		}
+	}
+	return false
+}
+
+func acceptNumberFirstPrice(match priceMatch) (priceMatch, bool) {
+	prefix := match.text[:match.numberStart]
+	if match.value > maxPriceValue || digitGroupBeforePattern.MatchString(prefix) {
+		return match, false
+	}
+	if isGluedToIdentifier(prefix) {
+		return dropLeadingGroup(match)
+	}
+	if leadingGroupBelongsToContext(prefix) {
+		if !isGroupedNumber(match) {
+			return match, true
+		}
+		return dropLeadingGroup(match)
+	}
+	return match, true
+}
+
+func isGroupedNumber(match priceMatch) bool {
+	return strings.ContainsAny(match.text[match.numberStart:match.numberEnd], " .,")
+}
+
+func acceptCurrencyFirstPrice(match priceMatch) (priceMatch, bool) {
+	match, ok := dropTrailingGroupBeforeUnit(match)
+	if !ok {
+		return match, false
+	}
+	return match, !structureAfterPricePattern.MatchString(match.text[match.numberEnd:])
+}
+
+func acceptKeywordOnlyPrice(match priceMatch) (priceMatch, bool) {
+	match, ok := dropTrailingGroupBeforeUnit(match)
+	if !ok || match.value < minKeywordOnlyPrice || match.value > maxPriceValue {
+		return match, false
+	}
+	rest := match.text[match.numberEnd:]
+	if unitAfterPricePattern.MatchString(rest) || yearAfterPricePattern.MatchString(rest) || phoneTailAfterPricePattern.MatchString(rest) {
+		return match, false
+	}
+	return match, !startsWithArea(match.text[match.numberStart:])
+}
+
+func leadingGroupBelongsToContext(prefix string) bool {
+	return unitBeforeNumberPattern.MatchString(prefix) || floorBeforeNumberPattern.MatchString(prefix)
+}
+
+func dropLeadingGroup(match priceMatch) (priceMatch, bool) {
+	firstGroupEnd := strings.IndexAny(match.text[match.numberStart:match.numberEnd], " .,")
+	if firstGroupEnd == -1 {
+		return match, false
+	}
+	match.numberStart += firstGroupEnd + 1
+	return reparsePriceMatch(match)
+}
+
+func dropTrailingGroupBeforeUnit(match priceMatch) (priceMatch, bool) {
+	if !unitAfterPricePattern.MatchString(match.text[match.numberEnd:]) {
+		return match, true
+	}
+	lastGroupStart := strings.LastIndexAny(match.text[match.numberStart:match.numberEnd], " .,")
+	if lastGroupStart == -1 {
+		return match, true
+	}
+	match.numberEnd = match.numberStart + lastGroupStart
+	return reparsePriceMatch(match)
+}
+
+func reparsePriceMatch(match priceMatch) (priceMatch, bool) {
+	value, ok := parsePriceNumber(match.text[match.numberStart:match.numberEnd])
+	match.value = value
+	return match, ok
+}
+
+func isGluedToIdentifier(prefix string) bool {
+	tokenStart := strings.LastIndexAny(prefix, " \t\n") + 1
+	token := prefix[tokenStart:]
+	if token == "" {
+		return false
+	}
+	return strings.ContainsAny(token, "+/№") || strings.Count(token, "-") >= 2
+}
+
+func parsePriceNumber(raw string) (int, bool) {
+	digits := strings.NewReplacer(" ", "", ",", "", ".", "").Replace(raw)
+	value, err := strconv.Atoi(digits)
+	if err != nil || value <= 0 {
+		return 0, false
+	}
+	return value, true
+}
+
+func startsWithArea(text string) bool {
+	location := areaPattern.FindStringIndex(text)
+	return location != nil && location[0] == 0
+}
+
+func isDepositContext(text string, numberStart int) bool {
+	lineStart := strings.LastIndex(text[:numberStart], "\n") + 1
+	linePrefix := strings.ToLower(text[lineStart:numberStart])
+	for _, depositKeyword := range []string{"депозит", "залог", "deposit", "комиссия", "commission"} {
+		idx := strings.LastIndex(linePrefix, depositKeyword)
+		if idx == -1 {
+			continue
+		}
+		if !containsAny(linePrefix[idx+len(depositKeyword):], "цена", "price", "стоимость", "rent") {
+			return true
+		}
+	}
+	return false
 }
 
 func parseArea(text string) float64 {

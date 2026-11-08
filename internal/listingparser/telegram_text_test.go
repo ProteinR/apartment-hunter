@@ -169,3 +169,101 @@ func TestFromChannelMessageParsesPriceIgnoringDeposit(t *testing.T) {
 		})
 	}
 }
+
+func TestFromChannelMessageParsesPriceWithEmojisAndCurrencyWords(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want int
+	}{
+		{
+			name: "domikibatumi 1143467 heavy dollar sign after number",
+			text: "#сдам квартиру 2+1\nУл👈 Горгиладзе 40\n\n💸цена 1500 💲  на год\nОплата первого и последнего месяца\n\n📍 130 м²\n📍 3 этаж",
+			want: 1500,
+		},
+		{name: "heavy dollar sign glued", text: "Цена 700💲", want: 700},
+		{name: "heavy dollar sign with variation selector", text: "Цена 700 💲️", want: 700},
+		{name: "heavy dollar sign before number", text: "💲 650 в месяц", want: 650},
+		{name: "keyword price before emoji and stray dollar", text: "Цена 900 🔥 $", want: 900},
+		{name: "emoji between dollar and number", text: "$ 🔥 900 в месяц", want: 900},
+		{name: "money bag before number with dollar", text: "💰1200$", want: 1200},
+		{name: "dotted thousands", text: "Цена 1.500$", want: 1500},
+		{name: "spaced thousands and dollar", text: "Цена 1 500 $", want: 1500},
+		{name: "keyword colon without currency", text: "2+1, 70 м²\nцена:1500", want: 1500},
+		{name: "keyword with emoji without currency", text: "Цена 💰 1100 на год", want: 1100},
+		{name: "money emoji without keyword or currency", text: "Сдается 1+1\n💵 800\n5 этаж", want: 800},
+		{name: "english dash price", text: "Price - 1500$", want: 1500},
+		{name: "usd word", text: "Rent 950 usd per month", want: 950},
+		{name: "per month suffix", text: "500$/мес", want: 500},
+		{name: "lari word", text: "Цена 2000 лари", want: 2000},
+		{name: "lari symbol", text: "Цена 2000₾", want: 2000},
+		{name: "gel word", text: "Price 1800 GEL", want: 1800},
+		{name: "dollar word abbreviation", text: "Сдам 1+1 за 600 дол.", want: 600},
+		{name: "dollar word", text: "Сдам 1+1 за 600 долларов", want: 600},
+		{name: "deposit without currency before price", text: "Депозит 300$\nЦена: 900", want: 900},
+		{name: "deposit without currency after price", text: "💸 Цена 1000 💲\n💲 депозит 500", want: 1000},
+		{name: "keyword range prefers dollar-tagged upper bound", text: "Цена 500-600$", want: 600},
+		{name: "phone is not price", text: "Сдам 2+1\nЦена 750$\nТел +995 555000102", want: 750},
+		{name: "phone only", text: "Сдам 2+1, 60 м², 4 этаж\nТел +995 555000102", want: 0},
+		{name: "keyword area is not price", text: "💰 130 м²\n3 этаж", want: 0},
+		{name: "keyword small number is not price", text: "💰 2 месяца депозит", want: 0},
+		{name: "long word starting with dol is not currency", text: "Сдам на 12 долгих месяцев", want: 0},
+		{name: "keyword price followed by floor after comma", text: "Цена 600, 2 этаж", want: 600},
+		{name: "keyword price followed by floor", text: "Цена 700 3 этаж", want: 700},
+		{name: "keyword price followed by deposit months", text: "Стоимость 500 1 месяц депозит", want: 500},
+		{name: "keyword followed by spaced phone", text: "Цена 💰 555 123 456", want: 0},
+		{name: "money emoji followed by spaced phone", text: "💵 555 123 456", want: 0},
+		{name: "comma thousands", text: "$1,200 monthly", want: 1200},
+		{name: "room count before em dash and dollar", text: "2+1 — $650 в месяц", want: 650},
+		{name: "floor before dash and dollar", text: "Этаж 5 - $500", want: 500},
+		{name: "floor fraction before emoji and dollar", text: "🏢 12/16 🔥 $800", want: 800},
+		{name: "room count before heavy dollar and price", text: "Сдается 2+1 💲650", want: 650},
+		{name: "number sign before heavy dollar and price", text: "№12 💲700", want: 700},
+		{name: "hyphenated phone before heavy dollar", text: "📞 555-12-34-56 💲", want: 0},
+		{name: "bare range keeps upper bound", text: "500-600$", want: 600},
+		{name: "trailing dollar price before floor", text: "500$ 3 этаж", want: 500},
+		{name: "trailing dollar price before dash and floor", text: "500$ — 3 этаж", want: 500},
+		{name: "trailing dollar price before room count", text: "1500$ 2+1 Новый бульвар", want: 1500},
+		{name: "trailing dollar price before deposit months", text: "650$ 1 месяц депозит", want: 650},
+		{name: "trailing dollar price before emoji and minutes", text: "500$ 🔥 5 минут до моря", want: 500},
+		{name: "rent price before emoji and minimum months", text: "Аренда 450$ 🔑 2 месяца минимум", want: 450},
+		{name: "slash separated summary with trailing dollar price", text: "1+1 / 45 м² / 5 этаж / 450$ 🔥 1 месяц депозит", want: 450},
+		{name: "room count then trailing dollar price then floor", text: "Сдам 1+1 500$ 3 этаж", want: 500},
+		{name: "lari price with dollar equivalent", text: "Цена 2000 лари (≈750$)", want: 750},
+		{name: "gel price with dollar equivalent", text: "2000 GEL (≈750$)", want: 750},
+		{name: "lari price with approximate dollar after slash", text: "3000 лари / ~1100$", want: 1100},
+		{name: "lari symbol only", text: "Цена 2500₾ в месяц", want: 2500},
+		{name: "money emoji distance in meters word", text: "💰 300 метров от моря", want: 0},
+		{name: "keyword distance in meters word", text: "Цена 300 метров до моря", want: 0},
+		{name: "keyword distance with abbreviated meters", text: "💰 300 м. до моря", want: 0},
+		{name: "money emoji price before distance", text: "💵 600 300 метров до моря", want: 600},
+		{name: "keyword year before dollar price", text: "Цена 2024 года ремонт 600$", want: 600},
+		{name: "keyword year without currency", text: "Цена 2024 г. ремонт", want: 0},
+		{name: "floor number before dollar price", text: "Этаж 3 450$", want: 450},
+		{name: "area before dollar price", text: "45 м2 500$", want: 500},
+		{name: "glued area before dollar price", text: "Площадь 40м2 450$", want: 450},
+		{name: "spaced thousands after keyword colon", text: "Цена: 1 500$", want: 1500},
+		{name: "floor number before floor word then dollar price", text: "5 этаж 700$", want: 700},
+		{name: "summary with floor word then dollar price", text: "2+1, 60 м², 5 этаж 700$", want: 700},
+		{name: "floor word then grouped dollar price", text: "5 этаж 1 200$", want: 1200},
+		{name: "floor word directly before ungrouped dollar price", text: "Этаж: 700$", want: 700},
+		{name: "spaced international phone before heavy dollar price", text: "📞 +995 555 123 456 💲 700", want: 700},
+		{name: "glued phone before heavy dollar price", text: "📞 555123456 💲 700", want: 700},
+		{name: "grouped phone before heavy dollar price", text: "WhatsApp 555 12 34 56 💲 700", want: 700},
+		{name: "grouped phone before dollar price", text: "Тел 555 12 34 56 $700", want: 700},
+		{name: "decimal dollar price", text: "Цена 450.50$", want: 450},
+		{name: "leading dollar price before floor word", text: "$ 3 этаж", want: 0},
+		{name: "leading dollar per month", text: "$500/мес", want: 500},
+		{name: "money emoji distance to sea", text: "💰 100 м от моря", want: 0},
+		{name: "keyword followed by grouped phone", text: "Цена 💰 555 12 34 56", want: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			listing := FromChannelMessage(sources.ChannelMessage{Text: tt.text})
+			if listing.Price != tt.want {
+				t.Fatalf("expected price %d, got %d", tt.want, listing.Price)
+			}
+		})
+	}
+}
