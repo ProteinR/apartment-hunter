@@ -243,3 +243,34 @@ func TestListingCaptionSkipsHashtagOnlyTitle(t *testing.T) {
 		t.Fatalf("caption kept hashtags:\n%s", caption)
 	}
 }
+
+func TestSendListingCollageNetworkErrorHidesTokenAndKeepsCause(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	server.Close()
+	_, err := sendListingCollageNotification(context.Background(), "SECRET123", 42, ListingCollageNotification{Report: captionReport()}, listingCollageEndpoints{apiServerURL: server.URL, client: server.Client()})
+	if err == nil || strings.Contains(err.Error(), "SECRET123") || errors.Is(err, ErrListingCollageRejected) {
+		t.Fatalf("err = %v", err)
+	}
+	var netErr interface{ Timeout() bool }
+	if !errors.As(err, &netErr) {
+		t.Fatalf("cause lost: %v", err)
+	}
+}
+
+func TestRedactTokenErrorKeepsErrorChain(t *testing.T) {
+	cause := context.Canceled
+	err := redactTokenError(errors.Join(errors.New("POST https://api.telegram.org/botSECRET123/sendMessage"), cause), "SECRET123")
+	if strings.Contains(err.Error(), "SECRET123") || !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+	if redactTokenError(nil, "x") != nil {
+		t.Fatalf("nil error wrapped")
+	}
+}
+
+func TestRedactAnyBotTokenHidesTokenInURL(t *testing.T) {
+	got := redactAnyBotToken(`error do request for method sendMessage, Post "https://api.telegram.org/bot123456:AAH-x_Y9/sendMessage": EOF`)
+	if strings.Contains(got, "AAH-x_Y9") || !strings.Contains(got, "/bot<token>/sendMessage") {
+		t.Fatalf("got %s", got)
+	}
+}

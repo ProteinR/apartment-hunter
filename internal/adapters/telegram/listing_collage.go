@@ -12,6 +12,7 @@ import (
 	_ "image/png"
 	"math"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf16"
@@ -70,7 +71,7 @@ func sendListingCollageNotification(ctx context.Context, token string, chatID in
 	}
 	api, err := telegrambot.New(token, options...)
 	if err != nil {
-		return 0, err
+		return 0, redactTokenError(err, token)
 	}
 	caption := BuildListingCaption(notification.Report, notification.Hint)
 	markup := ListingNotificationKeyboard(notification.Report)
@@ -100,11 +101,10 @@ func sendListingCollageNotification(ctx context.Context, token string, chatID in
 		message, err = api.SendMessage(ctx, params)
 	}
 	if err != nil {
-		redacted := redactBotToken(err.Error(), token)
 		if errors.Is(err, telegrambot.ErrorBadRequest) {
-			return 0, fmt.Errorf("%w: %s", ErrListingCollageRejected, redacted)
+			return 0, fmt.Errorf("%w: %s", ErrListingCollageRejected, redactBotToken(err.Error(), token))
 		}
-		return 0, errors.New(redacted)
+		return 0, redactTokenError(err, token)
 	}
 	return message.ID, nil
 }
@@ -317,4 +317,30 @@ func withoutHashtags(text string) string {
 		}
 	}
 	return strings.Join(words, " ")
+}
+
+type tokenRedactedError struct {
+	message string
+	cause   error
+}
+
+func (e tokenRedactedError) Error() string {
+	return e.message
+}
+
+func (e tokenRedactedError) Unwrap() error {
+	return e.cause
+}
+
+func redactTokenError(err error, token string) error {
+	if err == nil {
+		return nil
+	}
+	return tokenRedactedError{message: redactBotToken(err.Error(), token), cause: err}
+}
+
+var botTokenInURLPattern = regexp.MustCompile(`bot\d+:[A-Za-z0-9_-]+`)
+
+func redactAnyBotToken(text string) string {
+	return botTokenInURLPattern.ReplaceAllString(text, "bot<token>")
 }

@@ -28,7 +28,7 @@ var ErrRichMessageRejected = errors.New("telegram rejected the rich message")
 func SendListingNotificationMessageID(ctx context.Context, token string, chatID int64, notification ListingNotification) (int, error) {
 	api, err := telegrambot.New(token, telegrambot.WithHTTPClient(60*time.Second, &http.Client{Timeout: 60 * time.Second}))
 	if err != nil {
-		return 0, err
+		return 0, redactTokenError(err, token)
 	}
 	params := &telegrambot.SendRichMessageParams{
 		ChatID:      chatID,
@@ -40,9 +40,9 @@ func SendListingNotificationMessageID(ctx context.Context, token string, chatID 
 	message, err := api.SendRichMessage(ctx, params)
 	if err != nil {
 		if errors.Is(err, telegrambot.ErrorBadRequest) {
-			return 0, fmt.Errorf("%w: %v", ErrRichMessageRejected, err)
+			return 0, fmt.Errorf("%w: %s", ErrRichMessageRejected, redactBotToken(err.Error(), token))
 		}
-		return 0, err
+		return 0, redactTokenError(err, token)
 	}
 	return message.ID, nil
 }

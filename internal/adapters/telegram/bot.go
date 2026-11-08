@@ -168,7 +168,7 @@ func (b *Bot) Run(ctxDone <-chan struct{}) error {
 		telegrambot.WithDefaultHandler(b.handleUpdate),
 	)
 	if err != nil {
-		return err
+		return redactTokenError(err, b.token)
 	}
 	b.notifier = func(ctx context.Context, chatID int64, text string, markup models.ReplyMarkup) error {
 		return sendMessageWithMarkup(ctx, api, chatID, text, markup)
@@ -1274,7 +1274,7 @@ func sendMessage(ctx context.Context, api *telegrambot.Bot, chatID int64, text s
 const failureReplyText = "Не получилось ответить: что-то сломалось на моей стороне. Попробуй еще раз через минуту, а если не поможет — напиши иначе."
 
 func friendlyFailure(stage string, chatID int64, err error) string {
-	fmt.Fprintf(os.Stderr, "telegram bot %s failed for chat %d: %v\n", stage, chatID, err)
+	fmt.Fprintf(os.Stderr, "telegram bot %s failed for chat %d: %s\n", stage, chatID, redactAnyBotToken(fmt.Sprint(err)))
 	return failureReplyText
 }
 
@@ -1387,7 +1387,7 @@ func SendText(ctx context.Context, token string, chatID int64, text string) erro
 func SendTextMessageID(ctx context.Context, token string, chatID int64, text string) (int, error) {
 	api, err := telegrambot.New(token, telegrambot.WithHTTPClient(20*time.Second, &http.Client{Timeout: 20 * time.Second}))
 	if err != nil {
-		return 0, err
+		return 0, redactTokenError(err, token)
 	}
 	message, err := api.SendMessage(ctx, &telegrambot.SendMessageParams{
 		ChatID:    chatID,
@@ -1401,7 +1401,7 @@ func SendTextMessageID(ctx context.Context, token string, chatID int64, text str
 		})
 	}
 	if err != nil {
-		return 0, err
+		return 0, redactTokenError(err, token)
 	}
 	return message.ID, nil
 }
@@ -1414,7 +1414,7 @@ func SendPhotoBytes(ctx context.Context, token string, chatID int64, filename st
 func SendPhotoBytesMessageID(ctx context.Context, token string, chatID int64, filename string, data []byte, caption string) (int, error) {
 	api, err := telegrambot.New(token, telegrambot.WithHTTPClient(20*time.Second, &http.Client{Timeout: 20 * time.Second}))
 	if err != nil {
-		return 0, err
+		return 0, redactTokenError(err, token)
 	}
 	message, err := api.SendPhoto(ctx, &telegrambot.SendPhotoParams{
 		ChatID: chatID,
@@ -1436,7 +1436,7 @@ func SendPhotoBytesMessageID(ctx context.Context, token string, chatID int64, fi
 		})
 	}
 	if err != nil {
-		return 0, err
+		return 0, redactTokenError(err, token)
 	}
 	return message.ID, nil
 }
