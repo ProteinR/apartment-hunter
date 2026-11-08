@@ -282,6 +282,7 @@ func (a App) telegramProcessWithContext(parent context.Context, onlyProfileID st
 		botToken:          strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
 		mapRenderer:       googlemaps.StaticMapRenderer{APIKey: strings.TrimSpace(os.Getenv("APARTMENT_HUNTER_GOOGLE_MAPS_API_KEY"))},
 		richNotifications: richNotificationsEnabled(os.Getenv("TELEGRAM_RICH_NOTIFICATIONS")),
+		cardNotifications: richNotificationsEnabled(os.Getenv("TELEGRAM_CARD_NOTIFICATIONS")),
 		out:               a.Out,
 		errOut:            a.Err,
 	}
@@ -363,6 +364,7 @@ type listingPipeline struct {
 	botToken          string
 	mapRenderer       googlemaps.StaticMapRenderer
 	richNotifications bool
+	cardNotifications bool
 	out               io.Writer
 	errOut            io.Writer
 }
@@ -408,20 +410,35 @@ func (p listingPipeline) process(ctx context.Context, profile profiles.Profile, 
 func (p listingPipeline) notify(ctx context.Context, profile profiles.Profile, message sources.ChannelMessage, result evaluation.Result) error {
 	record := result.Record
 	fmt.Fprintf(p.out, "Sending notification for %s/%d to chat %d\n", message.ChannelID, message.MessageID, profile.TelegramChatID)
-	mapImage, hasMap, mapErr := listingSearchAreaMapImage(ctx, p.store, p.mapRenderer, record)
+	mapImage, searchAreaGeoJSON, hasMap, mapErr := listingSearchAreaMapImage(ctx, p.store, p.mapRenderer, record)
 	if mapErr != nil {
 		fmt.Fprintf(p.errOut, "Telegram map skipped for %s/%d: %v\n", message.ChannelID, message.MessageID, mapErr)
 	}
 	if !hasMap {
 		mapImage = nil
 	}
-	botMessageID, sent, richNote, err := p.sendRichNotification(ctx, profile, message, result, mapImage)
+	botMessageID, sent, cardNote, albumSent, err := p.sendCardNotification(ctx, profile, message, result, mapImage, searchAreaGeoJSON)
 	if err != nil {
 		logPipelineEvent(ctx, p.pipelineLog, record, "notification_sent", "failed", err.Error())
 		return err
 	}
+	format := "card"
+	richNote := ""
+	if !sent && !albumSent {
+		format = "rich"
+		botMessageID, sent, richNote, err = p.sendRichNotification(ctx, profile, message, result, mapImage)
+		if err != nil {
+			logPipelineEvent(ctx, p.pipelineLog, record, "notification_sent", "failed", err.Error())
+			return err
+		}
+	}
 	if !sent {
-		botMessageID, err = p.sendPlainNotification(ctx, profile, message, record, mapImage)
+		format = "plain"
+		plainMap := mapImage
+		if albumSent {
+			plainMap = nil
+		}
+		botMessageID, err = p.sendPlainNotification(ctx, profile, message, record, plainMap)
 		if err != nil {
 			logPipelineEvent(ctx, p.pipelineLog, record, "notification_sent", "failed", err.Error())
 			return err
@@ -431,9 +448,34 @@ func (p listingPipeline) notify(ctx context.Context, profile profiles.Profile, m
 		logPipelineEvent(ctx, p.pipelineLog, record, "notification_saved", "failed", err.Error())
 		return err
 	}
-	logPipelineEvent(ctx, p.pipelineLog, record, "notification_sent", "sent", strings.TrimSpace(fmt.Sprintf("rich=%t map=%t photos=%d %s", sent, len(mapImage) > 0, len(result.NotificationPhotos), richNote)))
+	logPipelineEvent(ctx, p.pipelineLog, record, "notification_sent", "sent", strings.TrimSpace(fmt.Sprintf("format=%s map=%t photos=%d %s %s", format, len(mapImage) > 0, len(result.NotificationPhotos), cardNote, richNote)))
 	logPipelineEvent(ctx, p.pipelineLog, record, "notification_saved", "saved", "")
 	return nil
+}
+
+func (p listingPipeline) sendCardNotification(ctx context.Context, profile profiles.Profile, message sources.ChannelMessage, result evaluation.Result, mapImage []byte, searchAreaGeoJSON string) (int, bool, string, bool, error) {
+	if !p.cardNotifications {
+		return 0, false, "card_disabled", false, nil
+	}
+	sent, err := telegram.SendListingCardNotification(ctx, p.botToken, profile.TelegramChatID, telegram.ListingCardNotification{
+		Report:            result.ReportView,
+		MapImage:          mapImage,
+		Photos:            result.NotificationPhotos,
+		SearchAreaGeoJSON: searchAreaGeoJSON,
+		Caption:           strings.TrimSpace(listingCardCaption),
+	})
+	note := fmt.Sprintf("album=%d", sent.AlbumItems)
+	if sent.AlbumError != "" {
+		note += " album_error=" + sent.AlbumError
+	}
+	if err == nil {
+		return sent.MessageID, true, note, sent.AlbumSent, nil
+	}
+	if errors.Is(err, telegram.ErrListingCardRejected) {
+		fmt.Fprintf(p.errOut, "Telegram listing card rejected for %s/%d, falling back: %v\n", message.ChannelID, message.MessageID, err)
+		return 0, false, note + " card_error=" + err.Error(), sent.AlbumSent, nil
+	}
+	return 0, false, note, sent.AlbumSent, err
 }
 
 func (p listingPipeline) sendRichNotification(ctx context.Context, profile profiles.Profile, message sources.ChannelMessage, result evaluation.Result, mapImage []byte) (int, bool, string, error) {
@@ -480,6 +522,8 @@ func richNotificationsEnabled(value string) bool {
 		return true
 	}
 }
+
+const listingCardCaption = "💬 Ответь на карточку, что нравится или не подходит, и я подстрою поиск."
 
 const listingReplyHint = "\n\n💬 Ответь на это сообщение, что нравится или не подходит, и я подстрою поиск."
 
@@ -571,19 +615,19 @@ func listingSearchAreaMapURL(ctx context.Context, store latestSearchAreaStore, r
 	return mapURL, true, nil
 }
 
-func listingSearchAreaMapImage(ctx context.Context, store latestSearchAreaStore, renderer googlemaps.StaticMapRenderer, record domain.ListingEvaluationRecord) ([]byte, bool, error) {
+func listingSearchAreaMapImage(ctx context.Context, store latestSearchAreaStore, renderer googlemaps.StaticMapRenderer, record domain.ListingEvaluationRecord) ([]byte, string, bool, error) {
 	if !shouldSendListingSearchAreaMap(record) || store == nil {
-		return nil, false, nil
+		return nil, "", false, nil
 	}
 	geoJSON, _, err := store.LatestSearchAreaGeoJSON(ctx, record.Source.ProfileID)
 	if err != nil {
-		return nil, false, err
+		return nil, "", false, err
 	}
 	image, err := renderer.ListingSearchAreaImage(ctx, record.Listing, geoJSON)
 	if err != nil || len(image) == 0 {
-		return nil, false, err
+		return nil, geoJSON, false, err
 	}
-	return image, true, nil
+	return image, geoJSON, true, nil
 }
 
 func shouldSendListingSearchAreaMap(record domain.ListingEvaluationRecord) bool {

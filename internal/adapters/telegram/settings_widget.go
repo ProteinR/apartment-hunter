@@ -475,8 +475,12 @@ func (b *Bot) botUsername(ctx context.Context) (string, error) {
 }
 
 func (b *Bot) doTelegramJSON(request *http.Request, result any) error {
+	return callTelegramJSON(b.client, request, result)
+}
+
+func callTelegramJSON(client *http.Client, request *http.Request, result any) error {
 	method := path.Base(request.URL.Path)
-	response, err := b.client.Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		var urlErr *url.Error
 		if errors.As(err, &urlErr) {
