@@ -415,7 +415,7 @@ func (p listingPipeline) notify(ctx context.Context, profile profiles.Profile, m
 	if !hasMap {
 		mapImage = nil
 	}
-	botMessageID, sent, err := p.sendRichNotification(ctx, profile, message, result, mapImage)
+	botMessageID, sent, richNote, err := p.sendRichNotification(ctx, profile, message, result, mapImage)
 	if err != nil {
 		logPipelineEvent(ctx, p.pipelineLog, record, "notification_sent", "failed", err.Error())
 		return err
@@ -431,14 +431,14 @@ func (p listingPipeline) notify(ctx context.Context, profile profiles.Profile, m
 		logPipelineEvent(ctx, p.pipelineLog, record, "notification_saved", "failed", err.Error())
 		return err
 	}
-	logPipelineEvent(ctx, p.pipelineLog, record, "notification_sent", "sent", "")
+	logPipelineEvent(ctx, p.pipelineLog, record, "notification_sent", "sent", strings.TrimSpace(fmt.Sprintf("rich=%t map=%t photos=%d %s", sent, len(mapImage) > 0, len(result.NotificationPhotos), richNote)))
 	logPipelineEvent(ctx, p.pipelineLog, record, "notification_saved", "saved", "")
 	return nil
 }
 
-func (p listingPipeline) sendRichNotification(ctx context.Context, profile profiles.Profile, message sources.ChannelMessage, result evaluation.Result, mapImage []byte) (int, bool, error) {
+func (p listingPipeline) sendRichNotification(ctx context.Context, profile profiles.Profile, message sources.ChannelMessage, result evaluation.Result, mapImage []byte) (int, bool, string, error) {
 	if !p.richNotifications {
-		return 0, false, nil
+		return 0, false, "rich_disabled", nil
 	}
 	botMessageID, err := telegram.SendListingNotificationMessageID(ctx, p.botToken, profile.TelegramChatID, telegram.ListingNotification{
 		Report:    result.ReportView,
@@ -447,13 +447,13 @@ func (p listingPipeline) sendRichNotification(ctx context.Context, profile profi
 		ReplyHint: strings.TrimSpace(listingReplyHint),
 	})
 	if err == nil {
-		return botMessageID, true, nil
+		return botMessageID, true, "", nil
 	}
 	if errors.Is(err, telegram.ErrRichMessageRejected) {
 		fmt.Fprintf(p.errOut, "Telegram rich notification rejected for %s/%d, sending plain notification: %v\n", message.ChannelID, message.MessageID, err)
-		return 0, false, nil
+		return 0, false, "rich_error=" + err.Error(), nil
 	}
-	return 0, false, err
+	return 0, false, "", err
 }
 
 func (p listingPipeline) sendPlainNotification(ctx context.Context, profile profiles.Profile, message sources.ChannelMessage, record domain.ListingEvaluationRecord, mapImage []byte) (int, error) {

@@ -582,39 +582,61 @@ func cleanupLocalPhotoFiles(photos []domain.ApartmentPhoto) {
 
 func (p Processor) finish(ctx context.Context, started time.Time, record domain.ListingEvaluationRecord) (Result, error) {
 	var notificationPhotos [][]byte
+	photoReadNote := ""
 	if record.Status == "passed" || record.Status == "rejected_ai" {
-		notificationPhotos = readLocalPhotoFiles(record.Listing.Photos, maxNotificationPhotos)
+		var readErr error
+		notificationPhotos, readErr = readLocalPhotoFiles(record.Listing.Photos, maxNotificationPhotos)
+		photoReadNote = notificationPhotoNote(record.Listing.Photos, notificationPhotos, readErr)
 	}
 	record.Listing = listingWithoutLocalPhotoFiles(record.Listing)
 	record.Report = BuildReport(record, p.Prefs)
 	err := p.save(ctx, record)
 	if err != nil {
-		p.logPipeline(ctx, pipelineEventWithError(started, record.Source, record.Listing, "saved", "failed", "", err))
+		p.logPipeline(ctx, pipelineEventWithError(started, record.Source, record.Listing, "saved", "failed", photoReadNote, err))
 	} else {
-		p.logPipeline(ctx, pipelineEvent(started, record.Source, record.Listing, "saved", record.Status, ""))
+		p.logPipeline(ctx, pipelineEvent(started, record.Source, record.Listing, "saved", record.Status, photoReadNote))
 	}
 	return Result{Record: record, ReportView: BuildReportView(record, p.Prefs), NotificationPhotos: notificationPhotos}, err
 }
 
-func readLocalPhotoFiles(photos []domain.ApartmentPhoto, limit int) [][]byte {
+func readLocalPhotoFiles(photos []domain.ApartmentPhoto, limit int) ([][]byte, error) {
 	var images [][]byte
+	var firstErr error
 	for _, photo := range photos {
 		if len(images) >= limit {
 			break
 		}
 		if !strings.HasPrefix(photo.URL, "file://") {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("photo is not a local file: %.40s", photo.URL)
+			}
 			continue
 		}
 		data, err := os.ReadFile(strings.TrimPrefix(photo.URL, "file://"))
-		if err != nil || len(data) == 0 {
+		if err == nil && len(data) == 0 {
+			err = fmt.Errorf("photo file is empty")
+		}
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
 			continue
 		}
 		images = append(images, data)
 	}
-	return images
+	return images, firstErr
+}
+
+func notificationPhotoNote(photos []domain.ApartmentPhoto, read [][]byte, readErr error) string {
+	note := fmt.Sprintf("notification_photos=%d/%d", len(read), len(photos))
+	if readErr != nil {
+		note += " first_error=" + readErr.Error()
+	}
+	return note
 }
 
 func listingWithoutLocalPhotoFiles(listing domain.ApartmentListing) domain.ApartmentListing {
+	listing.Photos = append([]domain.ApartmentPhoto(nil), listing.Photos...)
 	for i := range listing.Photos {
 		if strings.HasPrefix(listing.Photos[i].URL, "file://") {
 			listing.Photos[i].URL = "local-photo-redacted"
