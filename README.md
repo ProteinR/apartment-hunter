@@ -1,221 +1,88 @@
 # apartment-hunter
 
-MVP сервиса для оценки квартир в аренду в Батуми по персональным критериям.
+A Telegram bot that watches rental channels and chats in Batumi and Tbilisi and sends you only the listings that match your criteria.
 
-Проект разделяет интервью пользователя, доменную модель и оценку объявления. Telegram или другой канал можно добавить позже отдельным adapter без изменения core scoring logic.
+You describe what you want in plain language ("2 rooms up to $700 near 6 May Park, with a dishwasher"). The bot turns that into structured preferences and a search area on the map. A Telegram user account (the "userbot") reads the channels you subscribe to. Every new listing goes through cheap text filters, geocoding and a PostGIS location check, then photo deduplication and a vision model that looks at the interior. Matching listings arrive as a photo collage with a score and a criteria checklist.
 
-## Структура
+The bot talks to users in Russian.
 
-- `cmd/apartment-hunter` - CLI entrypoint.
-- `internal/domain` - доменные сущности.
-- `internal/interview` - сценарий первичного опроса.
-- `internal/preferences` - сохранение и чтение `preferences.yaml`.
-- `internal/scoring` - hard filters, scoring и итоговый JSON.
-- `internal/dedup` - image fingerprinting и listing-level дедупликация.
-- `internal/adapters/cli` - CLI adapter.
-- `internal/adapters/telegram` - Telegram adapter через `github.com/go-telegram/bot` long polling.
-- `internal/adapters/telegramuserbot` - Telegram Userbot/MTProto adapter через `github.com/gotd/td` для чтения каналов.
-- `internal/profiles` - per-user profiles: Telegram chat id, preferences, channel subscriptions and cursors.
-- `internal/sources` - общий контракт источника сообщений каналов.
-- `internal/adapters/visionmock` - mock evaluator фотографий и описания.
-- `internal/adapters/openaivision` - real evaluator через OpenAI Responses API с Vision input и structured JSON output.
-- `internal/adapters/geocodingmock` - mock координат районов.
-- `internal/evaluation` - end-to-end обработка объявления: базовые фильтры, dedup, AI анализ, scoring, запись истории.
-- `internal/storage/postgres` - Postgres repository для профилей, preferences, истории проверок, image hashes и duplicate records.
-- `configs` - пример предпочтений.
-- `examples` - sample listings.
+## How it works
 
-## Запуск
+1. **Bot** (`telegram` command): a conversational agent (Claude, or any OpenAI-compatible model) manages each user's preferences, search area, sources and notification mode.
+2. **Worker** (started inside the bot process, or separately with `telegram-process`): one MTProto session of the userbot account listens to new messages in the subscribed chats and catches up on recent history for new subscriptions.
+3. **Pipeline** for every message and every subscribed profile:
+   - parse the text into a listing (price, area, rooms, address, amenities);
+   - drop non-listings and apply price, area and required-amenity filters;
+   - geocode the address with Google Maps and check it against the profile's search area in PostGIS;
+   - only then download photos, skip duplicates by perceptual image hashes, and ask the vision model about style, renovation, view and amenities;
+   - score the listing, save it to `listing_evaluations` and notify the user.
 
-Требуется Go 1.25+.
+Text and location rejections happen before any photo download or model call, so most messages cost nothing.
 
-Локальные секреты храните в `.env`:
+## What you need
 
-```bash
-cp .env.example .env
-set -a
-source .env
-set +a
-```
+- **Go 1.25+** (for local runs and tests) or **Docker**.
+- **PostgreSQL with PostGIS**. The schema is created automatically at startup (`create extension if not exists postgis`).
+- **A Telegram bot token** from [@BotFather](https://t.me/BotFather).
+- **A Telegram user account for the userbot** and its API credentials (`api_id`, `api_hash`) from [my.telegram.org](https://my.telegram.org). The bot never joins chats by itself: this account must already be a member of every channel or group you want to watch.
+- **A model API key**: `ANTHROPIC_API_KEY` (recommended), or `OPENROUTER_API_KEY` / `OPENAI_API_KEY`.
+- **A Google Maps API key** with the Geocoding API and Maps Static API enabled. Restrict the key to these two APIs and set daily quotas.
 
-```bash
-go run ./cmd/apartment-hunter interview preferences.yaml
-```
+## Configuration
 
-Команда задаст вопросы и сохранит `preferences.yaml`.
-
-Оценить пример объявления:
-
-```bash
-go run ./cmd/apartment-hunter score examples/sample_listing.json configs/default_preferences.yaml
-```
-
-По умолчанию `score` использует mock evaluator. Для реального Vision анализа через OpenAI API:
-
-```bash
-OPENAI_API_KEY=sk-... APARTMENT_HUNTER_VISION=openai \
-  go run ./cmd/apartment-hunter score listing.json configs/default_preferences.yaml
-```
-
-Опционально можно задать модель:
-
-```bash
-OPENAI_VISION_MODEL=gpt-4.1-mini
-```
-
-OpenAI adapter берет текст объявления (`title`, `description`, metadata) и фотографии из `photos[].url`, скачивает `http(s)` URL или читает локальный путь / `file://` URL, уменьшает изображения до max side `768px`, перекодирует в JPEG data URL и отправляет их в Responses API. Ответ запрашивается как structured JSON по интерфейсу `ListingInsights`:
-
-- `style`
-- `has_glossy_ceilings`
-- `has_dark_walls`
-- `has_old_renovation`
-- `windows_facing_house`
-- `view_quality`
-- `interior_quality`
-- `description_highlights`
-
-Запустить Telegram adapter:
-
-```bash
-DATABASE_URL='postgres://apartment_hunter:apartment_hunter@localhost:5432/apartment_hunter?sslmode=disable' \
-TELEGRAM_BOT_TOKEN=123:abc \
-  go run ./cmd/apartment-hunter telegram
-```
-
-В боте отправьте `/start`. Adapter использует тот же пошаговый `internal/interview` engine, что и CLI. После завершения опроса он сохраняет профиль `telegram_<chat_id>` и preferences в Postgres.
-
-Локации можно указывать словами или координатами. Если задан `APARTMENT_HUNTER_GOOGLE_MAPS_API_KEY`, бот геокодит названия через Google Maps Geocoding API. По умолчанию короткие названия ищутся с регионом `Batumi, Georgia`, чтобы `Europe Square` не резолвился в другой город. Несколько кастомных мест разделяйте `;`, потому что запятая используется в координатах и адресах:
-
-```text
-Europe Square
-41.6466, 41.6266
-Europe Square; Old Boulevard; 41.6466, 41.6266
-```
-
-Дистанция до квартиры считается по координатам через haversine. Worker сначала пытается взять координаты из текста объявления или Google Maps ссылки, например `?q=41.6466,41.6266`; если координат нет и задан Google Maps API key, он пробует геокодить текст объявления.
-
-Postgres-профили позволяют одному боту обслуживать разных людей без хардкода критериев. Каждый профиль привязан к `telegram_<chat_id>` и хранит preferences и список каналов.
-
-Каналами также можно управлять прямо из Telegram-бота: просто напишите боту «добавь @example_channel» или пришлите ссылку. Скрытые команды тоже работают:
-
-```text
-/channels
-/subscribe https://t.me/example_channel Batumi rentals
-/subscribe @example_channel Batumi rentals
-/unsubscribe @example_channel
-```
-
-Бот не вступает в чаты и группы автоматически. Сначала вступите в подходящие
-Telegram-источники вручную с аккаунта, которым запускается worker, затем
-пришлите боту public ссылки `t.me/name` или usernames `@name`. Если источники
-уже добавлены в профиль, `/channels` покажет текущий список.
-
-Вручную прочитать историю каналов через Telegram Userbot API:
-
-```bash
-TELEGRAM_API_ID=12345 \
-TELEGRAM_API_HASH=abc123 \
-TELEGRAM_PHONE=+995555000000 \
-TELEGRAM_SESSION_FILE=.telegram/userbot.session \
-TELEGRAM_MEDIA_DIR=.telegram/media \
-DATABASE_URL='postgres://apartment_hunter:apartment_hunter@localhost:5432/apartment_hunter?sslmode=disable' \
-  go run ./cmd/apartment-hunter telegram-read telegram_42
-```
-
-При первом запуске `gotd/td` запросит одноразовый Telegram code в терминале и сохранит user session в `TELEGRAM_SESSION_FILE`. Если на аккаунте включен 2FA password, задайте `TELEGRAM_PASSWORD`. Команда не скачивает фото, а выводит JSON records с текстом, ссылкой, download-token для фото и распарсенным `ApartmentListing`.
-
-Слушать только новые сообщения, сохранять историю проверки в Postgres и отправлять подходящие объявления в Telegram:
-
-```bash
-DATABASE_URL='postgres://apartment_hunter:apartment_hunter@localhost:5432/apartment_hunter?sslmode=disable' \
-TELEGRAM_BOT_TOKEN=123:abc \
-TELEGRAM_API_ID=12345 \
-TELEGRAM_API_HASH=abc123 \
-TELEGRAM_PHONE=+995555000000 \
-TELEGRAM_SESSION_FILE=.telegram/userbot.session \
-TELEGRAM_MEDIA_DIR=.telegram/media \
-OPENAI_API_KEY=sk-... \
-  go run ./cmd/apartment-hunter telegram-process
-```
-
-`telegram-process` обслуживает всех пользователей с подписками на каналы (или только указанный profile id: `telegram-process telegram_42`). Он держит одну Telegram userbot session открытой, получает `UpdateNewMessage` / `UpdateNewChannelMessage` и для каждого сообщения запускает анализ отдельно для каждого профиля, подписанного на этот канал. Для каждой новой пары профиль/канал worker один раз дочитывает последние сообщения (раз в минуту проверяет новые подписки). В stdout должны появиться строки `Listening for new Telegram messages`, `Processed ... for telegram_...` и `Sending notification ...` - по ним видно, что worker жив и что уведомление ушло в бот.
-
-У каждого пользователя свой город поиска: Батуми или Тбилиси. Бот берет город из текста запроса (`Ищу квартиру в Тбилиси ...`), команда `/city tbilisi` меняет его и сбрасывает районы и зону поиска прошлого города. По городу выбирается регион геокодинга адресов из объявлений и построение зоны на карте.
-
-Подробные pipeline/geocoding события пишутся JSONL-файлами в `APARTMENT_HUNTER_PIPELINE_LOG_DIR` и `APARTMENT_HUNTER_GEOCODING_LOG_DIR`. Для продакшена/Coolify включите `APARTMENT_HUNTER_LOG_TO_STDOUT=true`, чтобы эти же JSONL-события дублировались в container logs.
-
-Базовые отказы по цене, метражу и обязательной технике сохраняются в историю без скачивания фото и без вызова OpenAI. Если базовые фильтры прошли, userbot скачивает фото во временный local media cache, processor проверяет dedup, вызывает OpenAI Vision, считает итоговый score и сохраняет `ai_usage` с токенами и стоимостью. Если задан `TELEGRAM_BOT_TOKEN` и у профиля есть `telegram_chat_id`, worker отправляет в бот отчет по каждому обработанному сообщению из подписанных каналов, а не только по объявлениям со статусом `passed`.
-
-OpenAI Responses API возвращает `usage` с token counts, а OpenAI pricing page публикует цены за 1M tokens. По умолчанию для `gpt-4.1-mini` используются значения:
-
-```bash
-OPENAI_VISION_INPUT_PRICE_PER_MILLION_USD=0.40
-OPENAI_VISION_CACHED_INPUT_PRICE_PER_MILLION_USD=0.10
-OPENAI_VISION_OUTPUT_PRICE_PER_MILLION_USD=1.60
-```
-
-Если меняете модель, обновите эти env значения по актуальной странице [OpenAI API pricing](https://platform.openai.com/docs/pricing/). Поля сохраняются в Postgres отдельно, чтобы в истории было видно количество токенов, цену за миллион токенов и рассчитанную стоимость конкретного объявления в USD.
-
-## Docker
-
-Docker Compose автоматически читает `.env` из директории проекта. Создайте файл и заполните значения:
+Copy the example and fill it in:
 
 ```bash
 cp .env.example .env
 ```
 
-```bash
-docker compose up --build
-```
+Required:
 
-Эта команда запускает Postgres и Telegram preferences bot. Если заполнены
-`TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, а также `TELEGRAM_PHONE` или
-`TELEGRAM_SESSION_STRING`, бот автоматически стартует worker для всех
-пользователей в том же процессе. Пользователи без preferences или каналов
-пропускаются, пока не настроят поиск. Доступ к боту ограничивают
-`TELEGRAM_ALLOWED_CHAT_IDS` и `TELEGRAM_ALLOWED_USERNAMES` (через запятую);
-сообщения остальных бот молча игнорирует. Сначала откройте бота в Telegram, отправьте `/start`, пройдите
-интервью и добавьте каналы. Автоматического вступления нет: сначала вступите в
-подходящие чаты вручную, затем пришлите public ссылки или usernames:
+| Variable | Purpose |
+|---|---|
+| `DATABASE_URL` | Postgres connection string. |
+| `TELEGRAM_BOT_TOKEN` | Bot token from BotFather. |
+| `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | Userbot API credentials. Without them the bot runs without the worker. |
+| `TELEGRAM_SESSION_STRING` or `TELEGRAM_PHONE` | Userbot login: a ready session string, or a phone number for an interactive login. |
+| `ANTHROPIC_API_KEY` or `OPENROUTER_API_KEY` / `OPENAI_API_KEY` | Model for the conversational agent, the preferences parser and photo analysis. |
+| `APARTMENT_HUNTER_GOOGLE_MAPS_API_KEY` | Geocoding and search-area maps. |
 
-```text
-https://t.me/example_channel
-@another_rent_channel
-```
+Access control:
 
-Минимальные env переменные:
+| Variable | Purpose |
+|---|---|
+| `TELEGRAM_ALLOWED_CHAT_IDS`, `TELEGRAM_ALLOWED_USERNAMES` | Comma-separated allowlist. |
+| `APARTMENT_HUNTER_PROFILE_ID` | `telegram_<chat id>`. That chat id is added to the allowlist. `docker-compose.yaml` defaults it to `telegram_0`, which already turns the allowlist on. |
+| `TELEGRAM_ADMIN_CHAT_IDS` | Admins. The userbot account is always an admin. |
 
-```bash
-TELEGRAM_BOT_TOKEN=123:abc
-TELEGRAM_API_ID=12345
-TELEGRAM_API_HASH=abc123
-TELEGRAM_PHONE=+995555000000
-TELEGRAM_SESSION_STRING=
-OPENAI_API_KEY=sk-...
-APARTMENT_HUNTER_PROFILE_ID=telegram_42
-APARTMENT_HUNTER_GOOGLE_MAPS_API_KEY=...
-APARTMENT_HUNTER_GEOCODING_REGION=Batumi, Georgia
-```
+When the allowlist is empty (no allowed ids or usernames and no `APARTMENT_HUNTER_PROFILE_ID`), anyone who finds the bot can use it and spend your model and Maps budget. Otherwise a stranger's first message sends every admin an Allow/Deny request, and admins can grant or revoke access by asking the bot. Set `APARTMENT_HUNTER_PROFILE_ID=telegram_<your chat id>` and put your chat id into `TELEGRAM_ADMIN_CHAT_IDS`, then send `/start` to the bot yourself first: Telegram bots cannot message a user who has never started them, so admin requests would not reach you.
 
-Postgres доступен в compose как отдельный сервис `postgres`, данные хранятся в volume `postgres-data`. Profiles, preferences и channel subscriptions хранятся в Postgres. Telegram userbot session и временно скачанные media files живут в volume `telegram-session`.
+Optional:
 
-Для первого userbot login удобнее запустить worker интерактивно, чтобы ввести одноразовый Telegram code (пока работает контейнер `bot`, второй worker не запускайте: оба обработают сообщения и уведомления придут дважды):
+| Variable | Default | Purpose |
+|---|---|---|
+| `ANTHROPIC_MODEL` | `claude-haiku-5-5` | Model for text tasks. |
+| `ANTHROPIC_VISION_MODEL` | `ANTHROPIC_MODEL` | Model for photo analysis. |
+| `ANTHROPIC_EFFORT` | empty | Reasoning effort passed to Anthropic. |
+| `OPENROUTER_BASE_URL`, `OPENAI_BASE_URL` | OpenRouter | OpenAI-compatible endpoint used without Anthropic. The preferences parser and photo analysis default to OpenRouter even when only `OPENAI_API_KEY` is set, so set `OPENAI_BASE_URL=https://api.openai.com/v1` to use OpenAI directly. |
+| `OPENROUTER_PREFERENCES_MODEL`, `OPENAI_PREFERENCES_MODEL` | `openai/gpt-4o-mini` (parser), `gpt-5.4-mini` (agent) | Text model without Anthropic. |
+| `OPENROUTER_VISION_MODEL`, `OPENAI_VISION_MODEL` | `openai/gpt-4o-mini`; `.env.example` and compose set `gpt-4.1-mini` | Vision model without Anthropic. Use the provider's model id format (`openai/...` on OpenRouter). |
+| `*_VISION_*_PRICE_PER_MILLION_USD` | Haiku 5.5 / gpt-4.1-mini prices | Prices used to record the cost of each analysis. |
+| `TELEGRAM_PASSWORD` | empty | 2FA password for an interactive userbot login. |
+| `TELEGRAM_SESSION_FILE` | `.telegram/userbot.session` | Where an interactive login stores its session. |
+| `TELEGRAM_MEDIA_DIR` | `.telegram/media` | Temporary photo downloads; files are deleted after processing. |
+| `TELEGRAM_COLLAGE_NOTIFICATIONS` | `true` | Send listings as one photo collage. |
+| `TELEGRAM_RICH_NOTIFICATIONS` | `true` | Fallback rich message when the collage fails. |
+| `APARTMENT_HUNTER_GEOCODING_REGION` | `Batumi, Georgia` | Region appended to short addresses. |
+| `APARTMENT_HUNTER_GEOCODING_LANGUAGE` | `en` | Geocoding result language. |
+| `MCP_CONTEXT_TTL_HOURS` | `24` | Conversation history older than this is summarized. |
+| `APARTMENT_HUNTER_PIPELINE_LOG_DIR`, `APARTMENT_HUNTER_GEOCODING_LOG_DIR` | `.logs/pipeline`, `.logs/geocoding` | JSONL decision logs. |
+| `APARTMENT_HUNTER_PIPELINE_LOG_RETENTION_DAYS`, `APARTMENT_HUNTER_GEOCODING_LOG_RETENTION_DAYS` | `3` | Log retention. |
+| `APARTMENT_HUNTER_LOG_TO_STDOUT` | `false` | Also print the JSONL events to stdout. |
 
-```bash
-docker compose run --rm worker telegram-process
-```
+## Userbot login
 
-Если уже есть сгенерированный Telethon session string, можно задать его в `.env`:
-
-```bash
-TELEGRAM_SESSION_STRING=1...
-```
-
-`TELEGRAM_SESSION_STRING` имеет приоритет над `TELEGRAM_SESSION_FILE`, поэтому интерактивный login и volume `telegram-session` для userbot session в этом режиме не нужны. Строка должна быть создана с теми же `TELEGRAM_API_ID` и `TELEGRAM_API_HASH`, которые указаны для `apartment-hunter`.
-
-При использовании `TELEGRAM_SESSION_STRING` переменные `TELEGRAM_PHONE` и `TELEGRAM_PASSWORD` можно оставить пустыми. Они нужны только для интерактивного логина с кодом Telegram, когда session string не задан.
-
-Сгенерировать session string можно прямо из этого репозитория:
+The easiest way is a session string generated once on your machine:
 
 ```bash
 python3 -m venv .venv
@@ -224,102 +91,117 @@ pip install -r scripts/requirements-session.txt
 python scripts/session_string_generator.py --qr
 ```
 
-## Postgres history
+The script reads `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from `.env` and logs in by QR code (or `--phone`). Put the printed string into `TELEGRAM_SESSION_STRING`. It must be created with the same API credentials. With a session string, `TELEGRAM_PHONE` and `TELEGRAM_PASSWORD` can stay empty.
 
-Repository создает таблицы при старте:
+Without a session string, set `TELEGRAM_PHONE` and run the worker interactively once: it asks for the login code in the terminal and saves the session to `TELEGRAM_SESSION_FILE`.
 
-- `listing_evaluations` - каждое проверенное объявление, исходный listing JSON, source/message link, report, score, insights, duplicate info, status, token usage и `cost_usd`;
-- `listing_images` - fingerprints/hash фотографий без хранения самих фото;
-- `listing_duplicates` - связи duplicate listing -> canonical listing.
+Run only one process per userbot session. Two processes with the same session break each other, and Telegram may revoke the session.
 
-Фото не сохраняются в Postgres. Telegram-фото скачиваются только после прохождения базовых текстовых фильтров и только как локальные рабочие файлы в `TELEGRAM_MEDIA_DIR`, чтобы hasher и OpenAI Vision могли прочитать bytes. После обработки worker удаляет локальные `file://` фото. Для будущего S3-compatible хранилища достаточно добавить storage adapter и записывать object keys рядом с `listing_images`.
+## Run with Docker
 
-Собрать бинарь:
+`docker-compose.yaml` contains the application only and joins an external network named `coolify` (the production setup). For a local run, create that network and start PostGIS on it under the host name `postgres`, which the default `DATABASE_URL` in compose expects:
 
 ```bash
-go build -o apartment-hunter ./cmd/apartment-hunter
-./apartment-hunter score examples/sample_listing.json configs/default_preferences.yaml
+docker network create coolify
+docker run -d --name postgres --network coolify \
+  -e POSTGRES_USER=apartment_hunter \
+  -e POSTGRES_PASSWORD=apartment_hunter \
+  -e POSTGRES_DB=apartment_hunter \
+  -v apartment-hunter-pg:/var/lib/postgresql/data \
+  postgis/postgis:16-3.4
 ```
 
-## Формат результата
+Leave `DATABASE_URL` out of `.env` (it points at `localhost` for non-Docker runs), or set it to the `postgres` host.
 
-`score` возвращает JSON:
+If you log in with `TELEGRAM_PHONE` instead of a session string, do the interactive login first, before the bot starts, because the `bot` container has no terminal to type the code into:
 
-- `passed_hard_filters`
-- `rejection_reasons`
-- `score_total`
-- `score_breakdown`
-- `short_summary`
+```bash
+docker compose run --rm worker
+```
 
-`telegram-process` дополнительно сохраняет и отправляет человекочитаемый отчет по каждому объявлению. Пример:
+Enter the code (and the 2FA password if asked), wait for `Listening for new Telegram messages`, then stop it with Ctrl+C. The session is saved in the `telegram-session` volume. Keep `TELEGRAM_PHONE` set afterwards: the worker starts only when it or `TELEGRAM_SESSION_STRING` is present.
+
+Then start the bot:
+
+```bash
+docker compose up --build -d bot
+```
+
+The `bot` service runs the bot and, when the userbot variables are set, the worker in the same process. The `telegram-session` volume keeps the userbot session file, temporary media and JSONL logs. Do not run the `worker` service next to `bot`, or every notification arrives twice.
+
+## Run without Docker
+
+Start PostGIS (for example the container above with `-p 5432:5432`), keep the `localhost` `DATABASE_URL` from `.env.example`, then:
+
+```bash
+set -a; source .env; set +a
+go run ./cmd/apartment-hunter telegram
+```
+
+## Using the bot
+
+1. Join the rental channels and groups you want to watch with the userbot account.
+2. Open your bot in Telegram and send `/start`.
+3. Describe what you are looking for. The bot asks short follow-up questions, shows a summary and saves it after you confirm. It builds the search area from the districts and landmarks you name (a 1.5 km circle by default) and can send you the map.
+4. Add sources by sending links or usernames (`https://t.me/example_channel`, `@example_channel`), or ask the bot to suggest sources other users of your city read. The bot refuses usernames the userbot cannot resolve and warns when the userbot is not a member.
+5. Change anything later in conversation, or with `/settings` (a settings card with budget, area, dishwasher/oven and districts). `/reset` clears the conversation history and keeps the saved criteria.
+
+By default you get only listings that passed. Ask the bot to show every processed listing (debug mode) when you want to see why things were rejected. Under each listing, the «Не подходит» button marks it as unsuitable, and a text reply to the listing message («too dark», «ok but too far») lets the bot adjust the criteria with you.
+
+Supported cities are Batumi and Tbilisi (`internal/cities`). Batumi has extra shortcuts such as the sea-distance corridor and the Pushkin street boundary.
+
+## CLI commands
 
 ```text
-Отчет по объявлению
-Apartment near 6 May Park
-Статус: прошло
-Итог: 84/100
-Сообщение: https://t.me/example_channel/123
-
-Текст объявления:
-Apartment near 6 May Park
-500 USD
-55 m2
-
-Критерии:
-- ✅ Метраж (55.0 м2 при минимуме 45.0)
-- ✅ Цена (500, цель ближе к 400, максимум 600)
-- ✅ Локация (6 May Park)
-- ✅ Техника (обязательная техника есть)
-- ✅ Ремонт (modern)
-- ✅ Вид из окна (6/10)
-
-Баллы:
-- Расположение: 10/10 (6 May Park)
-- Метраж: 10/10 (55.0 м2 при минимуме 45.0)
-- Ремонт: 9/10
-- Вид из окна: 6/10
-- Цена: 8/10 (500, цель ближе к 400, максимум 600)
-- Техника: 10/10 (обязательная техника есть)
-
-OpenAI: gpt-4.1-mini, tokens 1842, cost $0.001215
+apartment-hunter telegram                     bot, plus the worker when userbot variables are set
+apartment-hunter telegram-process [profile]   worker only, for all profiles or one
+apartment-hunter telegram-read <profile>      print recent messages of a profile's sources as JSON
+apartment-hunter score listing.json prefs.yaml  score one listing against a YAML preferences file
+apartment-hunter interview [prefs.yaml]       write a YAML preferences file by answering questions
 ```
 
-Для объявлений, которые не прошли базовый этап, отчет все равно сохраняется и отправляется в бот. В чеклисте будут `✅`, `❌` и `-`: прочерк означает, что требование не задано или этап не запускался, например ремонт и вид не анализируются после отказа по цене/метражу. Обязательная техника проверяется по тексту и, если объявление прошло цену/метраж, по фото через Vision.
+`score` uses a mock vision evaluator unless `APARTMENT_HUNTER_VISION=openai` is set. Try it with the bundled examples:
 
-Для цены можно задать не только максимальный бюджет, но и нижнюю целевую границу `min_budget`. Если указан диапазон, например `400-600`, `400` считается идеальной ценой и получает `10/10`, цена ближе к `600` получает меньше баллов, а цена выше `max_budget` отсекается.
+```bash
+go run ./cmd/apartment-hunter score examples/sample_listing.json configs/default_preferences.yaml
+```
 
-## Тесты
+## Data and logs
+
+Postgres tables worth knowing:
+
+- `profiles`: chat id, current preferences, notification mode, conversation history.
+- `profile_channels`: subscriptions of each profile.
+- `user_search_profiles`: preference snapshots and the PostGIS search area.
+- `listing_evaluations`: every processed message with status, score, report, model usage and cost.
+- `listing_images`, `listing_duplicates`: photo fingerprints and duplicate links (photos themselves are not stored).
+- `bot_access`: access requests and decisions.
+
+Evaluation statuses: `rejected_non_listing`, `rejected_basic`, `rejected_location`, `duplicate`, `rejected_ai`, `passed`, `failed`.
+
+The worker writes one JSON object per line to `.logs/pipeline/pipeline-YYYY-MM-DD.jsonl` (every stage of every listing) and `.logs/geocoding/geocoding-YYYY-MM-DD.jsonl` (the exact address sent to Google and the result). Filter them by `listing_id`, `profile_id` or `channel_username`.
+
+## Tests
 
 ```bash
 go test ./...
 ```
 
-## Dedup Pipeline
+## Project layout
 
-Перед Vision/LLM анализом новое объявление можно пропустить через `internal/dedup`:
+- `cmd/apartment-hunter`: entrypoint.
+- `internal/adapters/cli`: command wiring, the listing worker and notifications.
+- `internal/adapters/telegram`: the bot, access control, settings card and collage rendering.
+- `internal/adapters/telegramuserbot`: MTProto client (history fetch and live updates).
+- `internal/adapters/mcpagent`: the conversational agent and its tools.
+- `internal/adapters/openaipreferences`, `internal/adapters/openaivision`: preferences parser and photo analysis (Anthropic or OpenAI-compatible).
+- `internal/adapters/googlemaps`: geocoding and static maps.
+- `internal/listingparser`: listing text parsing.
+- `internal/preferenceparser`: search-area geometry.
+- `internal/evaluation`, `internal/scoring`, `internal/dedup`: pipeline, scoring and image deduplication.
+- `internal/storage/postgres`: schema and persistence.
+- `internal/cities`: supported cities.
+- `scripts`: session string generator and test helpers.
+- `housing_facts`: notes about the Batumi rental market.
 
-1. Скачать или получить bytes фотографий.
-2. Посчитать fingerprints: raw `sha256`, perceptual full image hash, perceptual center crop 80%, perceptual center crop 60%, full-image dHash.
-3. Сравнить с сохраненными `listing_images` через `ListingDeduplicator`.
-4. Если найден duplicate/probable duplicate, сохранить запись в `listing_duplicates` и не вызывать Vision evaluator.
-5. Если дубля нет, сохранить fingerprints как canonical listing и продолжить Vision/scoring pipeline.
-
-Текущие thresholds:
-
-- exact `sha256` match - strong match;
-- perceptual distance `<= 6` - strong match;
-- perceptual distance `<= 10` - weak match;
-- crop/full cross-match distance `<= 8` - weak match, `<= 6` - strong match.
-
-Listing-level правила:
-
-- `3+` matched images - duplicate, confidence `0.95`;
-- `2` strong matched images - duplicate, confidence `0.90`;
-- `1` strong + `2` weak matches - probable duplicate, confidence `0.85`;
-- только `1` matched image - не auto-deduplicate.
-
-Hasher реализован на стандартной библиотеке Go: average-hash используется как легкий perceptual hash, dHash считается отдельно. Это позволяет не тащить сетевую зависимость в MVP. Если понадобится более строгий pHash, adapter можно заменить на библиотеку вроде `github.com/corona10/goimagehash`, не меняя `ListingDeduplicator` и repository interfaces.
-
-## Vision adapter
-
-`internal/scoring` зависит от интерфейса `InsightsEvaluator`. Его реализуют `visionmock` и `openaivision`; домен и scoring logic не зависят от конкретного provider.
+`AGENTS.md` is a more detailed map of the code for contributors and coding agents.

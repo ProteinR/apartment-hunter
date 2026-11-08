@@ -98,7 +98,7 @@ The main flow is `evaluation.Processor.ProcessMessage`:
 5. Check location against the latest saved search area with PostGIS.
 6. Download Telegram photos only after the cheap filters pass.
 7. Check image deduplication.
-8. Call OpenAI Vision for interior/view/amenity insights.
+8. Call the vision model (`openaivision`: Anthropic or OpenAI-compatible) for interior/view/amenity insights.
 9. Score the listing and save `listing_evaluations`.
 10. Optionally send a Telegram report and search-area map.
 
@@ -145,11 +145,9 @@ Production is deployed in Coolify as project `Apartment-hunter bot`, application
 
 Use the Coolify MCP endpoint `https://coolify.memruk.dev/mcp` with a Bearer API token supplied by the user or environment; never commit the token. The current Coolify MCP server exposes inventory tools such as `get_infrastructure_overview`, `list_applications`, `get_application`, `list_databases`, and `get_database`, but it does not expose a log-reading tool. Agents can use MCP to confirm app/database status, but cannot rely on it alone to fetch container stdout/stderr or JSONL files unless the MCP server gains log tools later.
 
-Coolify container logs show the process stdout/stderr. The detailed pipeline/geocoding JSONL logs are file logs controlled by `APARTMENT_HUNTER_PIPELINE_LOG_DIR` and `APARTMENT_HUNTER_GEOCODING_LOG_DIR`; set `APARTMENT_HUNTER_LOG_TO_STDOUT=true` to duplicate those JSONL events into Coolify logs. In `docker-compose.yaml`, only `/app/.telegram` is mounted as the `telegram-session` volume; default `/app/.logs/...` files are therefore container-local and may disappear on redeploy. For persistent production JSONL logs, set:
+Coolify container logs show the process stdout/stderr. The detailed pipeline/geocoding JSONL logs are file logs controlled by `APARTMENT_HUNTER_PIPELINE_LOG_DIR` and `APARTMENT_HUNTER_GEOCODING_LOG_DIR`. In `docker-compose.yaml` only `/app/.telegram` is mounted (volume `telegram-session`), and compose defaults the log dirs to `/app/.telegram/logs/pipeline` and `/app/.telegram/logs/geocoding` with `APARTMENT_HUNTER_LOG_TO_STDOUT=true`, so production JSONL logs survive redeploys and also appear in Coolify logs. Overriding a log dir outside `/app/.telegram` makes it container-local again.
 
-- `APARTMENT_HUNTER_PIPELINE_LOG_DIR=/app/.telegram/logs/pipeline`
-- `APARTMENT_HUNTER_GEOCODING_LOG_DIR=/app/.telegram/logs/geocoding`
-- `APARTMENT_HUNTER_LOG_TO_STDOUT=true`
+`docker-compose.yaml` has no Postgres service: production uses the standalone Coolify database, and the app joins the external `coolify` network. The local setup with a PostGIS container is described in `README.md`.
 
 If a future agent must debug production via Coolify, first check Coolify app/database status via MCP, then use Coolify UI/API/SSH or an added MCP log tool for container logs. For deep listing decisions, inspect the persisted JSONL log directory above and Postgres `listing_evaluations`.
 
@@ -197,20 +195,19 @@ For geo issues:
 
 For expensive pipeline issues:
 
-- Basic and location rejections happen before photo download and OpenAI Vision.
-- Local Telegram photos are downloaded under `TELEGRAM_MEDIA_DIR`, then redacted from saved records as `local-photo-redacted`.
+- Basic and location rejections happen before photo download and the vision model.
+- Local Telegram photos are downloaded under `TELEGRAM_MEDIA_DIR`, deleted after processing, and redacted from saved records as `local-photo-redacted`.
 - AI usage/cost is stored in `listing_evaluations` when Vision runs.
 
 ## Testing Changes via Telegram MCP
 
-Когда агент вносит любые изменения, связанные с ботом (включая логику команд, парсер предпочтений, работу с базой данных или формат отчетов/сообщений, отправляемых ботом), он **ОБЯЗАН** протестировать эти изменения интеграционными тестами с помощью Telegram MCP.
+Any change that affects the bot (command logic, the preferences parser, database access, or the format of reports and messages the bot sends) **must** be checked end to end through Telegram MCP, in addition to `go test ./...`.
 
-- См. [telegram-bot-communication skill](.agents/skills/telegram-bot-communication/SKILL.md) для получения подробных инструкций о командах бота, режимах работы и конфигурировании.
-- Агенты **ОБЯЗАНЫ** проверять изменения интерактивно с использованием Telegram MCP-интерфейса бота.
-- **КРИТИЧЕСКИ ВАЖНО:** Не используйте браузерные инструменты или открытие браузера для тестов.
-- **КАК ТЕСТИРОВАТЬ:** Используйте глобальный MCP-сервер `https://tg-mcp.memruk.dev/mcp`. Для этого вы можете использовать любые MCP-совместимые инструменты или общаться с ботом напрямую в Telegram. Убедитесь, что ваш MCP-клиент настроен на этот URL и использует правильный токен авторизации. В локальной среде предпочитайте передавать токен через `TELEGRAM_MCP_AUTH_TOKEN`; не сохраняйте токен в файлах репозитория.
-- Если скрипт тестирования обнаружит ошибки, неверное поведение или логи падения, агент должен считать валидацию проваленной и вернуть код на доработку.
-- После успешного прохождения валидации агент **ОБЯЗАН** немедленно закоммитить все рабочие и конфигурационные файлы.
+- See the [telegram-bot-communication skill](.agents/skills/telegram-bot-communication/SKILL.md) for bot commands, modes and configuration. `.agents/skills` is a symlink to `Workflows/`.
+- Talk to the bot interactively through the Telegram MCP interface. Do not use a browser for these checks.
+- Use the MCP server `https://tg-mcp.memruk.dev/mcp` with any MCP-compatible client, or message the bot directly in Telegram. Pass the auth token through `TELEGRAM_MCP_AUTH_TOKEN` locally; never save it in repository files.
+- Treat errors, wrong behavior or crash logs found during the check as a failed validation and return the change for rework.
+- After the check passes, commit the working and configuration files right away.
 
 ## Housing Facts Knowledge Base
 
@@ -219,5 +216,6 @@ The repository contains a housing facts knowledge base in `housing_facts/` organ
 When users provide summaries, articles, or new facts, agents must:
 - Store the raw source text in `housing_facts/raw/<slug>.md`.
 - Extract and compile the insights to `housing_facts/wiki/general.md` and/or building-specific pages under `housing_facts/wiki/buildings/`.
-- Cross-reference compiled facts back to the raw source file using markdown links: `[[Source](file:///Users/dmemruk/development/services/apartment-hunter/housing_facts/raw/<file>.md#L<line>)]`.
+- Cross-reference compiled facts back to the raw source file with relative markdown links, for example from `wiki/general.md`: `[[Source](../raw/<file>.md#L<line>)]`.
+- Third-party raw sources (video summaries, articles) stay local: add them to `.gitignore`, as done for `raw/video_zapavalov_batumi_rent.md`.
 - **Token Optimization:** Avoid token-heavy ASCII or Unicode diagrams, directory trees with characters like `│` or `├──`, and horizontal lines. Use simple, compact markdown lists. Keep content highly dense and direct.
