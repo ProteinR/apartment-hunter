@@ -20,8 +20,6 @@ const (
 	accessCallbackPrefix   = "access:"
 	accessAllowAction      = "allow"
 	accessDenyAction       = "deny"
-	adminAccountTimeout    = 10 * time.Second
-	adminAccountRetry      = time.Minute
 	accessReminderInterval = time.Hour
 	accessRequestWindow    = time.Hour
 	accessRequestsPerHour  = 10
@@ -40,20 +38,7 @@ type AccessStore interface {
 	ListAccess(ctx context.Context) ([]access.Entry, error)
 }
 
-type AdminAccount interface {
-	AccountUserID(ctx context.Context) (int64, error)
-}
-
 type notifier func(ctx context.Context, chatID int64, text string, markup models.ReplyMarkup) error
-
-type adminRegistry struct {
-	mu          sync.Mutex
-	chatIDs     []int64
-	account     AdminAccount
-	resolved    bool
-	lookingUp   bool
-	lastAttempt time.Time
-}
 
 type accessThrottle struct {
 	mu            sync.Mutex
@@ -70,44 +55,12 @@ func WithAccessStore(store AccessStore) Option {
 
 func WithAdminChats(ids []int64) Option {
 	return func(bot *Bot) {
-		bot.admins.chatIDs = append(bot.admins.chatIDs, ids...)
-	}
-}
-
-func WithAdminAccount(account AdminAccount) Option {
-	return func(bot *Bot) {
-		bot.admins.account = account
-	}
-}
-
-func (r *adminRegistry) list(ctx context.Context) []int64 {
-	r.mu.Lock()
-	shouldLookUp := !r.resolved && !r.lookingUp && r.account != nil && time.Since(r.lastAttempt) >= adminAccountRetry
-	if shouldLookUp {
-		r.lookingUp = true
-		r.lastAttempt = time.Now()
-	}
-	account := r.account
-	r.mu.Unlock()
-
-	if shouldLookUp {
-		lookupCtx, cancel := context.WithTimeout(ctx, adminAccountTimeout)
-		id, err := account.AccountUserID(lookupCtx)
-		cancel()
-		r.mu.Lock()
-		r.lookingUp = false
-		if err == nil {
-			r.resolved = true
-			if id != 0 && !slices.Contains(r.chatIDs, id) {
-				r.chatIDs = append(r.chatIDs, id)
+		for _, id := range ids {
+			if id != 0 && !slices.Contains(bot.adminChats, id) {
+				bot.adminChats = append(bot.adminChats, id)
 			}
 		}
-		r.mu.Unlock()
 	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return slices.Clone(r.chatIDs)
 }
 
 func (t *accessThrottle) allowReminder(chatID int64) bool {
@@ -145,7 +98,7 @@ func (t *accessThrottle) allowAdminRequest() bool {
 }
 
 func (b *Bot) IsAdmin(ctx context.Context, chatID int64) bool {
-	return chatID != 0 && slices.Contains(b.admins.list(ctx), chatID)
+	return chatID != 0 && slices.Contains(b.adminChats, chatID)
 }
 
 func (b *Bot) restrictedAccess() bool {
@@ -218,7 +171,7 @@ func (b *Bot) authorizeMessage(ctx context.Context, message *models.Message) boo
 }
 
 func (b *Bot) requestAccess(ctx context.Context, entry access.Entry) {
-	admins := b.admins.list(ctx)
+	admins := b.adminChats
 	if len(admins) == 0 {
 		if b.accessThrottle.allowReminder(entry.TelegramChatID) {
 			b.notify(ctx, entry.TelegramChatID, accessClosedText, removeKeyboard())
@@ -362,7 +315,7 @@ func (b *Bot) ListBotUsers(ctx context.Context) (string, error) {
 		return accessOpenModeText, nil
 	}
 	var lines []string
-	for _, id := range b.admins.list(ctx) {
+	for _, id := range b.adminChats {
 		lines = append(lines, fmt.Sprintf("- id %d: администратор", id))
 	}
 	for _, id := range b.allowedChats {

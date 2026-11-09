@@ -207,9 +207,6 @@ func (a App) telegram(args []string) error {
 		telegram.WithAccessStore(store),
 		telegram.WithAdminChats(parseChatIDs(os.Getenv("TELEGRAM_ADMIN_CHAT_IDS"))),
 	)
-	if userbot != nil {
-		botOptions = append(botOptions, telegram.WithAdminAccount(userbot))
-	}
 	err = telegram.New(token, outputDir, botOptions...).Run(ctx.Done())
 	stop()
 	return err

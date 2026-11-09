@@ -239,21 +239,10 @@ func TestStrangerWithoutAdminsGetsClosedNotice(t *testing.T) {
 	}
 }
 
-type fakeAdminAccount struct {
-	calls int
-	id    int64
-}
-
-func (a *fakeAdminAccount) AccountUserID(ctx context.Context) (int64, error) {
-	a.calls++
-	return a.id, nil
-}
-
-func TestUserbotAccountIsAdmin(t *testing.T) {
-	account := &fakeAdminAccount{id: 42}
-	bot := New("test-token", t.TempDir(), WithAdminAccount(account))
-	if !bot.IsAdmin(context.Background(), 42) || bot.IsAdmin(context.Background(), 43) || account.calls != 1 {
-		t.Fatalf("expected the userbot account to be the cached admin, calls=%d", account.calls)
+func TestOnlyConfiguredChatsAreAdmins(t *testing.T) {
+	bot := New("test-token", t.TempDir(), WithAdminChats([]int64{42, 0, 42}))
+	if !bot.IsAdmin(context.Background(), 42) || bot.IsAdmin(context.Background(), 43) || bot.IsAdmin(context.Background(), 0) || len(bot.adminChats) != 1 {
+		t.Fatalf("expected only chat 42 to be an admin, got %v", bot.adminChats)
 	}
 }
 

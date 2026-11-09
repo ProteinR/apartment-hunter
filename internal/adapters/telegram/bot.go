@@ -39,7 +39,7 @@ type Bot struct {
 	mu               sync.Mutex
 	chatLocks        map[int64]*sync.Mutex
 	accessStore      AccessStore
-	admins           adminRegistry
+	adminChats       []int64
 	accessThrottle   accessThrottle
 	notifier         notifier
 	allowedChats     []int64

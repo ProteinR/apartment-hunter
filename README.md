@@ -53,7 +53,7 @@ Access control:
 |---|---|
 | `TELEGRAM_ALLOWED_CHAT_IDS`, `TELEGRAM_ALLOWED_USERNAMES` | Comma-separated allowlist. |
 | `APARTMENT_HUNTER_PROFILE_ID` | `telegram_<chat id>`. That chat id is added to the allowlist. `docker-compose.yaml` defaults it to `telegram_0`, which already turns the allowlist on. |
-| `TELEGRAM_ADMIN_CHAT_IDS` | Admins. The userbot account is always an admin. |
+| `TELEGRAM_ADMIN_CHAT_IDS` | Admins: only these chat ids see the access list and grant or revoke access. The userbot account is not an admin unless listed. |
 
 When the allowlist is empty (no allowed ids or usernames and no `APARTMENT_HUNTER_PROFILE_ID`), anyone who finds the bot can use it and spend your model and Maps budget. Otherwise a stranger's first message sends every admin an Allow/Deny request, and admins can grant or revoke access by asking the bot. Set `APARTMENT_HUNTER_PROFILE_ID=telegram_<your chat id>` and put your chat id into `TELEGRAM_ADMIN_CHAT_IDS`, then send `/start` to the bot yourself first: Telegram bots cannot message a user who has never started them, so admin requests would not reach you.
 
