@@ -38,7 +38,7 @@ The bot has no reply keyboard and no modes. Every text message goes to the Claud
 - Replying to a listing report is feedback and goes to `ProcessFeedback`.
 - History: up to 40 recent messages are sent verbatim. Above that, older messages and messages older than `MCP_CONTEXT_TTL_HOURS` (default 24) are folded by one extra LLM call into a `summary` entry stored in `mcp_history` and added to the system prompt. If summarization fails, history is kept up to 80 messages.
 - `/mcp` only explains that a separate mode is no longer needed.
-- Access: strangers get an invitation notice and the admin (userbot account or `TELEGRAM_ADMIN_CHAT_IDS`) receives Allow/Deny buttons. The admin can also write «открой доступ @name», «закрой доступ @name», «кто пользуется ботом».
+- Access: strangers get an invitation notice and the admins in `TELEGRAM_ADMIN_CHAT_IDS` (production: only @dm_sg; the userbot account is not an admin) receive Allow/Deny buttons. The admin can also write «открой доступ @name», «закрой доступ @name», «кто пользуется ботом».
 
 ## Hidden Legacy Commands
 
